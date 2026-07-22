@@ -347,7 +347,7 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 **Exact contracts:**
 
 - `command_router.new` accepts only five read-only ports for status, audit, guild listing, live verification, and existing report path. Parse one control-free line as exact lowercase `cgce <command>` with no shell/quote interpretation or arguments. Every successful response contains revision, mode, target, and state; payloads are detached JSON-safe values. `cgce apply` (including any attempted arguments) returns `MUTATION_BUILD_UNAVAILABLE` without calling any port, regardless of mode, token, or state.
-- `scheduler.retry` receives explicit positive `max_attempts`, nonnegative finite delay, injected schedule/cancel callbacks, and a probe; it probes immediately, permits at most one outstanding timer, and terminates as `READY|EXHAUSTED|FAILED|CANCELLED`. Probe/callback errors fail closed, late callbacks are no-ops, cancel is idempotent, and even a synchronous fake scheduler cannot exceed the bound.
+- `scheduler.retry` receives explicit positive `max_attempts`, nonnegative finite delay, injected schedule/cancel callbacks, optional `on_terminal(result)`, and a probe; it returns a generation-guarded controller exposing detached `status()` and idempotent `cancel()`. The first probe runs immediately, so status distinguishes `PENDING` from terminal `READY|EXHAUSTED|FAILED|CANCELLED`; at most one timer is outstanding. Probe/callback errors fail closed, late callbacks are no-ops, and even a synchronous fake scheduler cannot exceed the bound or deliver terminal twice.
 - `scheduler.rescan_interval(nil)` is 60 seconds and rejects values below 30. `scheduler.cache_decision` always requests live inspection at startup, even for a matching completed cache. Fallback may skip only when revision, target, fingerprint, and owner all exactly match; malformed/missing data inspects conservatively and multiple drift reasons are deterministic.
 - `platform_preflight` parses dense argv plus either a full `OptionSettings=(...)` assignment or tuple RHS using quote/escape/nested-parenthesis awareness—never comma splitting. Duplicate CLI/INI keys, malformed quoting/tuples, and control characters fail closed without exposing raw arguments or secrets.
 - Preflight requires `-publiclobby`; matching integer `-port`, `-publicport`, and `PublicPort` in 1–65535; `CrossplayPlatforms` containing `Steam`, `PS5`, and `Mac`; `bAllowClientMod=False`; and `LogFormatType=Json`. Xbox is optional. `AllowConnectPlatform` and `IsServer=true` are never compatibility evidence. Even a green diagnostic reports certification `UNPROVEN` until Gate B.
@@ -362,16 +362,32 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 ### Task 8: UE4SS read-only runtime adapter and Discovery Build
 
 **Files:**
+- Modify: `CrossplayGuildChestExpander/Scripts/binding_manifest.lua`
+- Modify: `tests/unit/binding_manifest_spec.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/discovery_probe.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/ue4ss_adapter.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/revision_guard.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/world_ready.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/guild_repository.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/container_resolver.lua`
+- Create: `tests/support/fake_ue4ss.lua`
 - Create: `tests/integration/discovery_adapter_spec.lua`
 - Create: `docs/discovery-runbook.md`
 
 **Interfaces:**
-- Produces: `ue4ss_adapter.capabilities()`, `read_revision()`, `find_all_of(class_name)`, `static_find_object(path)`, `resolve_property(object, descriptor)`, `validate_function(descriptor)`, `register_hook(path, pre, post)`, `unregister_hook(pre_id, post_id)`, and discovery-only metadata for `execute_in_game_thread` without invoking mutation.
+- Produces: a self-checksummed non-authoritative `discovery_probe` parser; `ue4ss_adapter.new(strict_api_port)` with narrow read/observe/close methods; `revision_guard.check`; bounded `world_ready`; detached `guild_repository`; exact `container_resolver`. Generic hook, function-call, game-thread, raw property, and TArray-write APIs are not exported.
+
+**Exact contracts:**
+
+- The empty-symbol Discovery Manifest remains incapable. A separate `discovery_probe_request` carries owner-supplied exact candidate paths and signatures, permits partial evidence, self-checksums canonical JSON, and rejects fuzzy/wildcard values. It is explicitly non-authoritative and is never accepted by certification or `mutation_guard`; automatic class/property inference remains unsupported.
+- Runtime property descriptors add exact `owner_path`, `member_name`, observed full `path`, and canonical `type_signature`; function/class/struct descriptors retain exact absolute identity and signatures. Expand logical descriptors to cover world-ID provenance, guild name, exact guild-chest class/container ID, and the complete Task 4 snapshot projection: empty/occupied discriminator, static ID, dynamic GUID, quantity, durability canonicalization, and metadata-hash inputs. No userdata `tostring()` may stand in for a verified conversion.
+- `ue4ss_adapter` accepts only an allow-listed fakeable UE4SS v3.0.1 API surface and reports mutation/raw-property-write/TArray-write/function-invoke as false. `StaticFindObject` receives exact absolute UObject paths; `FindAllOf` uses only a short name derived from an already verified UClass and is treated as loaded-instance inventory, never proof that an absent object is unsupported.
+- Property reads first resolve the exact owner and member, then compare observed full name/signature before `GetPropertyValue`. TArray iteration copies `elem:get()` values in engine order behind a private callback. `SetPropertyValue`, `ImportText`, `ContainerPtrToValuePtr`, `elem:set`, `Empty`, index assignment, constructors, raw addresses, and candidate UFunction invocation are prohibited and trapped in tests.
+- Expose only `observe_function(descriptor, observer)`: verify the UFunction first, provide detached phase/path metadata only, discard observer return values, and never expose `RemoteUnrealParam` or UObject context. `/Script/` registration uses a no-op pre plus post observer; non-`/Script/` is post-only. Handles retain exact path plus both IDs; `close` invalidates the generation, unregisters active handles in reverse exactly once, and continues deterministic cleanup after individual failures.
+- Live revision is a strict injected reader returning one positive integer. Until Gate A proves an authoritative runtime property/function or server-log source, it reports unavailable; `Info.json.MinRevision` is never used as live revision. Missing exact manifest yields `UNSUPPORTED`; duplicate/malformed/checksum/type mismatch yields `BLOCKED`; even an exact read-only manifest confers no mutation capability.
+- World readiness does immediate probe, optional exact observation, post-registration race re-probe, and bounded polling. Hook events merely wake a new probe. Selected-world singleton/cardinality checks must pass before `READY`; timeout blocks. Generation fences make timer/hook/game-thread callbacks after cancel no-ops; UE4SS delayed callbacks are not claimed physically cancellable without real evidence.
+- Guild/container traversal uses only exact selected-world managers and verified read projections. A missing configured chest ID performs zero resolution. Before Gate A, exact guild-chest class inventory + verified container-ID property is used; `find_container_function` is validated but never invoked. Results are detached, epoch-bound, and reject ambiguous IDs, wrong world/class/owner, or general containers.
+- Every Gate A evidence record states status, kind, exact query/path, observed full name, signature and coverage, provenance API, and `invoked=false`. `NOT_LOADED`, partial function signature coverage, or any missing snapshot projection keeps acceptance blocked.
 
 - [ ] **Step 1: Write failing contract tests** against the selected stable UE4SS v3.0.1 API surface using fakes. Prove missing APIs/symbols yield `UNSUPPORTED`/`BLOCKED`, `/Script/` and non-`/Script/` hook callback contracts are distinguished, hook IDs are unregistered on shutdown/reload, and fuzzy matching/raw writes are absent.
 - [ ] **Step 2: Verify RED**, implement exact-name reflection wrappers and read-only capability detection, verify GREEN.
@@ -388,6 +404,16 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 
 **Interfaces:**
 - Produces: `cgce.new(read_only_dependencies)`, `app:start()`, `app:shutdown()`, `app:handle_command(line)`.
+
+**Exact contracts:**
+
+- Startup order is lifecycle/dependency allow-list → path containment → config → one exact live revision read → manifest/checksum/reflection → platform diagnostic → bounded readiness → exact conflict inventory → fresh audit → existing-ledger live comparison → always-on approval verification in apply mode → predicted terminal state → operational report build + atomic durable persist/read-back → actual terminal transition. Bootstrap hard failures stop at the first stage; post-audit findings are sorted and retained.
+- Immediate readiness transitions `PREFLIGHT → AUDIT`; a pending controller transitions exactly once through `WAITING`. The package policy is one immediate probe plus at most 59 one-second retries. Exhaustion/probe/schedule/callback failure blocks; late callbacks are fenced.
+- Platform misconfiguration, pre-Gate partial collision coverage, malformed existing ledger, or disabled safety intent flags remain visible diagnostics in audit mode but block apply mode. Audit topology/snapshot blockers always block. If no other blocker exists, missing or invalid fresh-audit approval yields `AWAITING_APPROVAL`; a valid token still ends only at discovery `AUDIT_COMPLETE` and `cgce apply` remains unavailable.
+- `require_operator_approval=false`, `verify_on_startup=false`, `write_migration_ledger=false`, and `fail_fast=false` never skip approval, fresh live audit, ledger verification, integrity failure, or report persistence. Discovery writes only its current operational report; it never writes a migration ledger.
+- Predict final state before persistence but transition only after the receipt proves exact bytes/checksums. Report build/persist/read-back failure uses `audit_blocked → BLOCKED`; no stale report or receipt is reused. `UNSUPPORTED` is reserved for a valid live revision with no exact supported manifest/API; malformed or mismatched trust data is `BLOCKED`.
+- Construction rejects unknown or write-capable dependencies. The only allowed observation hook is verified world-ready; mutation/new-guild/resize/dirty/replication paths are never registered, and no `ExecuteInGameThread` or UObject write is callable.
+- Shutdown first invalidates its generation, cancels each timer once, and releases every registered observation handle in reverse once; cleanup continues after errors without replacing the original failure. Shutdown is idempotent, duplicate start is rejected, and reload requires successful cleanup followed by a fresh `cgce.new` epoch.
 
 - [ ] **Step 1: Write failing startup tests** for unsupported revision, invalid config, path escape, missing report path, audit default, world-ready retry, conflict detection, and zero write-capable hook registration.
 - [ ] **Step 2: Verify RED**, implement dependency-injected read-only orchestration, verify GREEN.
