@@ -14,7 +14,18 @@ local function class_candidate(path)
     }
 end
 
-local function property_candidate()
+local function property_candidate(logical_name)
+    if logical_name ~= nil then
+        local owner = "/OwnerSupplied/ExactOwner/" .. logical_name
+        local member = "Exact_" .. logical_name
+        return {
+            kind = "property",
+            owner_path = owner,
+            member_name = member,
+            path = owner .. ":" .. member,
+            type_signature = "Property<" .. logical_name .. ">",
+        }
+    end
     return {
         kind = "property",
         owner_path = "/OwnerSupplied/ExactOwner",
@@ -31,6 +42,19 @@ local function request()
         authoritative = false,
         mutation_capability = false,
         candidates = {
+            world_ready_state_property = {
+                property_candidate("world_ready_state_property"),
+            },
+            guild_class = { class_candidate("/OwnerSupplied/ExactGuildClass") },
+            selected_world_guild_manager_property = {
+                property_candidate("selected_world_guild_manager_property"),
+            },
+            selected_world_container_manager_property = {
+                property_candidate("selected_world_container_manager_property"),
+            },
+            guild_chest_container_manager_property = {
+                property_candidate("guild_chest_container_manager_property"),
+            },
             guild_manager_class = { class_candidate() },
             world_id_property = { property_candidate() },
         },
@@ -65,6 +89,11 @@ describe("discovery_probe.parse", function()
         a.equal(false, discovery_probe.mutation_capability(handle))
         a.equal(detached.checksum, discovery_probe.checksum(handle))
         a.equal(nil, detached.candidates.guild_name_property)
+        a.equal(
+            "property",
+            detached.candidates.selected_world_guild_manager_property[1].kind
+        )
+        a.equal("class", detached.candidates.guild_class[1].kind)
 
         detached.candidates.world_id_property[1].path = "/Forged/AfterParse"
         a.equal(

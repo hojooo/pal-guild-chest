@@ -6,14 +6,19 @@ local sha256 = require("CrossplayGuildChestExpander.Scripts.sha256")
 
 local logical_kinds = {
     world_ready_function = "function",
+    world_ready_state_property = "property",
     selected_world_class = "class",
     world_id_property = "property",
+    selected_world_guild_manager_property = "property",
+    selected_world_container_manager_property = "property",
     guild_manager_class = "class",
+    guild_class = "class",
     guild_list_property = "property",
     guild_id_property = "property",
     guild_name_property = "property",
     guild_chest_container_id_property = "property",
     guild_chest_class = "class",
+    guild_chest_container_manager_property = "property",
     container_manager_class = "class",
     find_container_function = "function",
     container_id_property = "property",
@@ -160,9 +165,14 @@ describe("binding_manifest.parse", function()
         end
 
         for _, logical_name in ipairs({
+            "world_ready_state_property",
             "world_id_property",
+            "selected_world_guild_manager_property",
+            "selected_world_container_manager_property",
+            "guild_class",
             "guild_name_property",
             "guild_chest_class",
+            "guild_chest_container_manager_property",
             "container_id_property",
             "slot_occupancy_discriminator_property",
             "item_static_id_property",

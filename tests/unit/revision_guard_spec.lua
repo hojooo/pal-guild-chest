@@ -6,14 +6,19 @@ local sha256 = require("CrossplayGuildChestExpander.Scripts.sha256")
 
 local logical_kinds = {
     world_ready_function = "function",
+    world_ready_state_property = "property",
     selected_world_class = "class",
     world_id_property = "property",
+    selected_world_guild_manager_property = "property",
+    selected_world_container_manager_property = "property",
     guild_manager_class = "class",
+    guild_class = "class",
     guild_list_property = "property",
     guild_id_property = "property",
     guild_name_property = "property",
     guild_chest_container_id_property = "property",
     guild_chest_class = "class",
+    guild_chest_container_manager_property = "property",
     container_manager_class = "class",
     find_container_function = "function",
     container_id_property = "property",
@@ -139,7 +144,7 @@ describe("revision_guard.check", function()
         a.equal("[]", json.encode(result.errors))
         a.equal(1, calls.read)
         a.equal(1, calls.load)
-        a.equal(27, calls.inspect)
+        a.equal(32, calls.inspect)
         a.equal(0, calls.invoke)
     end)
 
@@ -170,7 +175,7 @@ describe("revision_guard.check", function()
         }, revision_guard.binding_metadata(session))
         a.equal(1, calls.read)
         a.equal(1, calls.load)
-        a.equal(27, calls.inspect)
+        a.equal(32, calls.inspect)
         a.equal(0, calls.invoke)
     end)
 
@@ -291,7 +296,7 @@ describe("revision_guard.check", function()
         a.equal("CGCE-REV-CHECK-SUPERSEDED", outer_result.errors[1].code)
         a.equal("session", outer_result.errors[1].field)
         a.equal(nil, outer_session)
-        a.equal(27, outer_calls.inspect)
+        a.equal(32, outer_calls.inspect)
         a.equal("SUPPORTED", nested_result.status)
         a.equal(runtime.checksum, revision_guard.binding_metadata(nested_session).manifest_checksum)
     end)
@@ -334,7 +339,7 @@ describe("revision_guard.check", function()
             descriptor("world_id_property"),
             revision_guard.descriptor(session, "world_id_property")
         )
-        a.equal(27, calls.inspect)
+        a.equal(32, calls.inspect)
         a.equal(0, calls.invoke)
     end)
 
@@ -515,7 +520,7 @@ describe("revision_guard.check", function()
         local type_result = revision_guard.check(type_context)
         a.equal("BLOCKED", type_result.status)
         a.equal("CGCE-MAN-TYPE-MISMATCH", type_result.errors[1].code)
-        a.equal(27, type_calls.inspect)
+        a.equal(32, type_calls.inspect)
         a.equal(0, type_calls.invoke)
     end)
 
@@ -611,7 +616,7 @@ describe("revision_guard.check", function()
         local result = revision_guard.check(context)
         a.equal("SUPPORTED", result.status)
         a.equal(1, calls.read)
-        a.equal(27, calls.inspect)
+        a.equal(32, calls.inspect)
     end)
 
     it("captures binding validation functions so public module slot reassignment cannot grant authority", function()
