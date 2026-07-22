@@ -34,6 +34,7 @@ function fake_ue4ss.new()
         array_callback_non_nil = 0,
         constructor = 0,
         tostring = 0,
+        raw_eq = 0,
     }
 
     local object_records = setmetatable({}, { __mode = "k" })
@@ -364,6 +365,22 @@ function fake_ue4ss.new()
     function control.invalidate(raw)
         local record = object_records[raw] or property_records[raw]
         assert(record).valid = false
+    end
+
+    function control.make_raw_eq_true(left, right)
+        assert(object_records[left])
+        assert(object_records[right])
+        assert(not rawequal(left, right))
+        local equality_metatable = {}
+        for key, value in pairs(object_metatable) do
+            equality_metatable[key] = value
+        end
+        equality_metatable.__eq = function()
+            counters.raw_eq = counters.raw_eq + 1
+            return true
+        end
+        setmetatable(left, equality_metatable)
+        setmetatable(right, equality_metatable)
     end
 
     function control.fire(path, phase, ...)

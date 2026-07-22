@@ -217,6 +217,34 @@ describe("ue4ss_adapter exact object resolution", function()
         assert_zero_write_calls(fake.counters())
     end)
 
+    it("uses primitive identity without invoking raw equality metamethods", function()
+        local port, fake = fake_ue4ss.new()
+        local left_descriptor = {
+            kind = "struct",
+            path = "/Runtime/MetamethodLeft",
+            type_signature = "Object<ExactGuildChestClass>",
+        }
+        local right_descriptor = {
+            kind = "struct",
+            path = "/Runtime/MetamethodRight",
+            type_signature = "Object<ExactGuildChestClass>",
+        }
+        local left_raw = install_exact(fake, left_descriptor)
+        local right_raw = install_exact(fake, right_descriptor)
+        fake.make_raw_eq_true(left_raw, right_raw)
+        local adapter = ue4ss_adapter.new(port)
+        local left = ue4ss_adapter.resolve_exact(adapter, left_descriptor)
+        local right = ue4ss_adapter.resolve_exact(adapter, right_descriptor)
+        local before = fake.counters()
+
+        a.equal(false, ue4ss_adapter.same_object(adapter, left, right))
+
+        local after = fake.counters()
+        a.equal(0, after.raw_eq)
+        assert_no_counter_delta(before, after)
+        assert_zero_write_calls(after)
+    end)
+
     it("rejects forged, cross-adapter, closed, stale, and poisoned handles without port calls", function()
         local port, fake = fake_ue4ss.new()
         local descriptor = class_descriptor()
