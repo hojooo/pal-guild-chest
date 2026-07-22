@@ -417,6 +417,9 @@ function json.encode(value)
             if current == 0 then
                 return "0"
             end
+            if math.type(current) == "integer" then
+                return tostring(current)
+            end
             return (string.format("%.17g", current):gsub(",", "."))
         end
         if value_type == "string" then
