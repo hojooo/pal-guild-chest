@@ -446,6 +446,172 @@ describe("scheduler.retry", function()
         end
     end)
 
+    it("coalesces a wake reentered by cancellation before probing again", function()
+        for _, cancel_succeeds in ipairs({ true, false }) do
+            local callbacks = {}
+            local tokens = {}
+            local cancel_calls = 0
+            local probes = 0
+            local terminal_calls = 0
+            local controller
+            controller = scheduler.retry(options({
+                schedule = function(_, callback)
+                    callbacks[#callbacks + 1] = callback
+                    local token = { generation = #callbacks }
+                    tokens[#tokens + 1] = token
+                    return token
+                end,
+                cancel = function(token)
+                    cancel_calls = cancel_calls + 1
+                    a.equal(tokens[1], token)
+                    local nested = wake(controller)
+                    a.equal("PENDING", nested.state)
+                    a.equal(1, nested.attempts)
+                    a.equal(1, #tokens)
+                    if not cancel_succeeds then
+                        return false
+                    end
+                end,
+                on_terminal = function(value)
+                    terminal_calls = terminal_calls + 1
+                    if not cancel_succeeds then
+                        a.equal("FAILED", value.state)
+                    end
+                end,
+            }), function()
+                probes = probes + 1
+                return false
+            end)
+
+            local current = wake(controller)
+            a.equal(1, cancel_calls)
+            if cancel_succeeds then
+                a.equal("PENDING", current.state)
+                a.equal(2, current.attempts)
+                a.equal(2, probes)
+                a.equal(2, #tokens)
+                a.equal(0, terminal_calls)
+            else
+                a.equal("FAILED", current.state)
+                a.equal(1, current.attempts)
+                a.equal(1, probes)
+                a.equal(1, #tokens)
+                a.equal(1, terminal_calls)
+            end
+
+            callbacks[1]()
+            a.equal(cancel_succeeds and 2 or 1, probes)
+        end
+    end)
+
+    it("honors a cancel reentered while wake is cancelling the pending timer", function()
+        for _, cancel_succeeds in ipairs({ true, false }) do
+            local callbacks = {}
+            local tokens = {}
+            local cancel_calls = 0
+            local probes = 0
+            local terminal_calls = 0
+            local controller
+            controller = scheduler.retry(options({
+                schedule = function(_, callback)
+                    callbacks[#callbacks + 1] = callback
+                    local token = { generation = #callbacks }
+                    tokens[#tokens + 1] = token
+                    return token
+                end,
+                cancel = function(token)
+                    cancel_calls = cancel_calls + 1
+                    a.equal(tokens[1], token)
+                    local nested = cancel(controller)
+                    a.equal("PENDING", nested.state)
+                    a.equal(1, nested.attempts)
+                    a.equal(1, #tokens)
+                    if not cancel_succeeds then
+                        return false
+                    end
+                end,
+                on_terminal = function(value)
+                    terminal_calls = terminal_calls + 1
+                    a.equal(cancel_succeeds and "CANCELLED" or "FAILED", value.state)
+                end,
+            }), function()
+                probes = probes + 1
+                return false
+            end)
+
+            local current = wake(controller)
+            a.equal(cancel_succeeds and "CANCELLED" or "FAILED", current.state)
+            a.equal(1, current.attempts)
+            a.equal(1, probes)
+            a.equal(1, #tokens)
+            a.equal(1, cancel_calls)
+            a.equal(1, terminal_calls)
+
+            callbacks[1]()
+            wake(controller)
+            cancel(controller)
+            a.equal(1, probes)
+            a.equal(1, cancel_calls)
+            a.equal(1, terminal_calls)
+        end
+    end)
+
+    it("honors a cancel reentered while cleaning up a timer returned after wake", function()
+        for _, cancel_succeeds in ipairs({ true, false }) do
+            local callbacks = {}
+            local tokens = {}
+            local cancel_calls = 0
+            local probes = 0
+            local terminal_calls = 0
+            local controller
+            controller = scheduler.retry(options({
+                max_attempts = 3,
+                schedule = function(_, callback)
+                    callbacks[#callbacks + 1] = callback
+                    local token = { generation = #callbacks }
+                    tokens[#tokens + 1] = token
+                    if #callbacks == 2 then
+                        a.equal("PENDING", wake(controller).state)
+                    end
+                    return token
+                end,
+                cancel = function(token)
+                    cancel_calls = cancel_calls + 1
+                    a.equal(tokens[2], token)
+                    local nested = cancel(controller)
+                    a.equal("PENDING", nested.state)
+                    a.equal(2, nested.attempts)
+                    if not cancel_succeeds then
+                        return false
+                    end
+                end,
+                on_terminal = function(value)
+                    terminal_calls = terminal_calls + 1
+                    a.equal(cancel_succeeds and "CANCELLED" or "FAILED", value.state)
+                end,
+            }), function()
+                probes = probes + 1
+                return false
+            end)
+
+            callbacks[1]()
+            local current = status(controller)
+            a.equal(cancel_succeeds and "CANCELLED" or "FAILED", current.state)
+            a.equal(2, current.attempts)
+            a.equal(2, probes)
+            a.equal(2, #tokens)
+            a.equal(1, cancel_calls)
+            a.equal(1, terminal_calls)
+
+            callbacks[2]()
+            wake(controller)
+            cancel(controller)
+            a.equal(2, probes)
+            a.equal(1, cancel_calls)
+            a.equal(1, terminal_calls)
+        end
+    end)
+
     it("does not schedule after a probe reentrantly cancels the controller", function()
         local callback
         local schedule_calls = 0

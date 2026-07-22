@@ -125,6 +125,8 @@ function scheduler.retry(options, probe)
     local generation = 0
     local pumping = false
     local pump_requested = false
+    local cancelling_timer = false
+    local cancel_requested = false
     local terminal_delivered = false
     local terminal_defer_depth = 0
     local result = nil
@@ -198,6 +200,7 @@ function scheduler.retry(options, probe)
         generation = generation + 1
         timer = nil
         pump_requested = false
+        cancel_requested = false
         state = terminal_state
         terminal_error = err
         if terminal_defer_depth == 0 then
@@ -221,7 +224,9 @@ function scheduler.retry(options, probe)
     end
 
     local function cancel_handle(handle)
+        cancelling_timer = true
         local ok, result_value, returned_error = pcall(cancel_timer, handle)
+        cancelling_timer = false
         if not ok or returned_error ~= nil or result_value == false then
             callback_failure("cancel", "timer cancellation callback failed")
             return false
@@ -252,7 +257,10 @@ function scheduler.retry(options, probe)
             if not ok or callback_error ~= nil then
                 callback_failure("schedule", "schedule callback failed")
             elseif not fired and token ~= nil then
-                cancel_handle(token)
+                local cancelled = cancel_handle(token)
+                if cancelled and cancel_requested and state == "PENDING" then
+                    finish("CANCELLED", nil)
+                end
             end
             end_terminal_scope()
             return
@@ -368,6 +376,10 @@ function scheduler.retry(options, probe)
         if state ~= "PENDING" then
             return snapshot()
         end
+        if cancelling_timer then
+            cancel_requested = true
+            return snapshot()
+        end
 
         begin_terminal_scope()
         generation = generation + 1
@@ -387,6 +399,10 @@ function scheduler.retry(options, probe)
 
     local function wake_method()
         if state ~= "PENDING" then
+            return snapshot()
+        end
+        if cancelling_timer then
+            pump_requested = true
             return snapshot()
         end
 
@@ -410,7 +426,9 @@ function scheduler.retry(options, probe)
                 return snapshot()
             end
         end
-        if state == "PENDING" then
+        if cancel_requested then
+            finish("CANCELLED", nil)
+        elseif state == "PENDING" then
             request_pump()
         end
         end_terminal_scope()
