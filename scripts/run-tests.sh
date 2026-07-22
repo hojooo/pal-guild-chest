@@ -12,7 +12,7 @@ fi
 cd "$repository_root"
 
 if [ "$#" -eq 0 ]; then
-    set -- tests/unit/*.lua
+    set -- tests/unit/*.lua tests/integration/*.lua
 fi
 
 exec "$lua_runtime" tests/run.lua "$@"
