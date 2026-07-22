@@ -185,9 +185,23 @@ a.equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", sha2
 - Create: `CrossplayGuildChestExpander/Scripts/bindings/README.md`
 - Create: `tests/unit/config_spec.lua`
 - Create: `tests/unit/binding_manifest_spec.lua`
+- Create: `tests/unit/certification_spec.lua`
 
 **Interfaces:**
 - Produces: `config.parse(text) -> validated_config`; `binding_manifest.parse(text) -> manifest`; `binding_manifest.verify_types(manifest, adapter) -> ok, errors`; `certification.verify(release_artifact, pinned_checksum, revision, profile) -> certified_slots`.
+
+**Exact contracts:**
+
+- `constants.lua` defines versions `config=1.1`, `manifest=1.0`, `certification=1.0`; profile `windows-dedicated-ps5-macos-required`; required clients `SteamWindows,PS5,Mac`; optional client `Xbox`; candidates `54,120,256,358`; release certification checksum is absent in Discovery Build.
+- Errors are tables `{code=<stable code>, field=<field or nil>, detail=<non-secret detail>}`. Config codes use `CGCE-CFG-*`, manifest codes `CGCE-MAN-*`, certification codes `CGCE-CERT-*`; approval tokens are never copied into diagnostics.
+- Config allows exactly the 21 PRD keys from `config_version` through `structured_log`. Values are never coerced. Required clients equal the canonical ordered triple; optional clients are a unique subset of `{"Xbox"}`; certified targets are unique ascending candidates; guild IDs are opaque non-empty UTF-8 strings; include/exclude are unique and disjoint; fallback is an integer ≥30; `expand_only=true`; apply with required approval needs a non-empty token.
+- `config.certified_target_slots` is only a local restriction. Production target authorization is the intersection of config values and the build-pinned certification artifact; adding `358` to config alone never authorizes it.
+- A discovery manifest allows exactly `manifest_version,kind,game_revision,symbols,tested_platform_matrix,checksum`, requires `kind="discovery"` and empty symbols, and can confer no mutation capability.
+- A runtime manifest additionally requires `source_audit_checksum`; exact logical symbol keys cover world readiness, guild manager/list/ID/chest ID, container manager/find/owner, slot array, empty-slot type, resize, dirty, replication, new-guild hook, container-in-use, and fatal-safe-stop descriptors. Descriptor keys/types are strict and reflection verification is read-only; candidates are never invoked.
+- `tested_platform_matrix` is non-authoritative metadata. Only the certification artifact authorizes release slots.
+- Manifest/artifact self-checksum is SHA-256 over canonical JSON after removing the top-level `checksum`; a release build separately pins the expected checksum.
+- A certification artifact binds exact revision, profile, binding-manifest checksum, Gate A checksum, release-report checksum, exact required clients, and per-slot evidence. Every authorized slot has one all-true evidence record for each required client; PS5 additionally requires Community Server list and DualSense last-slot evidence.
+- `MinRevision` never appears in runtime authorization; exact live revision equality is mandatory.
 
 - [ ] **Step 1: Write failing config contract tests** covering the exact default, unknown keys, profile lock, required clients, include/exclude overlap, minimum rescan 30, expand-only lock, certification allow-list, and apply approval presence. Prove that adding `358` to config alone does not make it certified.
 
