@@ -215,6 +215,29 @@ GREEN command:
 
 Exit status: `0`; all `11` certification tests passed.
 
+### Contract regression RED/GREEN — deferred apply approval validation
+
+The parser previously rejected `mode=apply` with an empty `approval_token` before a fresh audit checksum existed. That made the PRD FR-007/AT-014 `AWAITING_APPROVAL` orchestration path unreachable. Approval validity belongs after audit/report persistence; Task 3 only validates that the token is a string.
+
+RED command:
+
+```sh
+./scripts/run-tests.sh tests/unit/config_spec.lua
+```
+
+Exit status: `1`. The new regression `defers an empty apply approval token to audit orchestration without granting authority` reached the obsolete `CGCE-CFG-APPROVAL` branch. Because that branch raises a structured table, the current test runner also reported its known failure-formatting error (`string expected, got table`). No production code had been changed.
+
+GREEN commands:
+
+```sh
+./scripts/run-tests.sh tests/unit/config_spec.lua
+./scripts/run-tests.sh
+git diff --check -- CrossplayGuildChestExpander/Scripts/config.lua tests/unit/config_spec.lua
+third_party/lua-5.4.8/src/luac -p CrossplayGuildChestExpander/Scripts/config.lua tests/unit/config_spec.lua
+```
+
+Exit status: `0` for every command. The focused suite reported `12` passing config tests, and the fresh repository suite reported `90` passing tests. The regression proves that an otherwise valid apply config retains the empty string while adding no mutation, certification, or production-slot authority. A separate assertion preserves rejection of non-string tokens, and non-empty token values are still not copied into diagnostics.
+
 ## Final verification
 
 Commands:
@@ -234,6 +257,7 @@ A production-only static scan found no definition or call of `resize`, `append`,
 ## Self-review
 
 - Configuration accepts exactly the 21 PRD keys, requires every key, preserves JSON value types, and returns only the decoded validated values. It adds no authorization fields.
+- Empty apply approval tokens parse so the read-only audit can run and later reach `AWAITING_APPROVAL`; parsing itself still grants no authority. Token/checksum validation remains a downstream post-audit responsibility.
 - `certification_mode=true` permits parsing a candidate target for a future isolated test-world flow but confers no mutation or production authority. That authorization remains deferred to post-Gate-A Task 12.
 - Local `certified_target_slots` cannot authorize release slots. `certification.verify` returns only slots present in a build-pinned, self-checksummed artifact with exactly one complete evidence record for every required client.
 - Each client evidence record has a lowercase SHA-256 evidence reference and the exact 26-field Tier-0 common matrix. PS5 has the exact additional 8-field Community Server and DualSense matrix. Missing, false, unknown, duplicate-client, or malformed-checksum evidence fails closed before any slot is returned.
@@ -248,6 +272,7 @@ A production-only static scan found no definition or call of `resize`, `append`,
 
 - `92e4865` — `feat: add config and revision trust validation`
 - `d8d6749` — `fix: require complete Tier 0 certification evidence`
+- `0dd7341` — `fix: defer apply approval validation until audit`
 
 ## Concerns
 
