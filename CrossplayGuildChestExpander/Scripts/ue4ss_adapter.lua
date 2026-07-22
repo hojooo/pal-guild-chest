@@ -738,6 +738,13 @@ function ue4ss_adapter.inventory_loaded(handle, class_handle)
     return result, length == 0 and "NOT_LOADED" or "LOADED"
 end
 
+function ue4ss_adapter.same_object(handle, left_handle, right_handle)
+    local adapter = require_adapter(handle, false)
+    local left = require_object(handle, adapter, left_handle)
+    local right = require_object(handle, adapter, right_handle)
+    return left.raw == right.raw
+end
+
 function ue4ss_adapter.read_property(handle, object_handle, value)
     local adapter = require_adapter(handle, false)
     local object = require_object(handle, adapter, object_handle)

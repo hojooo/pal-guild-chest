@@ -82,6 +82,12 @@ local function assert_zero_write_calls(counters)
     end
 end
 
+local function assert_no_counter_delta(before, after)
+    for key, value in pairs(before) do
+        a.equal(value, after[key])
+    end
+end
+
 describe("ue4ss_adapter strict read-only port", function()
     it("copies only the exact UE4SS 3.0.1 read and observe allow-list", function()
         local port, fake = fake_ue4ss.new()
@@ -170,6 +176,105 @@ describe("ue4ss_adapter strict read-only port", function()
 end)
 
 describe("ue4ss_adapter exact object resolution", function()
+    it("compares private raw identity across resolve, inventory, and read handles", function()
+        local port, fake = fake_ue4ss.new()
+        local class = class_descriptor()
+        local raw_class = install_exact(fake, class, "ExactGuildChestClass")
+        local property = property_descriptor()
+        install_property(fake, property)
+        local same_descriptor = {
+            kind = "struct",
+            path = "/Runtime/SameObject",
+            type_signature = "Object<ExactGuildChestClass>",
+        }
+        local other_descriptor = {
+            kind = "struct",
+            path = "/Runtime/OtherObject",
+            type_signature = "Object<ExactGuildChestClass>",
+        }
+        local raw_same = install_exact(fake, same_descriptor)
+        install_exact(fake, other_descriptor)
+        fake.add_loaded(raw_class, raw_same)
+        fake.set_property_value(raw_same, property.member_name, raw_same)
+
+        local adapter = ue4ss_adapter.new(port)
+        local class_handle = ue4ss_adapter.resolve_exact(adapter, class)
+        local resolved = ue4ss_adapter.resolve_exact(adapter, same_descriptor)
+        local resolved_again = ue4ss_adapter.resolve_exact(adapter, same_descriptor)
+        local other = ue4ss_adapter.resolve_exact(adapter, other_descriptor)
+        local inventory = ue4ss_adapter.inventory_loaded(adapter, class_handle)
+        local reference = ue4ss_adapter.read_property(adapter, resolved, property)
+        local before = fake.counters()
+
+        local direct = table.pack(ue4ss_adapter.same_object(adapter, resolved, resolved_again))
+        a.equal(1, direct.n)
+        a.equal(true, direct[1])
+        a.equal(true, ue4ss_adapter.same_object(adapter, resolved, inventory[1]))
+        a.equal(true, ue4ss_adapter.same_object(adapter, resolved, reference))
+        a.equal(false, ue4ss_adapter.same_object(adapter, resolved, other))
+
+        assert_no_counter_delta(before, fake.counters())
+        assert_zero_write_calls(fake.counters())
+    end)
+
+    it("rejects forged, cross-adapter, closed, stale, and poisoned handles without port calls", function()
+        local port, fake = fake_ue4ss.new()
+        local descriptor = class_descriptor()
+        install_exact(fake, descriptor, "ExactGuildChestClass")
+        local adapter = ue4ss_adapter.new(port)
+        local object = ue4ss_adapter.resolve_exact(adapter, descriptor)
+
+        local other_port, other_fake = fake_ue4ss.new()
+        install_exact(other_fake, descriptor, "ExactGuildChestClass")
+        local other_adapter = ue4ss_adapter.new(other_port)
+        local other_object = ue4ss_adapter.resolve_exact(other_adapter, descriptor)
+        local before = fake.counters()
+        local other_before = other_fake.counters()
+
+        expect_problem("CGCE-UE4SS-ADAPTER-HANDLE", "adapter", function()
+            ue4ss_adapter.same_object(function() end, object, object)
+        end)
+        expect_problem("CGCE-UE4SS-OBJECT-HANDLE", "object", function()
+            ue4ss_adapter.same_object(adapter, object, function() end)
+        end)
+        expect_problem("CGCE-UE4SS-OBJECT-HANDLE", "object", function()
+            ue4ss_adapter.same_object(adapter, object, other_object)
+        end)
+        assert_no_counter_delta(before, fake.counters())
+        assert_no_counter_delta(other_before, other_fake.counters())
+
+        ue4ss_adapter.close(adapter)
+        local closed_before = fake.counters()
+        expect_problem("CGCE-UE4SS-CLOSED", "adapter", function()
+            ue4ss_adapter.same_object(adapter, object, object)
+        end)
+        assert_no_counter_delta(closed_before, fake.counters())
+
+        local poisoned_port, poisoned_fake = fake_ue4ss.new()
+        local function_value = function_descriptor()
+        install_exact(poisoned_fake, function_value)
+        install_exact(poisoned_fake, descriptor, "ExactGuildChestClass")
+        local poisoned_adapter = ue4ss_adapter.new(poisoned_port)
+        local poisoned_object = ue4ss_adapter.resolve_exact(poisoned_adapter, descriptor)
+        local observation = ue4ss_adapter.observe_function(
+            poisoned_adapter,
+            function_value,
+            function() end
+        )
+        poisoned_fake.fail_unregister(function_value.path)
+        local close_ok = ue4ss_adapter.close_observation(poisoned_adapter, observation)
+        a.equal(false, close_ok)
+        local poisoned_before = poisoned_fake.counters()
+        expect_problem("CGCE-UE4SS-POISONED", "adapter", function()
+            ue4ss_adapter.same_object(poisoned_adapter, poisoned_object, poisoned_object)
+        end)
+        assert_no_counter_delta(poisoned_before, poisoned_fake.counters())
+
+        assert_zero_write_calls(fake.counters())
+        assert_zero_write_calls(other_fake.counters())
+        assert_zero_write_calls(poisoned_fake.counters())
+    end)
+
     it("uses StaticFindObject only with an exact absolute descriptor and compares identity", function()
         local port, fake = fake_ue4ss.new()
         local descriptor = class_descriptor()
