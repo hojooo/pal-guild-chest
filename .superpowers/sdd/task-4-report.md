@@ -104,6 +104,37 @@ Exit status: `0`
 
 Result: `10` validator tests passed. Coverage includes append-only empty expansion, valid `358→358` and `400→400` no-ops, undershoot/overshoot/shrink rejection, container/owner identity, every occupied preservation field, stored index changes, empty↔occupied transitions, item swaps, every appended non-empty slot, and deterministic multi-fault ordering across `CGCE-VAL-001` through `CGCE-VAL-008`.
 
+### Independent review fix — total quantity overflow RED
+
+Command:
+
+```sh
+./scripts/run-tests.sh tests/unit/snapshot_spec.lua
+```
+
+Exit status: `1`
+
+Observed failure:
+
+```text
+FAIL fails closed when total item quantity exceeds the Lua integer range
+tests/unit/snapshot_spec.lua:9: expected false, got true
+```
+
+Two otherwise-valid occupied projections with quantities `math.maxinteger` and `1` returned normally because Lua 5.4 integer addition wrapped to `math.mininteger`.
+
+### Independent review fix — total quantity overflow GREEN
+
+Command:
+
+```sh
+./scripts/run-tests.sh tests/unit/snapshot_spec.lua
+```
+
+Exit status: `0`
+
+Result: `10` snapshot tests passed. Snapshot aggregation now checks the remaining signed-integer capacity before addition and fails with exactly `{code="CGCE-SNAP-QUANTITY-OVERFLOW", field="total_item_quantity", detail="total item quantity exceeds Lua integer range"}`.
+
 ## Final verification
 
 Command:
@@ -114,7 +145,7 @@ Command:
 
 Exit status: `0`
 
-Result: `78` tests passed with `0` failures.
+Result after the independent review fix: `79` tests passed with `0` failures.
 
 Additional review check:
 
@@ -130,6 +161,7 @@ Exit status: `0`.
 - Snapshot records copy only scalar preservation fields; adapter-owned slot/item tables and unknown fields cannot enter the snapshot.
 - `nil` is interpreted only as an empty slot projection; malformed non-`nil` projections fail closed with structured `CGCE-SNAP-*` errors.
 - Fingerprints hash canonical JSON with explicit arrays, occupied records in ascending engine index, and no trailing empty records.
+- Total quantity aggregation permits representable positive integer totals through `math.maxinteger` and fails closed before Lua signed-integer wraparound.
 - Validator count derivation preserves containers already at or above target and reports every applicable violation in stable code/index/field order.
 - The module reports safety violations only; it intentionally has no fatal-stop or persistence behavior.
 - AT-004 target selection is intentionally absent and remains a later integration-routing responsibility.
@@ -138,6 +170,7 @@ Exit status: `0`.
 ## Commits
 
 - `f9bad8e` — `feat: add container snapshot invariants`
+- `2a830a0` — `fix: reject snapshot quantity overflow`
 
 ## Concerns and deferred evidence
 
