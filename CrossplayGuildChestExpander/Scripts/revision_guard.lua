@@ -8,6 +8,7 @@ local parse_manifest = binding_manifest.parse
 local verify_manifest_types = binding_manifest.verify_types
 
 local binding_sessions = setmetatable({}, { __mode = "k" })
+local current_validation_epoch = function() end
 
 local context_fields = {
     read_revision = true,
@@ -170,18 +171,21 @@ local function snapshot_runtime_manifest(value)
     }
 end
 
-local function create_binding_session(snapshot)
+local function create_binding_session(snapshot, epoch)
     local handle = function() end
-    binding_sessions[handle] = snapshot
+    binding_sessions[handle] = {
+        epoch = epoch,
+        snapshot = snapshot,
+    }
     return handle
 end
 
 local function require_binding_session(session)
-    local trusted = type(session) == "function" and binding_sessions[session] or nil
-    if trusted == nil then
+    local record = type(session) == "function" and binding_sessions[session] or nil
+    if record == nil or record.epoch ~= current_validation_epoch then
         fail("CGCE-REV-SESSION", "session", "value is not a verified binding session")
     end
-    return trusted
+    return record.snapshot
 end
 
 function revision_guard.binding_metadata(session)
@@ -210,6 +214,8 @@ function revision_guard.descriptor(session, logical_name)
 end
 
 function revision_guard.check(context)
+    local check_epoch = function() end
+    current_validation_epoch = check_epoch
     local ports = capture_context(context)
 
     local revision_ok, live_revision, revision_error = pcall(ports.read_revision)
@@ -330,13 +336,27 @@ function revision_guard.check(context)
         )
     end
 
+    if current_validation_epoch ~= check_epoch then
+        return outcome(
+            "BLOCKED",
+            live_revision,
+            manifest_kind,
+            manifest_checksum,
+            one_error(
+                "CGCE-REV-CHECK-SUPERSEDED",
+                "session",
+                "binding validation was superseded by a later check"
+            )
+        )
+    end
+
     return outcome(
         "SUPPORTED",
         live_revision,
         manifest_kind,
         manifest_checksum,
         json_array()
-    ), create_binding_session(manifest_snapshot)
+    ), create_binding_session(manifest_snapshot, check_epoch)
 end
 
 return revision_guard

@@ -197,6 +197,105 @@ describe("revision_guard.check", function()
         end)
     end)
 
+    it("invalidates prior sessions across supported, blocked, and unsupported rechecks", function()
+        local runtime, runtime_text = manifest("runtime")
+
+        local first_result, first_session = revision_guard.check(exact_context(runtime_text))
+        a.equal("SUPPORTED", first_result.status)
+        a.equal(runtime.checksum, revision_guard.binding_metadata(first_session).manifest_checksum)
+
+        local blocked, blocked_session = revision_guard.check(exact_context(nil, {
+            read_revision = function()
+                return nil
+            end,
+        }))
+        a.equal("BLOCKED", blocked.status)
+        a.equal(nil, blocked_session)
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.binding_metadata(first_session)
+        end)
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.descriptor(first_session, "world_id_property")
+        end)
+
+        local second_result, second_session = revision_guard.check(exact_context(runtime_text))
+        a.equal("SUPPORTED", second_result.status)
+        a.equal(runtime.checksum, revision_guard.binding_metadata(second_session).manifest_checksum)
+        local unsupported, unsupported_session = revision_guard.check(exact_context(nil))
+        a.equal("UNSUPPORTED", unsupported.status)
+        a.equal(nil, unsupported_session)
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.binding_metadata(second_session)
+        end)
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.descriptor(second_session, "world_id_property")
+        end)
+
+        local third_result, third_session = revision_guard.check(exact_context(runtime_text))
+        a.equal("SUPPORTED", third_result.status)
+        local fourth_result, fourth_session = revision_guard.check(exact_context(runtime_text))
+        a.equal("SUPPORTED", fourth_result.status)
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.binding_metadata(third_session)
+        end)
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.descriptor(third_session, "world_id_property")
+        end)
+        a.equal(runtime.checksum, revision_guard.binding_metadata(fourth_session).manifest_checksum)
+        a.deep_equal(
+            descriptor("world_id_property"),
+            revision_guard.descriptor(fourth_session, "world_id_property")
+        )
+
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.binding_metadata(first_session)
+        end)
+    end)
+
+    it("invalidates the current session before validating a new check context", function()
+        local _, runtime_text = manifest("runtime")
+        local _, session = revision_guard.check(exact_context(runtime_text))
+        a.equal("runtime", revision_guard.binding_metadata(session).manifest_kind)
+
+        expect_context_error("context", nil)
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.binding_metadata(session)
+        end)
+    end)
+
+    it("fails closed when a reentrant check supersedes the current validation epoch", function()
+        local runtime, runtime_text = manifest("runtime")
+        local outer_context, outer_calls = exact_context(runtime_text)
+        local nested_result
+        local nested_session
+        local nested_once = false
+        outer_context.inspect_descriptor = function(_, expected)
+            outer_calls.inspect = outer_calls.inspect + 1
+            if not nested_once then
+                nested_once = true
+                local nested_context = exact_context(runtime_text)
+                nested_result, nested_session = revision_guard.check(nested_context)
+            end
+            local actual = {}
+            for key, value in pairs(expected) do
+                actual[key] = value
+            end
+            return actual
+        end
+
+        local outer_result, outer_session = revision_guard.check(outer_context)
+
+        a.equal("BLOCKED", outer_result.status)
+        a.equal("runtime", outer_result.manifest_kind)
+        a.equal(runtime.checksum, outer_result.manifest_checksum)
+        a.equal("CGCE-REV-CHECK-SUPERSEDED", outer_result.errors[1].code)
+        a.equal("session", outer_result.errors[1].field)
+        a.equal(nil, outer_session)
+        a.equal(27, outer_calls.inspect)
+        a.equal("SUPPORTED", nested_result.status)
+        a.equal(runtime.checksum, revision_guard.binding_metadata(nested_session).manifest_checksum)
+    end)
+
     it("serves fresh descriptors from the privately verified manifest snapshot", function()
         local _, text = manifest("runtime")
         local context, calls = exact_context(text)
