@@ -510,6 +510,47 @@ describe("read-only discovery audit", function()
         assert_forged(nil)
     end)
 
+    it("keeps saved accessors bound to trusted storage when public slots are shadowed", function()
+        local context = fixture({}, {})
+        local real_handle = audit.capture(context)
+        local forged_handle = function() end
+        local original = {
+            canonical_json = audit.canonical_json,
+            checksum = audit.checksum,
+            to_table = audit.to_table,
+        }
+        local forged_checksum = string.rep("0", 64)
+        local forged_json = json.encode({
+            world_id = "world/forged",
+            checksum = forged_checksum,
+        })
+
+        rawset(audit, "canonical_json", function() return forged_json end)
+        rawset(audit, "checksum", function() return forged_checksum end)
+        rawset(audit, "to_table", function()
+            return { world_id = "world/forged", checksum = forged_checksum }
+        end)
+
+        local real_ok, real_value = pcall(original.to_table, real_handle)
+        local canonical_ok, canonical_value = pcall(original.canonical_json, real_handle)
+        local checksum_ok, checksum_value = pcall(original.checksum, real_handle)
+        local forged_ok, forged_error = pcall(original.to_table, forged_handle)
+
+        rawset(audit, "canonical_json", original.canonical_json)
+        rawset(audit, "checksum", original.checksum)
+        rawset(audit, "to_table", original.to_table)
+
+        a.equal(true, real_ok)
+        a.equal("world/test", real_value.world_id)
+        a.equal(real_value.checksum, checksum_value)
+        a.equal(true, canonical_ok)
+        a.equal(canonical_value, json.encode(real_value))
+        a.equal(true, checksum_ok)
+        a.equal(false, forged_ok)
+        a.equal("CGCE-AUD-CHECKSUM", forged_error.code)
+        a.equal("audit", forged_error.field)
+    end)
+
     it("uses deterministic fields for unknown context keys without address leakage", function()
         local string_context = fixture({}, {})
         string_context.zebra = true

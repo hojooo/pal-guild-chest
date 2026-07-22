@@ -583,25 +583,25 @@ function audit.capture(context)
     })
 end
 
-function audit.canonical_json(value)
+local function require_captured(value)
     local trusted = captured[value]
     if trusted == nil then
         fail("CGCE-AUD-CHECKSUM", "audit", "value is not a captured audit")
     end
-    return trusted.canonical
+    return trusted
+end
+
+function audit.canonical_json(value)
+    return require_captured(value).canonical
 end
 
 function audit.checksum(value)
-    local trusted = captured[value]
-    if trusted == nil then
-        fail("CGCE-AUD-CHECKSUM", "audit", "value is not a captured audit")
-    end
-    return trusted.checksum
+    return require_captured(value).checksum
 end
 
 function audit.to_table(value)
-    local canonical = audit.canonical_json(value)
-    local ok, detached = pcall(json.decode, canonical)
+    local trusted = require_captured(value)
+    local ok, detached = pcall(json.decode, trusted.canonical)
     if not ok then
         fail("CGCE-AUD-CHECKSUM", "audit", "cached canonical audit could not be decoded")
     end
