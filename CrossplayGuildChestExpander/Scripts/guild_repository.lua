@@ -15,6 +15,7 @@ local json_array = json.array
 local json_encode = json.encode
 local json_null = json.null
 local world_assert_current = world_ready.assert_current
+local world_assert_relation = world_ready.assert_relation
 local world_id = world_ready.world_id
 
 local option_fields = {
@@ -427,9 +428,35 @@ function guild_repository.list(options)
     local expected_world_id = world_id(captured.world_epoch)
     local descriptors = descriptor_snapshot(captured.binding_session)
     local before = collect(captured, descriptors, expected_world_id)
+    world_assert_relation(
+        captured.world_epoch,
+        captured.adapter,
+        captured.binding_session,
+        "guild_manager",
+        before.selected_world,
+        before.guild_manager
+    )
     local after = collect(captured, descriptors, expected_world_id)
+    world_assert_relation(
+        captured.world_epoch,
+        captured.adapter,
+        captured.binding_session,
+        "guild_manager",
+        after.selected_world,
+        after.guild_manager
+    )
     require_stable(captured, before, after)
-    local result = detached_projection(before.entries)
+    local verified = collect(captured, descriptors, expected_world_id)
+    world_assert_relation(
+        captured.world_epoch,
+        captured.adapter,
+        captured.binding_session,
+        "guild_manager",
+        verified.selected_world,
+        verified.guild_manager
+    )
+    require_stable(captured, after, verified)
+    local result = detached_projection(verified.entries)
 
     world_assert_current(
         captured.world_epoch,

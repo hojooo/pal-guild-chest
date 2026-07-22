@@ -841,7 +841,7 @@ function world_ready.world_id(epoch)
     return relation.world_id
 end
 
-function world_ready.assert_current(epoch, adapter, binding_session)
+local function require_paired_epoch(epoch, adapter, binding_session)
     local trusted = require_epoch(epoch)
     if not rawequal(adapter, trusted.adapter) then
         fail(
@@ -855,6 +855,49 @@ function world_ready.assert_current(epoch, adapter, binding_session)
             "CGCE-WORLD-AUTHORITY",
             "binding_session",
             "world epoch and verified binding authority do not match"
+        )
+    end
+    return trusted
+end
+
+function world_ready.assert_current(epoch, adapter, binding_session)
+    require_paired_epoch(epoch, adapter, binding_session)
+    validate_epoch(epoch)
+    return true
+end
+
+function world_ready.assert_relation(
+    epoch,
+    adapter,
+    binding_session,
+    relation_kind,
+    selected_world,
+    manager
+)
+    require_paired_epoch(epoch, adapter, binding_session)
+    local manager_field
+    if relation_kind == "guild_manager" then
+        manager_field = "guild_manager"
+    elseif relation_kind == "container_manager" then
+        manager_field = "container_manager"
+    else
+        fail(
+            "CGCE-WORLD-AUTHORITY",
+            "relation_kind",
+            "candidate relation kind is unsupported"
+        )
+    end
+
+    local _, _, relation = validate_epoch(epoch)
+    local compared = table.pack(pcall(function()
+        return adapter_same_object(adapter, selected_world, relation.selected_world)
+            and adapter_same_object(adapter, manager, relation[manager_field])
+    end))
+    if not compared[1] or compared.n ~= 2 or compared[2] ~= true then
+        fail(
+            "CGCE-WORLD-RELATION",
+            "relation",
+            "candidate relation does not match the active world epoch"
         )
     end
     validate_epoch(epoch)

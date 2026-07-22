@@ -345,6 +345,105 @@ describe("guild_repository exact selected-world traversal", function()
         end)
         a.equal(true, world_ready.close(list_detector))
         assert_zero_forbidden(list_runtime)
+
+        local late_field_reads = 0
+        local late_field_guild
+        local late_field_runtime = runtime_binding_fixture.new({
+            on_get_property = function(runtime, property)
+                if rawequal(property, runtime.raw.descriptors.guild_id_property) then
+                    late_field_reads = late_field_reads + 1
+                    if late_field_reads == 2 then
+                        runtime:set_guild_id(late_field_guild, "guild/late")
+                    end
+                end
+            end,
+        })
+        late_field_guild = late_field_runtime:add_guild(
+            "guild/original",
+            "Original",
+            "container/original"
+        )
+        local late_field_detector, late_field_epoch = ready_epoch(late_field_runtime)
+        expect_problem("CGCE-GUILD-DRIFT", "guilds[1].guild_id", function()
+            list(late_field_runtime, late_field_epoch)
+        end)
+        a.equal(true, world_ready.close(late_field_detector))
+        assert_zero_forbidden(late_field_runtime)
+
+        local late_list_reads = 0
+        local late_list_first
+        local late_list_second
+        local late_list_runtime = runtime_binding_fixture.new({
+            on_get_property = function(runtime, property)
+                if rawequal(property, runtime.raw.descriptors.guild_list_property) then
+                    late_list_reads = late_list_reads + 1
+                    if late_list_reads == 2 then
+                        runtime:set_guild_list({ late_list_first, late_list_second })
+                    end
+                end
+            end,
+        })
+        late_list_first = late_list_runtime:add_guild("guild/a", "A", "container/a")
+        late_list_second = late_list_runtime:add_guild(
+            "guild/b",
+            "B",
+            "container/b",
+            { listed = false }
+        )
+        local late_list_detector, late_list_epoch = ready_epoch(late_list_runtime)
+        expect_problem("CGCE-GUILD-DRIFT", "guild_list", function()
+            list(late_list_runtime, late_list_epoch)
+        end)
+        a.equal(true, world_ready.close(late_list_detector))
+        assert_zero_forbidden(late_list_runtime)
+    end)
+
+    it("cannot traverse a different exact manager during an epoch ABA", function()
+        local manager_reads = 0
+        local armed = false
+        local manager_b
+        local runtime = runtime_binding_fixture.new({
+            on_get_property = function(value, property)
+                if armed
+                    and rawequal(
+                        property,
+                        value.raw.descriptors.selected_world_guild_manager_property
+                    ) then
+                    manager_reads = manager_reads + 1
+                    if manager_reads == 4 then
+                        value:set_guild_manager(manager_b)
+                    elseif manager_reads == 6 then
+                        value:set_guild_manager(value.raw.guild_manager)
+                    end
+                end
+            end,
+        })
+        runtime:add_guild("guild/a", "A", "container/a")
+        local guild_b = runtime:add_guild(
+            "guild/b",
+            "B",
+            "container/b",
+            { listed = false }
+        )
+        manager_b = runtime.fake.add_object({
+            path = "/Runtime/CGCETest/GuildManager/B",
+            type_signature = "Object<CGCETestGuildManager>",
+        })
+        runtime.fake.add_loaded(runtime.raw.descriptors.guild_manager_class, manager_b)
+        runtime.fake.set_property_value(
+            manager_b,
+            runtime.descriptors.guild_list_property.member_name,
+            runtime.fake.array({ guild_b })
+        )
+        local detector, epoch = ready_epoch(runtime)
+        armed = true
+
+        expect_problem("CGCE-WORLD-EPOCH-STALE", "epoch", function()
+            list(runtime, epoch)
+        end)
+
+        a.equal(true, world_ready.close(detector))
+        assert_zero_forbidden(runtime)
     end)
 
     it("freshly rejects selected-world and manager relation drift during traversal", function()
@@ -362,7 +461,7 @@ describe("guild_repository exact selected-world traversal", function()
         local detector, epoch = ready_epoch(runtime)
         duplicate_armed = true
 
-        expect_problem("CGCE-GUILD-MANAGER-RELATION", "guild_manager", function()
+        expect_problem("CGCE-WORLD-EPOCH-STALE", "epoch", function()
             list(runtime, epoch)
         end)
 
@@ -384,8 +483,8 @@ describe("guild_repository exact selected-world traversal", function()
         selected_armed = true
 
         expect_problem(
-            "CGCE-GUILD-SELECTED-WORLD-RELATION",
-            "selected_world",
+            "CGCE-WORLD-EPOCH-STALE",
+            "epoch",
             function()
                 list(selected_runtime, selected_epoch)
             end
@@ -484,6 +583,7 @@ describe("guild_repository exact selected-world traversal", function()
         local replaced = {}
         local replacements = {
             { world_ready, "assert_current" },
+            { world_ready, "assert_relation" },
             { world_ready, "world_id" },
             { revision_guard, "descriptor" },
             { ue4ss_adapter, "capabilities" },

@@ -138,6 +138,84 @@ describe("world_ready bounded selected-world authority", function()
         assert_zero_forbidden(runtime)
     end)
 
+    it("validates candidate manager relations without exporting epoch handles", function()
+        local runtime = runtime_binding_fixture.new()
+        local detector = start(runtime, timer_harness())
+        local epoch = world_ready.epoch(detector)
+
+        local selected_world_class = ue4ss_adapter.resolve_exact(
+            runtime.adapter,
+            runtime.descriptors.selected_world_class
+        )
+        local selected_worlds = ue4ss_adapter.inventory_loaded(
+            runtime.adapter,
+            selected_world_class
+        )
+        local guild_manager_class = ue4ss_adapter.resolve_exact(
+            runtime.adapter,
+            runtime.descriptors.guild_manager_class
+        )
+        local guild_managers = ue4ss_adapter.inventory_loaded(
+            runtime.adapter,
+            guild_manager_class
+        )
+        local container_manager_class = ue4ss_adapter.resolve_exact(
+            runtime.adapter,
+            runtime.descriptors.container_manager_class
+        )
+        local container_managers = ue4ss_adapter.inventory_loaded(
+            runtime.adapter,
+            container_manager_class
+        )
+
+        a.equal(true, world_ready.assert_relation(
+            epoch,
+            runtime.adapter,
+            runtime.binding_session,
+            "guild_manager",
+            selected_worlds[1],
+            guild_managers[1]
+        ))
+        a.equal(true, world_ready.assert_relation(
+            epoch,
+            runtime.adapter,
+            runtime.binding_session,
+            "container_manager",
+            selected_worlds[1],
+            container_managers[1]
+        ))
+
+        local foreign_raw = runtime:add_unlisted_guild_manager()
+        runtime.fake.add_loaded(runtime.raw.descriptors.guild_manager_class, foreign_raw)
+        local fresh_guild_managers = ue4ss_adapter.inventory_loaded(
+            runtime.adapter,
+            guild_manager_class
+        )
+        expect_problem("CGCE-WORLD-RELATION", "relation", function()
+            world_ready.assert_relation(
+                epoch,
+                runtime.adapter,
+                runtime.binding_session,
+                "guild_manager",
+                selected_worlds[1],
+                fresh_guild_managers[2]
+            )
+        end)
+        expect_problem("CGCE-WORLD-AUTHORITY", "relation_kind", function()
+            world_ready.assert_relation(
+                epoch,
+                runtime.adapter,
+                runtime.binding_session,
+                "manager",
+                selected_worlds[1],
+                guild_managers[1]
+            )
+        end)
+
+        a.equal(true, world_ready.close(detector))
+        assert_zero_forbidden(runtime)
+    end)
+
     it("closes the registration race with one post-hook wake", function()
         local runtime = runtime_binding_fixture.new({
             ready = false,
@@ -663,6 +741,7 @@ describe("world_ready bounded selected-world authority", function()
         table.sort(exports)
         a.deep_equal({
             "assert_current",
+            "assert_relation",
             "close",
             "epoch",
             "start",
