@@ -1024,9 +1024,8 @@ function report.persist(fs, root, relative_path, value)
     local opaque_handle = handle_type == "function"
         or handle_type == "userdata"
         or handle_type == "thread"
-    if created_ok and opaque_handle and secondary ~= nil then
+    if created_ok and handle ~= nil and (secondary ~= nil or not opaque_handle) then
         pcall(ports.close_file, handle)
-        fail("CGCE-REPORT-PERSIST", "create_exclusive", "exclusive temporary report creation failed")
     end
     if not created_ok
         or secondary ~= nil

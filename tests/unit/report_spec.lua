@@ -506,6 +506,30 @@ describe("operational report", function()
         a.equal(1, observed.writes)
     end)
 
+    it("best-effort closes a non-nil invalid create result exactly once", function()
+        local value = report.build(build_context())
+        local fs, observed = filesystem()
+        local invalid_handle = { forged = true }
+        local close_calls = 0
+        fs.create_exclusive = function()
+            return invalid_handle
+        end
+        fs.close_file = function(actual)
+            close_calls = close_calls + 1
+            a.equal(invalid_handle, actual)
+            error("approval_token=do-not-render")
+        end
+
+        local err = expect_error("CGCE-REPORT-PERSIST", "create_exclusive", function()
+            report.persist(fs, ROOT, REPORT_PATH, value)
+        end)
+
+        a.equal(1, close_calls)
+        a.equal(nil, err.detail:find("do-not-render", 1, true))
+        a.equal(0, observed.writes)
+        a.equal(0, observed.atomic_replaces)
+    end)
+
     it("blocks partial failures, preserves the original error, and never falls back", function()
         local value = report.build(build_context())
         value.checksum = string.rep("0", 64)

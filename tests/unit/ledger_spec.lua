@@ -338,6 +338,30 @@ describe("migration ledger", function()
         a.equal(0, observed.atomic_replaces)
     end)
 
+    it("best-effort closes a non-nil invalid create result exactly once", function()
+        local value = build_ledger()
+        local fs, observed = filesystem_with()
+        local invalid_handle = { forged = true }
+        local close_calls = 0
+        fs.create_exclusive = function()
+            return invalid_handle
+        end
+        fs.close_file = function(actual)
+            close_calls = close_calls + 1
+            a.equal(invalid_handle, actual)
+            error("approval_token=do-not-render")
+        end
+
+        local err = expect_error("CGCE-LEDGER-SAVE", "create_exclusive", function()
+            ledger.save(fs, ROOT, LEDGER_PATH, value)
+        end)
+
+        a.equal(1, close_calls)
+        a.equal(nil, err.detail:find("do-not-render", 1, true))
+        a.equal(0, observed.writes)
+        a.equal(0, observed.atomic_replaces)
+    end)
+
     it("always captures and inspects fresh live state even for a completed matching ledger", function()
         local value = build_ledger("COMPLETE")
         local fs, observed = filesystem_with(value)
