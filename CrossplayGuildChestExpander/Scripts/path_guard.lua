@@ -336,8 +336,10 @@ function path_guard.resolve(fs, root, relative_path)
         local field = "relative_path[" .. tostring(index) .. "]"
         local lexical = join(current, components[index])
         local canonical = canonicalize(canonicalize_port, lexical)
+        local canonical_parent = parent_of(canonical)
         if not within(canonical_root, canonical)
-            or not same_path(parent_of(canonical), current) then
+            or canonical_parent == nil
+            or not same_path(canonical_parent, current) then
             fail("CGCE-PATH-ESCAPE", field, "canonical parent escaped the configured root boundary")
         end
         inspect_directory(inspect_port, lexical, canonical, field)
@@ -348,8 +350,10 @@ function path_guard.resolve(fs, root, relative_path)
     local target_field = "relative_path[" .. tostring(target_index) .. "]"
     local lexical_target = join(current, components[target_index])
     local canonical_target = canonicalize(canonicalize_port, lexical_target)
+    local canonical_target_parent = parent_of(canonical_target)
     if not within(canonical_root, canonical_target)
-        or not same_path(parent_of(canonical_target), current) then
+        or canonical_target_parent == nil
+        or not same_path(canonical_target_parent, current) then
         fail("CGCE-PATH-ESCAPE", target_field, "canonical target escaped the configured root boundary")
     end
     inspect_target(inspect_port, lexical_target, canonical_target, target_field)
@@ -360,8 +364,10 @@ function path_guard.resolve(fs, root, relative_path)
         fail("CGCE-PATH-FS-ERROR", "propose_temp_sibling", "filesystem returned a malformed temp sibling")
     end
     proposed_temp = parsed_temp.normalized
+    local proposed_temp_parent = parent_of(proposed_temp)
     if same_path(proposed_temp, canonical_target)
-        or not same_path(parent_of(proposed_temp), current) then
+        or proposed_temp_parent == nil
+        or not same_path(proposed_temp_parent, current) then
         fail("CGCE-PATH-TEMP", "temp_sibling", "temp candidate must be a distinct same-directory sibling")
     end
 
@@ -372,11 +378,13 @@ function path_guard.resolve(fs, root, relative_path)
     end
 
     local canonical_temp = canonicalize(canonicalize_port, proposed_temp)
+    local canonical_temp_parent = parent_of(canonical_temp)
     if not within(canonical_root, canonical_temp) then
         fail("CGCE-PATH-ESCAPE", "temp_sibling", "canonical temp path escaped the configured root boundary")
     end
     if same_path(canonical_temp, canonical_target)
-        or not same_path(parent_of(canonical_temp), current) then
+        or canonical_temp_parent == nil
+        or not same_path(canonical_temp_parent, current) then
         fail("CGCE-PATH-TEMP", "temp_sibling", "canonical temp path must remain a distinct same-directory sibling")
     end
 

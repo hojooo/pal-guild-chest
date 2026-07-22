@@ -361,6 +361,50 @@ describe("path_guard.resolve", function()
         end
     end)
 
+    it("fails closed when a parent, target, or temp canonicalizes to a drive root", function()
+        local drive_root = "D:\\"
+        local scenarios = {
+            {
+                path = "reports/audit.json",
+                overrides = { ["D:\\reports"] = drive_root },
+                code = "CGCE-PATH-ESCAPE",
+                field = "relative_path[1]",
+            },
+            {
+                path = "audit.json",
+                overrides = { ["D:\\audit.json"] = drive_root },
+                code = "CGCE-PATH-ESCAPE",
+                field = "relative_path[1]",
+            },
+            {
+                path = "audit.json",
+                temp_sibling = drive_root,
+                code = "CGCE-PATH-TEMP",
+                field = "temp_sibling",
+            },
+            {
+                path = "audit.json",
+                overrides = { ["D:\\audit.json.cgce.tmp"] = drive_root },
+                code = "CGCE-PATH-TEMP",
+                field = "temp_sibling",
+            },
+        }
+
+        for _, scenario in ipairs(scenarios) do
+            local fs = fake_filesystem.new({
+                entries = {
+                    [drive_root] = "directory",
+                    ["D:\\reports"] = "directory",
+                },
+                canonical_overrides = scenario.overrides,
+                temp_sibling = scenario.temp_sibling,
+            })
+            expect_error(scenario.code, scenario.field, function()
+                path_guard.resolve(fs, drive_root, scenario.path)
+            end)
+        end
+    end)
+
     it("fails closed on malformed or throwing filesystem responses", function()
         local fs = fixture()
         fs.capabilities = function()
