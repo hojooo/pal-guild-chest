@@ -77,7 +77,10 @@ local function validate_item(item, index)
     end
     for key in pairs(item) do
         if not item_fields[key] then
-            fail("CGCE-SNAP-ITEM", prefix .. "." .. tostring(key), "unknown occupied-item projection field")
+            local field = type(key) == "string"
+                and prefix .. "." .. key
+                or prefix .. ".invalid_field"
+            fail("CGCE-SNAP-ITEM", field, "unknown occupied-item projection field")
         end
     end
 

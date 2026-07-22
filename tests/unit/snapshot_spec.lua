@@ -246,4 +246,43 @@ describe("snapshot.capture", function()
             capture(fake_adapter.container({ slots = { fake_adapter.slot(with_unknown) } }))
         end)
     end)
+
+    it("sanitizes non-string unknown fields without invoking tostring", function()
+        local tostring_calls = 0
+        local malicious_table = setmetatable({}, {
+            __tostring = function()
+                tostring_calls = tostring_calls + 1
+                return "table-secret-0xDEADBEEF"
+            end,
+        })
+        local malicious_function = function() end
+        local scenarios = {
+            { key = malicious_table, marker = "table-secret" },
+            { key = malicious_function, marker = "function:" },
+            { key = io.stdout, marker = "file" },
+        }
+        local errors = {}
+
+        for index, scenario in ipairs(scenarios) do
+            local item = fake_adapter.item()
+            rawset(item, scenario.key, true)
+            local ok, err = pcall(function()
+                capture(fake_adapter.container({ slots = { fake_adapter.slot(item) } }))
+            end)
+            a.equal(false, ok)
+            errors[index] = err
+        end
+
+        a.equal(0, tostring_calls)
+        for index, err in ipairs(errors) do
+            a.equal("table", type(err))
+            a.equal("CGCE-SNAP-ITEM", err.code)
+            a.equal("slots[1].invalid_field", err.field)
+            a.equal("string", type(err.detail))
+            a.equal(nil, err.field:find("0x", 1, true))
+            a.equal(nil, err.detail:find("0x", 1, true))
+            a.equal(nil, err.field:find(scenarios[index].marker, 1, true))
+            a.equal(nil, err.detail:find(scenarios[index].marker, 1, true))
+        end
+    end)
 end)
