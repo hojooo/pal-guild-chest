@@ -197,6 +197,8 @@ function runtime_binding_fixture.new(options)
 
     local guilds = {}
     local guild_sequence = 0
+    local guild_chest_sequence = 0
+    local general_container_sequence = 0
     local function publish_guild_list()
         fake.set_property_value(
             guild_manager,
@@ -352,6 +354,86 @@ function runtime_binding_fixture.new(options)
 
     function runtime:duplicate_guild_inventory(value)
         fake.add_loaded(raw_descriptors.guild_class, value)
+    end
+
+    function runtime:add_guild_chest(container_id, owner_guild_id, chest_options)
+        chest_options = chest_options or {}
+        guild_chest_sequence = guild_chest_sequence + 1
+        local value = fake.add_object({
+            path = "/Runtime/CGCETest/GuildChest/" .. guild_chest_sequence,
+            type_signature = "Object<CGCETestGuildChest>",
+        })
+        fake.set_property_value(
+            value,
+            descriptors.container_id_property.member_name,
+            container_id
+        )
+        fake.set_property_value(
+            value,
+            descriptors.container_owner_guild_id_property.member_name,
+            owner_guild_id
+        )
+        fake.set_property_value(
+            value,
+            descriptors.guild_chest_container_manager_property.member_name,
+            chest_options.manager or container_manager
+        )
+        if chest_options.loaded ~= false then
+            fake.add_loaded(raw_descriptors.guild_chest_class, value)
+        end
+        return value
+    end
+
+    function runtime:add_general_container(container_id, owner_guild_id, container_options)
+        container_options = container_options or {}
+        general_container_sequence = general_container_sequence + 1
+        local value = fake.add_object({
+            path = "/Runtime/CGCETest/GeneralContainer/" .. general_container_sequence,
+            type_signature = "Object<CGCETestGeneralContainer>",
+        })
+        fake.set_property_value(
+            value,
+            descriptors.container_id_property.member_name,
+            container_id
+        )
+        fake.set_property_value(
+            value,
+            descriptors.container_owner_guild_id_property.member_name,
+            owner_guild_id
+        )
+        fake.set_property_value(
+            value,
+            descriptors.guild_chest_container_manager_property.member_name,
+            container_options.manager or container_manager
+        )
+        if container_options.loaded ~= false then
+            fake.add_loaded("CGCETestGeneralContainer", value)
+        end
+        return value
+    end
+
+    function runtime:duplicate_guild_chest_inventory(value)
+        fake.add_loaded(raw_descriptors.guild_chest_class, value)
+    end
+
+    function runtime:set_container_id(value, container_id)
+        fake.set_property_value(value, descriptors.container_id_property.member_name, container_id)
+    end
+
+    function runtime:set_container_owner_guild_id(value, owner_guild_id)
+        fake.set_property_value(
+            value,
+            descriptors.container_owner_guild_id_property.member_name,
+            owner_guild_id
+        )
+    end
+
+    function runtime:set_container_object_manager(value, manager)
+        fake.set_property_value(
+            value,
+            descriptors.guild_chest_container_manager_property.member_name,
+            manager
+        )
     end
 
     function runtime:set_guild_id(value, guild_id)

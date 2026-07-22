@@ -17,6 +17,7 @@ local production_modules = {
     "CrossplayGuildChestExpander.Scripts.certification",
     "CrossplayGuildChestExpander.Scripts.config",
     "CrossplayGuildChestExpander.Scripts.constants",
+    "CrossplayGuildChestExpander.Scripts.container_resolver",
     "CrossplayGuildChestExpander.Scripts.fingerprint",
     "CrossplayGuildChestExpander.Scripts.guild_repository",
     "CrossplayGuildChestExpander.Scripts.json",
