@@ -301,13 +301,27 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Create: `CrossplayGuildChestExpander/Scripts/path_guard.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/conflict_detector.lua`
 - Create: `docs/release-report.schema.json`
+- Create: `tests/support/fake_filesystem.lua`
 - Create: `tests/unit/approval_spec.lua`
 - Create: `tests/unit/report_spec.lua`
 - Create: `tests/unit/ledger_spec.lua`
 - Create: `tests/unit/logger_spec.lua`
+- Create: `tests/unit/path_guard_spec.lua`
+- Create: `tests/unit/conflict_detector_spec.lua`
+- Create: `tests/unit/release_report_schema_spec.lua`
 
 **Interfaces:**
-- Produces: `approval.token(fields)`, `report.build(context)`, `report.persist(root, relative_path, value)`, `ledger.load/save/verify`, `path_guard.resolve(root, relative_path)`, `conflict_detector.scan(mods, hooks, container_types)`, `logger.text/jsonl`.
+- Produces: `approval.token/verify(fields)`, `report.build/validate(context)`, `report.persist(fs, root, relative_path, value)`, `ledger.load/save/verify(fs, ...)`, `path_guard.resolve(fs, root, relative_path)`, `conflict_detector.scan(policy, mods, hooks, containers)`, `logger.text/jsonl`.
+
+**Exact contracts:**
+
+- Keep the local operational report separate from Task 14's public release report. The operational report may contain raw world/guild/container identifiers and is always `report_kind="operational"`, `build_kind="discovery"`, and `release_eligible=false`; the public release schema contains only checksummed evidence and no raw world/guild/container/player ID, password, public IP, or command line. The certification artifact references the final release-report checksum; the release report must not reference the certification artifact checksum back.
+- Approval accepts exactly world ID, positive exact revision, Task 5 `audit.checksum`, approved slot candidate, and fixed deployment profile. Hash a versioned, key-labelled, UTF-8 byte-length-prefixed canonical preimage; verify lowercase SHA-256 with constant-time comparison and never echo a token. `require_operator_approval=false` grants no authority: every eventual apply still requires this token.
+- Operational reports revalidate and embed a detached Task 5 audit, sort mod inventory and findings, reject secret-bearing keys recursively, allow only discovery states, and self-checksum canonical JSON without their checksum field. Persistence must verify the supplied checksum, then use the injected filesystem port for exclusive same-directory temp creation, durable flush, atomic replace, and exact read-back; there is no non-atomic fallback.
+- `path_guard` rejects POSIX/Windows/UNC/device/drive-relative absolute paths, both-separator traversal, empty/dot components, control/NUL, ADS/colon, reserved device names, trailing dot/space, symlink/reparse traversal, missing/non-directory parents, sibling-prefix escape, and filesystem ports lacking no-follow/atomic-replace/durable-flush guarantees. Root, every parent, target, and temp sibling are canonicalized and checked by component boundary rather than string prefix.
+- Ledger data self-checksums, sorts guild records, stores source audit checksum plus before/after counts and fingerprints, and never stores raw dynamic GUID sets. Every verify captures a fresh Task 5 audit and examines every live guild; a completed cache never suppresses startup inspection. Missing is distinct from malformed/read failure, and restart-required can only yield `can_mark_completed=true` after a live match—it cannot update itself.
+- Logger formatting performs no I/O, recursively redacts normalized credential-key variants, escapes controls so text/JSONL remain one physical line, rejects per-slot INFO-or-higher payloads, and emits a small valid replacement event rather than truncated JSON above the fixed 16 KiB limit.
+- Conflict detection uses only exact paths/types from verified policy; never guess package names or fuzzy-match hooks. Before Gate A, inventory is allowed but collision coverage remains `partial` and cannot authorize apply. Exact foreign hook/storage collisions and type replacement block; an unknown count below target blocks, while a count above target is warning + forced no-op.
 
 - [ ] **Step 1: Write failing approval tests** using unambiguous length-prefixed UTF-8 fields for world ID, revision, Task 5 `audit.checksum` as the canonical audit-report checksum, target, and profile; prove any field change invalidates the token. A timestamp-dependent wrapper/report checksum must never substitute for this binding.
 - [ ] **Step 2: Verify RED**, implement SHA-256 approval token, verify GREEN.
@@ -329,6 +343,15 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 
 **Interfaces:**
 - Produces Discovery Build commands: `cgce status|audit|guilds|verify|export-report`; `cgce apply` returns `MUTATION_BUILD_UNAVAILABLE`; `scheduler.retry(options, probe)`; `platform_preflight.check(args, option_settings)`.
+
+**Exact contracts:**
+
+- `command_router.new` accepts only five read-only ports for status, audit, guild listing, live verification, and existing report path. Parse one control-free line as exact lowercase `cgce <command>` with no shell/quote interpretation or arguments. Every successful response contains revision, mode, target, and state; payloads are detached JSON-safe values. `cgce apply` (including any attempted arguments) returns `MUTATION_BUILD_UNAVAILABLE` without calling any port, regardless of mode, token, or state.
+- `scheduler.retry` receives explicit positive `max_attempts`, nonnegative finite delay, injected schedule/cancel callbacks, and a probe; it probes immediately, permits at most one outstanding timer, and terminates as `READY|EXHAUSTED|FAILED|CANCELLED`. Probe/callback errors fail closed, late callbacks are no-ops, cancel is idempotent, and even a synchronous fake scheduler cannot exceed the bound.
+- `scheduler.rescan_interval(nil)` is 60 seconds and rejects values below 30. `scheduler.cache_decision` always requests live inspection at startup, even for a matching completed cache. Fallback may skip only when revision, target, fingerprint, and owner all exactly match; malformed/missing data inspects conservatively and multiple drift reasons are deterministic.
+- `platform_preflight` parses dense argv plus either a full `OptionSettings=(...)` assignment or tuple RHS using quote/escape/nested-parenthesis awareness—never comma splitting. Duplicate CLI/INI keys, malformed quoting/tuples, and control characters fail closed without exposing raw arguments or secrets.
+- Preflight requires `-publiclobby`; matching integer `-port`, `-publicport`, and `PublicPort` in 1–65535; `CrossplayPlatforms` containing `Steam`, `PS5`, and `Mac`; `bAllowClientMod=False`; and `LogFormatType=Json`. Xbox is optional. `AllowConnectPlatform` and `IsServer=true` are never compatibility evidence. Even a green diagnostic reports certification `UNPROVEN` until Gate B.
+- `merge_option_settings` returns text only and updates the four known keys in place, appending missing keys deterministically while byte-preserving unrelated/secret fields. Existing Xbox is preserved; policy may add it; unknown platform values cause failure rather than silent deletion. A second merge is byte-identical and no file is written.
 
 - [ ] **Step 1: Write failing command tests** proving unknown commands and arguments do not mutate, Discovery Build `apply` always returns `MUTATION_BUILD_UNAVAILABLE`, and output contains revision/mode/target/state.
 - [ ] **Step 2: Verify RED**, implement command routing, verify GREEN.
@@ -422,12 +445,12 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Create: `tests/integration/migration_spec.lua`
 
 **Interfaces:**
-- `mutation_guard.authorize(context) -> authorization` requires a valid Gate A acceptance checksum; exact manifest checksum; a verified fatal-save/stop capability; fresh audit captured immediately before apply; approval token matching that fresh audit checksum; live revision/world/profile; pinned release certification artifact for production, or the isolated certification exception below.
+- `mutation_guard.authorize(context) -> authorization` requires a valid Gate A acceptance checksum; exact manifest checksum; a verified fatal-save/stop capability; fresh audit captured immediately before apply; an atomically persisted operational-report receipt for that exact audit; approval token matching that fresh audit checksum; live revision/world/profile; safety config invariants `require_operator_approval=true`, `verify_on_startup=true`, and `write_migration_ledger=true`; pinned release certification artifact for production, or the isolated certification exception below. Config booleans can never waive these requirements.
 - Certification exception requires `certification_mode=true`, disposable test-world ID allow-list, candidate slot in `{120,256,358}`, valid Gate A acceptance, and an explicit checksum-bound certification approval token. It is rejected by production builds.
 - Mutation adapter: `execute_in_game_thread(fn)`, `online_player_count()`, `is_any_guild_chest_in_use()`, `is_container_in_use(container)`, `resize_via_verified_function(container,target)`, `mark_dirty(container)`, `replicate(container)`, `enter_fatal_no_save_mode(reason)`.
 - `persisted_verifier` records `VALIDATING_RESTART_REQUIRED`; only next-start live save/reload verification may transition to `COMPLETE`.
 
-- [ ] **Step 1: Write failing guard tests** proving zero mutation for missing/changed Gate A acceptance, manifest checksum drift, absent/unverified fatal-save capability, stale audit, world/revision/profile mismatch, config-only slot escalation, missing Tier-0 certification, non-allow-listed test world, or invalid approval token.
+- [ ] **Step 1: Write failing guard tests** proving zero mutation for missing/changed Gate A acceptance, manifest checksum drift, absent/unverified fatal-save capability, stale audit/report receipt, world/revision/profile mismatch, any disabled approval/startup-verification/ledger safety flag, config-only slot escalation, missing Tier-0 certification, non-allow-listed test world, or invalid approval token.
 - [ ] **Step 2: Verify RED**, implement authorization with exact checksum equality and fresh audit recapture, verify GREEN.
 - [ ] **Step 3: Write failing synthetic migration tests** for 54→target empty/occupied, target/400 no-op, owner mismatch, duplicate IDs, include/exclude, use-state race, online-player/global-chest preflight, per-container immediate recheck, append exception, fingerprint mismatch, and idempotent second run.
 - [ ] **Step 4: Verify RED**, implement only the exact Gate-A-approved resize/add-slot function path; blind raw `TArray` append remains unsupported unless Gate A explicitly proves its factory and persistence semantics. Execute mutation, dirty/replicate, after snapshot, and invariant validation in one `ExecuteInGameThread` callback.
