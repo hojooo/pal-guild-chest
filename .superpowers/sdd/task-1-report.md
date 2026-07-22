@@ -6,7 +6,7 @@
 - Verified the downloaded archive before extraction:
 
   ```text
-  4f18ddae154e793e46eeab727c59ef1c0c2b744e7b94219710d76f530629ae  /private/tmp/lua-5.4.8.tar.gz
+  4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae  /private/tmp/lua-5.4.8.tar.gz
   ```
 
 - Built the local, test-only runtime with `make -C third_party/lua-5.4.8 all`.
@@ -101,5 +101,26 @@ Task implementation commit: `19c5572` (`test: bootstrap Lua harness`).
 
 ## Concerns
 
-- `CrossplayGuildChestExpander/LICENSE` is intentionally omitted. The brief requires the file but does not specify a license or copyright holder; choosing either would be a legal/package-policy decision outside this task. Add it after the owner approves the license text.
+- Approved Task 1 scope deviation: `CrossplayGuildChestExpander/LICENSE` remains intentionally omitted. The brief does not specify a license or copyright holder; project licensing is a later owner decision and this task must not invent either.
 - The third-party README establishes the release-exclusion policy. The later release-packaging task must enforce that policy mechanically when `build-release.sh` is introduced.
+
+## Checksum documentation correction
+
+The initial documentation omitted one `c0` pair from the required 64-character
+SHA-256 value. The vendored archive itself was not modified. The checksum was
+re-verified with `openssl` because the local `shasum` command is not reliable
+under this machine's locale configuration.
+
+Command:
+
+```sh
+openssl dgst -sha256 /private/tmp/lua-5.4.8.tar.gz
+```
+
+Output:
+
+```text
+SHA2-256(/private/tmp/lua-5.4.8.tar.gz)= 4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae
+```
+
+`third_party/README.md` and this report now record that exact value.
