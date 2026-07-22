@@ -103,7 +103,7 @@ Command:
 
 Exit status: `0`
 
-Final result: `10` certification tests passed, covering exact revision/profile and checksum bindings, canonical clients, all-true common evidence, PS5 Community Server/DualSense evidence, release pinning, self-checksum drift, config-only escalation rejection, and `MinRevision` rejection.
+Initial result: `10` certification tests passed, covering exact revision/profile and checksum bindings, canonical clients, the initial evidence shape, release pinning, self-checksum drift, config-only escalation rejection, and `MinRevision` rejection. The Critical review follow-up below supersedes the initial evidence shape and test count.
 
 ### Review regression RED/GREEN — empty object versus array
 
@@ -132,9 +132,9 @@ GREEN command:
 ./scripts/run-tests.sh tests/unit/config_spec.lua tests/unit/binding_manifest_spec.lua tests/unit/certification_spec.lua
 ```
 
-Exit status: `0`; all `31` Task 3 tests passed.
+Exit status: `0`; all `31` Task 3 tests passed at this checkpoint. The Critical review follow-up below expands the certification suite and final count.
 
-### Review regression RED/GREEN — complete certification evidence schema
+### Review regression RED/GREEN — initial evidence schema (superseded)
 
 RED command:
 
@@ -151,7 +151,7 @@ FAIL requires exactly one all-true evidence record for every required client
 expected false, got true
 ```
 
-The failing case omitted a required common evidence field. The implementation now requires exactly `ui_access`, `last_slot_access`, `restart_reconnect`, and `cross_platform_consistency` for every required client, plus `community_server_list` and `dualsense_last_slot` for PS5, with every value exactly `true`.
+The failing case omitted a field from the initial four-boolean schema. This checkpoint added `ui_access`, `last_slot_access`, `restart_reconnect`, and `cross_platform_consistency`, plus two PS5 booleans. Critical review subsequently found that this schema was not sufficient to authorize a Tier-0 slot. It did not prove the full UI, item-integrity, persistence, resilience, concurrency, or PS5 navigation matrix and must not be treated as complete certification evidence.
 
 GREEN command:
 
@@ -159,19 +159,75 @@ GREEN command:
 ./scripts/run-tests.sh tests/unit/certification_spec.lua
 ```
 
-Exit status: `0`; all `10` certification tests passed.
+Exit status: `0`; all `10` certification tests passed against that initial schema. This result is historical and was superseded by the Critical review cycle below.
+
+### Critical review RED/GREEN — complete Tier-0 client evidence
+
+Critical review found that the initial certification record could authorize slots with only four common booleans. Tests were rewritten first around an exact array of client evidence records, then run against the old implementation.
+
+RED command:
+
+```sh
+./scripts/run-tests.sh tests/unit/certification_spec.lua
+```
+
+Exit status: `1`
+
+Representative observed failures:
+
+```text
+FAIL returns only slots authorized by an exactly pinned release artifact
+expected true, got false
+FAIL rejects 358 when sorting, stack split, GUID, or no-crash evidence is absent
+expected "CGCE-CERT-EVIDENCE-MISSING", got "CGCE-CERT-CLIENT-EVIDENCE"
+```
+
+The replacement schema requires exactly one record for each of `SteamWindows`, `PS5`, and `Mac`. Records are carried in an array so duplicate clients can be detected. Every record requires a 64-character lowercase `evidence_checksum` and these `26` common checks, all exactly `true`:
+
+```text
+vanilla_connect, reconnect, guild_join, chest_open,
+first_slot_access, last_slot_access, navigate_all_rows,
+item_deposit, item_withdraw, stack_split, quick_move,
+sort_all_slots, last_slot_after_sort, close_reopen,
+server_restart_persistence, app_restart_persistence,
+concurrent_cross_platform_access, cross_platform_state_match,
+last_slot_item_display, last_slot_quantity_preserved,
+last_slot_guid_preserved, no_ui_freeze, no_client_crash,
+no_network_disconnect, high_latency_pass, packet_loss_pass
+```
+
+The PS5 record additionally requires these `8` checks, all exactly `true`:
+
+```text
+community_server_list, dualsense_dpad_all_rows,
+dualsense_analog_all_rows, dualsense_row_boundary,
+dualsense_last_row_focus, dualsense_tooltip,
+dualsense_stack_split, dualsense_quick_move
+```
+
+Tests reject missing or duplicate clients, missing/false/unknown checks, malformed evidence checksums, incomplete PS5 evidence, and specifically reject slot `358` when sorting, stack-split, last-slot GUID preservation, or no-client-crash evidence is absent.
+
+GREEN command:
+
+```sh
+./scripts/run-tests.sh tests/unit/certification_spec.lua
+```
+
+Exit status: `0`; all `11` certification tests passed.
 
 ## Final verification
 
 Commands:
 
 ```sh
-git diff --cached --check
+git show --check --oneline --stat d8d6749
+git diff --check -- .superpowers/sdd/task-3-report.md
 third_party/lua-5.4.8/src/luac -p CrossplayGuildChestExpander/Scripts/constants.lua CrossplayGuildChestExpander/Scripts/config.lua CrossplayGuildChestExpander/Scripts/binding_manifest.lua CrossplayGuildChestExpander/Scripts/certification.lua tests/unit/config_spec.lua tests/unit/binding_manifest_spec.lua tests/unit/certification_spec.lua
+./scripts/run-tests.sh tests/unit/certification_spec.lua
 ./scripts/run-tests.sh
 ```
 
-Exit status: `0` for every command. The fresh full suite reported `56` passing tests and no failures or warnings.
+Exit status: `0` for every command. After the Critical review correction, the fresh full suite reported `57` passing tests and no failures or warnings.
 
 A production-only static scan found no definition or call of `resize`, `append`, `mark_dirty`, or `replicate`. `binding_manifest.lua` references only the injected read-only adapter methods `read_revision` and `inspect_descriptor`; the forbidden `invoke` method exists only in the test fake and its call count is asserted as zero.
 
@@ -179,7 +235,8 @@ A production-only static scan found no definition or call of `resize`, `append`,
 
 - Configuration accepts exactly the 21 PRD keys, requires every key, preserves JSON value types, and returns only the decoded validated values. It adds no authorization fields.
 - `certification_mode=true` permits parsing a candidate target for a future isolated test-world flow but confers no mutation or production authority. That authorization remains deferred to post-Gate-A Task 12.
-- Local `certified_target_slots` cannot authorize release slots. `certification.verify` returns only slots present in a build-pinned, self-checksummed artifact with exact required evidence.
+- Local `certified_target_slots` cannot authorize release slots. `certification.verify` returns only slots present in a build-pinned, self-checksummed artifact with exactly one complete evidence record for every required client.
+- Each client evidence record has a lowercase SHA-256 evidence reference and the exact 26-field Tier-0 common matrix. PS5 has the exact additional 8-field Community Server and DualSense matrix. Missing, false, unknown, duplicate-client, or malformed-checksum evidence fails closed before any slot is returned.
 - Discovery manifests require an empty object for `symbols`, reject runtime-only fields, carry no mutation-capability field, and treat `tested_platform_matrix` as non-authoritative metadata.
 - Runtime manifests require the source audit checksum and all 16 exact logical descriptors. Descriptor kinds and keys are strict, and live reflection verification is exact/read-only.
 - Manifest and certification checksums are SHA-256 over canonical JSON without the top-level `checksum`; certification additionally requires equality with the release-build pin. No signature mechanism was added.
@@ -190,10 +247,12 @@ A production-only static scan found no definition or call of `resize`, `append`,
 ## Commits
 
 - `92e4865` — `feat: add config and revision trust validation`
+- `d8d6749` — `fix: require complete Tier 0 certification evidence`
 
 ## Concerns
 
 - Discovery Build intentionally has no release certification checksum and therefore cannot produce production slot authorization.
 - No real runtime manifest or certification artifact is included. Exact Palworld symbols must come from the later read-only Discovery Build/Gate A workflow, and platform evidence must come from the later Gate B certification workflow.
+- `evidence_checksum` is validated as an exact lowercase SHA-256 reference. The actual evidence documents are intentionally not present in Task 3; Gate B packaging must include and independently verify the referenced evidence before producing a release artifact.
 - Downstream production authorization must intersect the parsed local config targets with `certification.verify` output; this Task 3 parser deliberately does not create that mutation authorization.
 - No new generalizable LLM Wiki capture was made: the reusable canonical-JSON/checksum trust-boundary principles were already part of the supplied repository plan, and this change only implements the project-specific contract.
