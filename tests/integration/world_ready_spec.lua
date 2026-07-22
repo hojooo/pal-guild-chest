@@ -255,6 +255,51 @@ describe("world_ready bounded selected-world authority", function()
         assert_zero_forbidden(runtime)
     end)
 
+    it("cannot return from an epoch accessor invalidated during fresh validation", function()
+        local accessors = {
+            function(detector)
+                return world_ready.epoch(detector)
+            end,
+            function(_, epoch)
+                return world_ready.world_id(epoch)
+            end,
+            function(_, epoch, runtime)
+                return world_ready.assert_current(
+                    epoch,
+                    runtime.adapter,
+                    runtime.binding_session
+                )
+            end,
+        }
+
+        for _, accessor in ipairs(accessors) do
+            local armed = false
+            local runtime = runtime_binding_fixture.new({
+                ready = false,
+                on_register = function(value)
+                    value:set_ready(true)
+                end,
+                on_find_all = function(value, short_name)
+                    if armed and short_name == "CGCETestSelectedWorld" then
+                        armed = false
+                        value:fire_world_ready()
+                    end
+                end,
+            })
+            local detector = start(runtime, timer_harness())
+            local epoch = world_ready.epoch(detector)
+            a.equal("READY", world_ready.status(detector).state)
+            armed = true
+
+            expect_problem("CGCE-WORLD-EPOCH", "epoch", function()
+                accessor(detector, epoch, runtime)
+            end)
+            a.equal("BLOCKED", world_ready.status(detector).state)
+            a.equal(1, runtime.fake.counters().unregister_hook)
+            assert_zero_forbidden(runtime)
+        end
+    end)
+
     it("rejects superseded sessions and fresh relation drift", function()
         local superseded = runtime_binding_fixture.new()
         local first_detector = start(superseded, timer_harness())
@@ -425,6 +470,64 @@ describe("world_ready bounded selected-world authority", function()
         a.equal("CGCE-WORLD-RELATION-CHANGED", status.errors[1].code)
         a.equal(nil, world_ready.epoch(detector))
         a.equal(0, runtime.fake.counters().register_hook)
+        assert_zero_forbidden(runtime)
+    end)
+
+    it("reprobes instead of losing a world-ready event during final confirmation", function()
+        local container_manager_inspections = 0
+        local runtime = runtime_binding_fixture.new({
+            ready = false,
+            on_register = function(value)
+                value:set_ready(true)
+            end,
+            on_find_all = function(value, short_name)
+                if short_name == "CGCETestContainerManager" then
+                    container_manager_inspections = container_manager_inspections + 1
+                    if container_manager_inspections == 2 then
+                        value:fire_world_ready()
+                        value:set_container_manager(value:add_loaded_container_manager())
+                    end
+                end
+            end,
+        })
+
+        local detector = start(runtime, timer_harness())
+
+        local status = world_ready.status(detector)
+        a.equal("READY", status.state)
+        a.equal(3, status.attempts)
+        a.deep_equal({}, status.errors)
+        local epoch = world_ready.epoch(detector)
+        a.equal("function", type(epoch))
+        a.equal(true, world_ready.assert_current(
+            epoch,
+            runtime.adapter,
+            runtime.binding_session
+        ))
+        a.equal(true, world_ready.close(detector))
+        a.equal(1, runtime.fake.counters().unregister_hook)
+        assert_zero_forbidden(runtime)
+    end)
+
+    it("does not expose READY after an unobserved final-confirmation drift", function()
+        local container_manager_inspections = 0
+        local runtime = runtime_binding_fixture.new({
+            on_find_all = function(value, short_name)
+                if short_name == "CGCETestContainerManager" then
+                    container_manager_inspections = container_manager_inspections + 1
+                    if container_manager_inspections == 2 then
+                        value:set_container_manager(value:add_loaded_container_manager())
+                    end
+                end
+            end,
+        })
+
+        local detector = start(runtime, timer_harness())
+
+        local status = world_ready.status(detector)
+        a.equal("BLOCKED", status.state)
+        a.equal("CGCE-WORLD-RELATION-CHANGED", status.errors[1].code)
+        a.equal(nil, world_ready.epoch(detector))
         assert_zero_forbidden(runtime)
     end)
 

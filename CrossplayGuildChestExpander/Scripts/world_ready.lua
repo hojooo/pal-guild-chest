@@ -51,6 +51,7 @@ local relation_descriptor_names = {
 
 local detector_records = setmetatable({}, { __mode = "k" })
 local epoch_records = setmetatable({}, { __mode = "k" })
+local validate_epoch
 
 local function problem(code, field, detail)
     return {
@@ -326,6 +327,95 @@ local function inspect_relation(record)
         )
     end
 
+    local final_selected_worlds = adapter_inventory_loaded(record.adapter, selected_world_class)
+    if #final_selected_worlds == 0 then
+        return "PENDING", nil, nil
+    end
+    if #final_selected_worlds ~= 1
+        or not adapter_same_object(record.adapter, selected_world, final_selected_worlds[1]) then
+        return "BLOCKED", nil, problem(
+            "CGCE-WORLD-RELATION-CHANGED",
+            "selected_world",
+            "selected-world identity changed during relation inspection"
+        )
+    end
+
+    local final_guild_inventory, final_guild_inventory_status = adapter_inventory_loaded(
+        record.adapter,
+        guild_manager_class
+    )
+    local final_container_inventory, final_container_inventory_status = adapter_inventory_loaded(
+        record.adapter,
+        container_manager_class
+    )
+    local final_ready = adapter_read_property(
+        record.adapter,
+        selected_world,
+        descriptors.world_ready_state_property
+    )
+    local final_world_id = adapter_read_property(
+        record.adapter,
+        selected_world,
+        descriptors.world_id_property
+    )
+    local final_guild_manager = adapter_read_property(
+        record.adapter,
+        selected_world,
+        descriptors.selected_world_guild_manager_property
+    )
+    local final_container_manager = adapter_read_property(
+        record.adapter,
+        selected_world,
+        descriptors.selected_world_container_manager_property
+    )
+
+    if final_ready == false
+        or final_guild_manager == json_null
+        or final_container_manager == json_null
+        or final_guild_inventory_status == "NOT_LOADED"
+        or final_container_inventory_status == "NOT_LOADED"
+        or #final_guild_inventory == 0
+        or #final_container_inventory == 0 then
+        return "PENDING", nil, nil
+    end
+    if final_ready ~= true then
+        return "BLOCKED", nil, problem(
+            "CGCE-WORLD-READY-STATE",
+            "world_ready_state",
+            "world readiness state must remain an exact boolean"
+        )
+    end
+    if not valid_world_id(final_world_id) then
+        return "BLOCKED", nil, problem(
+            "CGCE-WORLD-ID",
+            "world_id",
+            "selected-world ID must remain a nonempty JSON-safe string"
+        )
+    end
+    if final_world_id ~= world_id
+        or not adapter_same_object(record.adapter, guild_manager, final_guild_manager)
+        or not adapter_same_object(record.adapter, container_manager, final_container_manager) then
+        return "BLOCKED", nil, problem(
+            "CGCE-WORLD-RELATION-CHANGED",
+            "relation",
+            "selected-world relation changed during relation inspection"
+        )
+    end
+    if exact_match_count(record.adapter, final_guild_manager, final_guild_inventory) ~= 1 then
+        return "BLOCKED", nil, problem(
+            "CGCE-WORLD-GUILD-MANAGER-RELATION",
+            "guild_manager",
+            "selected-world guild-manager relation changed during inspection"
+        )
+    end
+    if exact_match_count(record.adapter, final_container_manager, final_container_inventory) ~= 1 then
+        return "BLOCKED", nil, problem(
+            "CGCE-WORLD-CONTAINER-MANAGER-RELATION",
+            "container_manager",
+            "selected-world container-manager relation changed during inspection"
+        )
+    end
+
     local final_metadata = binding_metadata(record.binding_session)
     if not metadata_equal(final_metadata, record.binding_metadata) then
         return "BLOCKED", nil, problem(
@@ -490,18 +580,8 @@ local function scheduler_terminal(record, snapshot)
         and snapshot.result ~= nil
         and snapshot.result.outcome == "READY"
         and record.probe_relation ~= nil then
-        local confirmed_outcome, confirmed_relation = safe_inspect_relation(record)
-        if confirmed_outcome ~= "READY"
-            or not same_relation(record.adapter, record.probe_relation, confirmed_relation) then
-            block_and_cleanup_observation(record, problem(
-                "CGCE-WORLD-RELATION-CHANGED",
-                "relation",
-                "selected-world relation changed before epoch issuance"
-            ))
-            return
-        end
         record.state = "READY"
-        create_epoch(record, confirmed_relation)
+        create_epoch(record, record.probe_relation)
         return
     end
 
@@ -572,20 +652,58 @@ function world_ready.start(options)
         close_requested = false,
         observation_cleanup_attempted = false,
         timer_cleanup_attempted = false,
+        observed_event_epoch = function() end,
     }
     detector_records[detector] = record
 
     local function probe()
+        local probe_event_epoch = record.observed_event_epoch
         local outcome, relation, relation_problem = safe_inspect_relation(record)
-        record.probe_relation = relation
-        record.probe_problem = relation_problem
-        if outcome == "READY" then
-            return true, { outcome = "READY" }
+        if not rawequal(probe_event_epoch, record.observed_event_epoch) then
+            record.probe_relation = nil
+            record.probe_problem = nil
+            return false, { outcome = "PENDING" }
         end
         if outcome == "BLOCKED" then
+            record.probe_relation = nil
+            record.probe_problem = relation_problem
             return true, { outcome = "BLOCKED" }
         end
-        return false, { outcome = "PENDING" }
+        if outcome ~= "READY" or relation == nil then
+            record.probe_relation = nil
+            record.probe_problem = nil
+            return false, { outcome = "PENDING" }
+        end
+
+        local confirmed_outcome, confirmed_relation, confirmed_problem = safe_inspect_relation(record)
+        if not rawequal(probe_event_epoch, record.observed_event_epoch) then
+            record.probe_relation = nil
+            record.probe_problem = nil
+            return false, { outcome = "PENDING" }
+        end
+        if confirmed_outcome == "BLOCKED" then
+            record.probe_relation = nil
+            record.probe_problem = confirmed_problem
+            return true, { outcome = "BLOCKED" }
+        end
+        if confirmed_outcome ~= "READY" or confirmed_relation == nil then
+            record.probe_relation = nil
+            record.probe_problem = nil
+            return false, { outcome = "PENDING" }
+        end
+        if not same_relation(record.adapter, relation, confirmed_relation) then
+            record.probe_relation = nil
+            record.probe_problem = problem(
+                "CGCE-WORLD-RELATION-CHANGED",
+                "relation",
+                "selected-world relation changed before epoch issuance"
+            )
+            return true, { outcome = "BLOCKED" }
+        end
+
+        record.probe_relation = confirmed_relation
+        record.probe_problem = nil
+        return true, { outcome = "READY" }
     end
 
     local controller = scheduler_retry({
@@ -610,6 +728,7 @@ function world_ready.start(options)
             if record.close_requested or record.generation ~= observation_generation then
                 return nil
             end
+            record.observed_event_epoch = function() end
             if record.state == "PENDING" then
                 wake_pending(record)
             elseif record.state == "READY" then
@@ -644,6 +763,9 @@ end
 
 function world_ready.status(detector)
     local record = require_detector(detector)
+    if record.state == "READY" and record.epoch ~= nil then
+        pcall(validate_epoch, record.epoch)
+    end
     local attempts = 0
     local timer_pending = false
     if record.controller ~= nil then
@@ -661,8 +783,6 @@ function world_ready.status(detector)
         errors = copy_errors(record.errors),
     }
 end
-
-local validate_epoch
 
 function world_ready.epoch(detector)
     local record = require_detector(detector)
@@ -690,7 +810,21 @@ end
 
 validate_epoch = function(epoch)
     local trusted, detector = require_epoch(epoch)
+    local validation_generation = detector.generation
+    local validation_event_epoch = detector.observed_event_epoch
     local outcome, relation = safe_inspect_relation(detector)
+    local final_trusted, final_detector = require_epoch(epoch)
+    if not rawequal(final_trusted, trusted)
+        or not rawequal(final_detector, detector)
+        or final_detector.generation ~= validation_generation
+        or not rawequal(final_detector.observed_event_epoch, validation_event_epoch) then
+        block_and_cleanup_observation(detector, problem(
+            "CGCE-WORLD-EPOCH-STALE",
+            "epoch",
+            "selected-world epoch changed during fresh validation"
+        ))
+        fail("CGCE-WORLD-EPOCH-STALE", "epoch", "selected-world epoch is stale")
+    end
     if outcome ~= "READY" or relation == nil or not same_relation(trusted.adapter, trusted, relation) then
         block_and_cleanup_observation(detector, problem(
             "CGCE-WORLD-EPOCH-STALE",
