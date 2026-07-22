@@ -441,6 +441,50 @@ local function validate_id_array(value, field)
     end
 end
 
+local function audit_error_mirror_key(index, code, field, detail)
+    return tostring(index) .. "\0" .. code .. "\0" .. field .. "\0" .. detail
+end
+
+local function validate_audit_error_mirrors(value)
+    local expected = {}
+    for index, guild in ipairs(value.guilds) do
+        for _, item in ipairs(guild.errors) do
+            local key = audit_error_mirror_key(index, item.code, item.field, item.detail)
+            expected[key] = (expected[key] or 0) + 1
+        end
+    end
+
+    local actual = {}
+    for _, item in ipairs(value.blocking_errors) do
+        local index_text, field = item.field:match("^guilds%[(%d+)%]%.(.+)$")
+        if index_text ~= nil then
+            local index = tonumber(index_text)
+            if index == nil
+                or math.type(index) ~= "integer"
+                or index < 1
+                or index > #value.guilds
+                or tostring(index) ~= index_text then
+                fail("CGCE-REPORT-AUDIT", "audit.blocking_errors", "embedded audit guild blocker index is invalid")
+            end
+            local key = audit_error_mirror_key(index, item.code, field, item.detail)
+            actual[key] = (actual[key] or 0) + 1
+        elseif item.field:match("^guilds%[") ~= nil then
+            fail("CGCE-REPORT-AUDIT", "audit.blocking_errors", "embedded audit guild blocker field is invalid")
+        end
+    end
+
+    for key, count in pairs(expected) do
+        if actual[key] ~= count then
+            fail("CGCE-REPORT-AUDIT", "audit.blocking_errors", "embedded audit guild errors and blockers differ")
+        end
+    end
+    for key, count in pairs(actual) do
+        if expected[key] ~= count then
+            fail("CGCE-REPORT-AUDIT", "audit.blocking_errors", "embedded audit guild errors and blockers differ")
+        end
+    end
+end
+
 local function validate_audit_shape(value)
     validate_object(value, audit_fields, "audit", "CGCE-REPORT-AUDIT")
     if value.schema ~= "cgce.audit.v1" then
@@ -508,6 +552,7 @@ local function validate_audit_shape(value)
             fail("CGCE-REPORT-AUDIT", field .. ".status", "embedded audit guild status is invalid")
         end
     end
+    validate_audit_error_mirrors(value)
 end
 
 local function validate_embedded_audit(value, expected_checksum)

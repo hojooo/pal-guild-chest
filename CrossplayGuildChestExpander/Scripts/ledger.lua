@@ -385,6 +385,13 @@ function ledger.build(context)
         if source_guild == nil or not is_plain_table(source_guild.snapshot) then
             fail("CGCE-LEDGER-AUDIT-MISMATCH", field .. ".guild_id", "guild has no exact source-audit snapshot")
         end
+        local authorized = (source_guild.status == "eligible_expand"
+                and source_guild.eligible_action == "expand")
+            or (source_guild.status == "eligible_noop"
+                and source_guild.eligible_action == "noop")
+        if not authorized then
+            fail("CGCE-LEDGER-AUDIT-MISMATCH", field .. ".guild_id", "guild has no source-audit ledger authority")
+        end
         local before = source_guild.snapshot
         if input.container_id ~= before.container_id then
             fail("CGCE-LEDGER-AUDIT-MISMATCH", field .. ".container_id", "container identity differs from source audit")

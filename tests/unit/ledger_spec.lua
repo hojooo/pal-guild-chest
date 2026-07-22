@@ -237,6 +237,54 @@ describe("migration ledger", function()
         a.equal(nil, err.detail:find("do-not-render", 1, true))
     end)
 
+    it("grants ledger entry authority only to exact eligible audit actions", function()
+        local excluded_handle = audit.capture(audit_fixture({
+            exclude_guild_ids = { "guild/alpha" },
+        }))
+        local excluded = find_audit_guild(excluded_handle, "guild/alpha")
+        expect_error("CGCE-LEDGER-AUDIT-MISMATCH", "guilds[1].guild_id", function()
+            ledger.build({
+                audit = excluded_handle,
+                mod_version = "1.0.0",
+                guilds = {
+                    {
+                        guild_id = excluded.guild_id,
+                        container_id = excluded.snapshot.container_id,
+                        owner_guild_id = excluded.snapshot.owner_guild_id,
+                        after_slots = 358,
+                        after_occupied_slot_count = excluded.snapshot.occupied_slot_count,
+                        after_total_item_quantity = excluded.snapshot.total_item_quantity,
+                        after_fingerprint = excluded.snapshot.item_fingerprint,
+                        status = "VALIDATING_RESTART_REQUIRED",
+                        restart_required = true,
+                    },
+                },
+            })
+        end)
+
+        local noop_handle = audit.capture(audit_fixture({ alpha_slots = 358 }))
+        local noop = find_audit_guild(noop_handle, "guild/alpha")
+        local value = ledger.build({
+            audit = noop_handle,
+            mod_version = "1.0.0",
+            guilds = {
+                {
+                    guild_id = noop.guild_id,
+                    container_id = noop.snapshot.container_id,
+                    owner_guild_id = noop.snapshot.owner_guild_id,
+                    after_slots = noop.snapshot.slot_count,
+                    after_occupied_slot_count = noop.snapshot.occupied_slot_count,
+                    after_total_item_quantity = noop.snapshot.total_item_quantity,
+                    after_fingerprint = noop.snapshot.item_fingerprint,
+                    status = "COMPLETE",
+                    restart_required = false,
+                },
+            },
+        })
+        a.equal(358, value.guilds[1].before_slots)
+        a.equal(358, value.guilds[1].after_slots)
+    end)
+
     it("loads missing, malformed, read-failed, and valid ledgers distinctly", function()
         local fs = filesystem_with()
         a.deep_equal({ status = "MISSING" }, ledger.load(fs, ROOT, LEDGER_PATH))

@@ -182,6 +182,12 @@ local function unsigned_checksum(value)
     return sha256.hex(json.encode(detached))
 end
 
+local function resign_report(value)
+    value.audit.checksum = unsigned_checksum(value.audit)
+    value.audit_checksum = value.audit.checksum
+    value.checksum = unsigned_checksum(value)
+end
+
 describe("operational report", function()
     it("builds a deterministic discovery-only report from a trusted detached audit", function()
         local context = build_context()
@@ -412,6 +418,37 @@ describe("operational report", function()
             report.persist(fs, ROOT, REPORT_PATH, value)
         end)
         a.equal(0, observed.writes)
+    end)
+
+    it("rejects self-checksummed audit guild and blocker mirror forgeries", function()
+        local mutations = {
+            function(value)
+                value.audit.blocking_errors[1].code = "CGCE-AUD-FORGED"
+            end,
+            function(value)
+                value.audit.blocking_errors[1].detail = "forged detail"
+            end,
+            function(value)
+                value.audit.blocking_errors[1].field = "guilds[2].owner_guild_id"
+            end,
+            function(value)
+                value.audit.blocking_errors = json.array()
+                value.state = "AUDIT_COMPLETE"
+            end,
+        }
+
+        for _, mutate in ipairs(mutations) do
+            local value = json.decode(json.encode(report.build(build_context({
+                audit = blocked_audit(),
+                state = "BLOCKED",
+            }))))
+            mutate(value)
+            resign_report(value)
+
+            expect_error("CGCE-REPORT-AUDIT", "audit.blocking_errors", function()
+                report.validate(value)
+            end)
+        end
     end)
 
     it("uses module-initialization audit accessors instead of mutable public slots", function()
