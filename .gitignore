@@ -3,3 +3,6 @@ third_party/lua-5.4.8/src/*.o
 third_party/lua-5.4.8/src/*.a
 third_party/lua-5.4.8/src/lua
 third_party/lua-5.4.8/src/luac
+
+# Advisory local knowledge graph; regenerate with the Understand Anything workflow.
+.understand-anything/
