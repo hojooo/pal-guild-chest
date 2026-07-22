@@ -2,6 +2,8 @@ local json = {}
 
 json.null = {}
 
+local decoded_empty_arrays = setmetatable({}, { __mode = "k" })
+
 local function is_finite(number)
     return number == number and number ~= math.huge and number ~= -math.huge
 end
@@ -237,6 +239,7 @@ function json.decode(text)
         local array = {}
         if text:sub(index, index) == "]" then
             index = index + 1
+            decoded_empty_arrays[array] = true
             return array
         end
 
@@ -366,6 +369,10 @@ local function encode_string(value)
 end
 
 local function table_kind(value)
+    if decoded_empty_arrays[value] and next(value) == nil then
+        return "array", 0
+    end
+
     local count = 0
     local largest = 0
 

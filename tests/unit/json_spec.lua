@@ -55,6 +55,10 @@ describe("json.encode", function()
         a.equal('{"nothing":null}', json.encode({ nothing = json.null }))
     end)
 
+    it("retains an empty array decoded from JSON", function()
+        a.equal("[]", json.encode(json.decode("[]")))
+    end)
+
     it("rejects non-finite numbers", function()
         a.raises("finite number", function()
             json.encode(math.huge)
