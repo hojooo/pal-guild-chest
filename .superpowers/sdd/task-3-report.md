@@ -236,9 +236,11 @@ git diff --check -- CrossplayGuildChestExpander/Scripts/config.lua tests/unit/co
 third_party/lua-5.4.8/src/luac -p CrossplayGuildChestExpander/Scripts/config.lua tests/unit/config_spec.lua
 ```
 
-Exit status: `0` for every command. The focused suite reported `12` passing config tests, and the fresh repository suite reported `90` passing tests. The regression proves that an otherwise valid apply config retains the empty string while adding no mutation, certification, or production-slot authority. A separate assertion preserves rejection of non-string tokens, and non-empty token values are still not copied into diagnostics.
+Exit status: `0` for every command. The focused suite reported `12` passing config tests, and the historical no-argument unit suite reported `92` passing tests. The regression proves that an otherwise valid apply config retains the empty string while adding no mutation, certification, or production-slot authority. A separate assertion preserves rejection of non-string tokens, and non-empty token values are still not copied into diagnostics.
 
-## Final verification
+At that historical execution point, the no-argument runner selected only `tests/unit/*.lua`; the correct result was `92` passing unit tests, not a repository-wide suite. Integration coverage was not part of that invocation. Separated clean-checkpoint and later current-worktree evidence is recorded below.
+
+## Original Task 3 final verification (historical)
 
 Commands:
 
@@ -250,9 +252,25 @@ third_party/lua-5.4.8/src/luac -p CrossplayGuildChestExpander/Scripts/constants.
 ./scripts/run-tests.sh
 ```
 
-Exit status: `0` for every command. After the Critical review correction, the fresh full suite reported `57` passing tests and no failures or warnings.
+Exit status: `0` for every command. This was the original pre-Task-4/5 Task 3 verification run: the then-default unit-only suite reported `57` passing tests and no failures or warnings.
 
 A production-only static scan found no definition or call of `resize`, `append`, `mark_dirty`, or `replicate`. `binding_manifest.lua` references only the injected read-only adapter methods `read_revision` and `inspect_descriptor`; the forbidden `invoke` method exists only in the test fake and its call count is asserted as zero.
+
+## Post-regression verification checkpoints
+
+Commands:
+
+```sh
+./scripts/run-tests.sh tests/unit/*.lua
+./scripts/run-tests.sh tests/integration/audit_spec.lua tests/integration/discovery_surface_spec.lua
+./scripts/run-tests.sh
+third_party/lua-5.4.8/src/luac -p CrossplayGuildChestExpander/Scripts/config.lua tests/unit/config_spec.lua
+git diff --check -- .superpowers/sdd/task-3-report.md
+```
+
+At the clean review checkpoint, before later Task 5 hardening tests were added, the explicit unit suite reported `92` passing tests and the separately invoked audit/discovery integration suite reported `18` passing tests. Commit `46fd6c3` then changed the no-argument runner to include both groups, so that checkpoint's default total was `110`.
+
+The same three test commands were freshly rerun after the later Task 5 opaque-handle review tests were added to the current worktree. All exited `0`: unit reported `94` passes, integration reported `21`, and the current default runner reported all `115`, with zero failures. The Lua syntax command also exited `0`. These counts are deliberately tied to their execution points and do not rewrite the earlier historical runs.
 
 ## Self-review
 
