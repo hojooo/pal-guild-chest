@@ -1,0 +1,23 @@
+{
+  "config_version": "1.1",
+  "deployment_profile": "windows-dedicated-ps5-macos-required",
+  "mode": "audit",
+  "requested_target_slots": 54,
+  "certified_target_slots": [54],
+  "certification_mode": false,
+  "required_clients": ["SteamWindows", "PS5", "Mac"],
+  "optional_clients": ["Xbox"],
+  "expand_only": true,
+  "require_operator_approval": true,
+  "approval_token": "",
+  "fail_fast": true,
+  "include_guild_ids": [],
+  "exclude_guild_ids": [],
+  "new_guild_hook_enabled": true,
+  "fallback_rescan_enabled": true,
+  "fallback_rescan_seconds": 60,
+  "verify_on_startup": true,
+  "write_migration_ledger": true,
+  "log_level": "INFO",
+  "structured_log": true
+}
