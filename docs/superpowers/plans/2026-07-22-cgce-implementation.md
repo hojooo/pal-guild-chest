@@ -427,9 +427,12 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Create: `CrossplayGuildChestExpander/README.md`
 - Create: `CrossplayGuildChestExpander/CHANGELOG.md`
 - Create: `CrossplayGuildChestExpander/thumbnail.png`
+- Create: `CrossplayGuildChestExpander/Scripts/gate_a_evidence.lua`
+- Create: `docs/gate-a-evidence.schema.json`
 - Create: `scripts/verify-package.sh`
 - Create: `scripts/build-release.sh`
 - Create: `tests/integration/package_spec.lua`
+- Create: `tests/unit/gate_a_evidence_spec.lua`
 - Create: `docs/certification-runbook.md`
 - Create: `docs/requirements-traceability.md`
 
@@ -440,13 +443,14 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - [ ] **Step 2: Verify RED**, create package metadata and static verifier, verify GREEN for a clearly labeled non-release Discovery Build and prove release build remains blocked without Gate A acceptance, exact manifest checksum, pinned certification artifact, and non-zero `MinRevision`.
 - [ ] **Step 3: Document exact backup, audit, approval, apply, verify, update, removal, rollback, discovery, Steam/PS5/macOS certification, performance, and six-hour soak procedures.
 - [ ] **Step 4: Populate requirement traceability** mapping every `FR-*`, `AT-*`, DoD item, and §32 artifact to code/test/manual evidence, with unproven runtime/platform rows marked blocked rather than passed.
+- [ ] **Step 5: Implement the read-only Gate A evidence validator before any mutation module exists.** It accepts only a private/local evidence artifact, validates §32 items 1–16 plus the fatal no-save-or-safe-stop proof, exact report/manifest checksums, UE4SS version, world/revision, reviewer, and timestamp, and emits a checksum-bound acceptance receipt. Raw-ID operational evidence stays ignored/private and is never committed as public release metadata. Prove malformed, partial, unloaded, invoked, mismatched, or public-path evidence cannot produce acceptance and cannot make a release package load mutation code.
 
 ### Task 11: Gate A real Windows server discovery
 
 **Files:**
 - Create after capture: `CrossplayGuildChestExpander/Scripts/bindings/<revision>.json`
-- Create after capture: `artifacts/discovery/<revision>/audit-report.json`
-- Create after review: `artifacts/discovery/<revision>/gate-a-acceptance.json`
+- Create after capture in ignored/private evidence storage: `private-artifacts/discovery/<revision>/audit-report.json`
+- Create after review in ignored/private evidence storage: `private-artifacts/discovery/<revision>/gate-a-acceptance.json`
 - Modify: `docs/requirements-traceability.md`
 
 **Interfaces:**
@@ -456,25 +460,28 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - [ ] **Step 1:** Run the Discovery Build in audit-only mode on the exact target revision.
 - [ ] **Step 2:** Inspect runtime types/functions and record exact paths/signatures for all 16 evidence fields, including empty-slot type, resize/add-slot candidate, dirty/replication candidates, both hooks, and in-use detection. Additionally discover and safely prove a fatal path that suppresses later normal/autosave or immediately stops the server without saving. Reject missing, ambiguous, fuzzy, unloaded, or mismatched candidates; absence of the fatal capability blocks mutation authorization.
 - [ ] **Step 3:** Verify three-way guild/container ownership on representative guilds and prove general containers are excluded.
-- [ ] **Step 4:** Add the exact manifest, run contract tests, independently review the report, and create a checksum-bound `gate-a-acceptance.json`. Mutation remains absent until this acceptance file passes automated validation.
+- [ ] **Step 4:** Add the exact manifest, run contract tests, independently review the report, and create a checksum-bound `gate-a-acceptance.json` through Task 10's already-present read-only validator. Mutation source is not created, packaged, or loaded until this acceptance file passes automated validation.
 
 ### Task 12: Post-Gate-A mutation engine and fatal safety controls
 
 **Files:**
-- Create: `CrossplayGuildChestExpander/Scripts/gate_a.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/mutation_guard.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/mutation_state_machine.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/apply_command.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/migration.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/resizer.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/fatal_safety.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/persisted_verifier.lua`
 - Create: `tests/integration/mutation_guard_spec.lua`
 - Create: `tests/integration/migration_spec.lua`
+- Create: `tests/integration/release_apply_spec.lua`
 
 **Interfaces:**
 - `mutation_guard.authorize(context) -> authorization` requires a valid Gate A acceptance checksum; exact manifest checksum; a verified fatal-save/stop capability; fresh audit captured immediately before apply; an atomically persisted operational-report receipt for that exact audit; approval token matching that fresh audit checksum; live revision/world/profile; safety config invariants `require_operator_approval=true`, `verify_on_startup=true`, and `write_migration_ledger=true`; pinned release certification artifact for production, or the isolated certification exception below. Config booleans can never waive these requirements.
 - Certification exception requires `certification_mode=true`, disposable test-world ID allow-list, candidate slot in `{120,256,358}`, valid Gate A acceptance, and an explicit checksum-bound certification approval token. It is rejected by production builds.
 - Mutation adapter: `execute_in_game_thread(fn)`, `online_player_count()`, `is_any_guild_chest_in_use()`, `is_container_in_use(container)`, `resize_via_verified_function(container,target)`, `mark_dirty(container)`, `replicate(container)`, `enter_fatal_no_save_mode(reason)`.
 - `persisted_verifier` records `VALIDATING_RESTART_REQUIRED`; only next-start live save/reload verification may transition to `COMPLETE`.
+- Discovery `command_router` and `state_machine` remain permanently mutation-incapable. The release entry point may expose `cgce apply` only through `apply_command` after `mutation_guard.authorize`; its separate state machine implements `APPLYING → VALIDATING_RESTART_REQUIRED → COMPLETE` and terminal `FAILED_AFTER_MUTATION`, with no edge back to mutation after a fatal or restart-required state.
 
 - [ ] **Step 1: Write failing guard tests** proving zero mutation for missing/changed Gate A acceptance, manifest checksum drift, absent/unverified fatal-save capability, stale audit/report receipt, world/revision/profile mismatch, any disabled approval/startup-verification/ledger safety flag, config-only slot escalation, missing Tier-0 certification, non-allow-listed test world, or invalid approval token.
 - [ ] **Step 2: Verify RED**, implement authorization with exact checksum equality and fresh audit recapture, verify GREEN.
@@ -482,6 +489,8 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - [ ] **Step 4: Verify RED**, implement only the exact Gate-A-approved resize/add-slot function path; blind raw `TArray` append remains unsupported unless Gate A explicitly proves its factory and persistence semantics. Execute mutation, dirty/replicate, after snapshot, and invariant validation in one `ExecuteInGameThread` callback.
 - [ ] **Step 5: Write failing fatal-safety tests** proving any post-mutation invariant failure enters terminal `FAILED_AFTER_MUTATION`, calls `enter_fatal_no_save_mode`, emits `STOP_SERVER_AND_RESTORE_BACKUP`, and rejects all later mutation/save automation.
 - [ ] **Step 6: Write failing persisted-state tests** proving successful in-memory apply reaches only `VALIDATING_RESTART_REQUIRED`; a next-start live snapshot matching the ledger reaches `COMPLETE`, while mismatch reaches fatal `FAILED` and blocks release.
+- [ ] **Step 7: Write failing release-command/state tests** proving discovery `cgce apply` still returns `MUTATION_BUILD_UNAVAILABLE`, while the release-only command reaches `APPLYING` only after exact authorization and exercises approval, preflight, restart-required, complete, and fatal terminal transitions end to end.
+- [ ] **Step 8: Write failing durable-ledger integration tests** proving each guild follows mutation → same-callback invariant validation → atomic durable ledger receipt before the next guild. Any write, file flush, close, replace, directory flush, or read-back failure after mutation must enter `FAILED_AFTER_MUTATION`, invoke fatal no-save/safe-stop, and leave every later guild unmodified.
 
 ### Task 13: Post-Gate-A replication and new-guild lifecycle
 
@@ -506,8 +515,14 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 **Files:**
 - Create after test: `artifacts/certification/<revision>/release-report.json`
 - Create after test: `artifacts/certification/<revision>/release-certification.json`
+- Create: `CrossplayGuildChestExpander/Scripts/release_report.lua`
 - Modify: `CrossplayGuildChestExpander/config/config.default.json`
 - Modify: `CrossplayGuildChestExpander/Info.json`
+- Modify: `CrossplayGuildChestExpander/Scripts/certification.lua`
+- Modify: `CrossplayGuildChestExpander/Scripts/constants.lua`
+- Modify: `scripts/build-release.sh`
+- Create: `tests/unit/release_report_spec.lua`
+- Modify: `tests/unit/certification_spec.lua`
 - Modify: `docs/requirements-traceability.md`
 
 **Interfaces:**
@@ -515,10 +530,12 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Produces a checksum-pinned release certification artifact, after/reload snapshots, removal evidence, performance baselines, new-guild evidence, and final release eligibility.
 
 - [ ] **Step 1:** Validate all Gate B admission artifacts mechanically, then run 54→120 on an allow-listed disposable world; save/restart/reload, verify every invariant and a second-run mutation count of zero.
-- [ ] **Step 2:** Repeat `120→256→358`; add a slot value to the release certification artifact only after Steam Windows, PS5, and macOS all pass UI, last-slot, restart/reconnect, and cross-platform data checks. PS5 evidence must include discovery through the Community Server list while the server runs with `-publiclobby` and matching advertised/listen ports.
+- [ ] **Step 2:** Repeat `120→256→358`; add a slot value to the release certification artifact only after Steam Windows, PS5, and macOS all pass UI, last-slot, restart/reconnect, and cross-platform data checks. PS5 evidence must include discovery through the Community Server list while the server runs with `-publiclobby` and matching advertised/listen ports. Generate `requested_target_slots` and the shipped default from the greatest common certified prefix only: for example, a macOS failure at 358 must ship 256 even when Steam Windows and PS5 pass 358.
 - [ ] **Step 3:** Create 20 new guilds and prove first-use expansion, hook/fallback behavior, zero tick stalls, and live-state cache invalidation.
-- [ ] **Step 4:** Run concurrent access and the exact removal protocol: back up the world, disable the mod, restart, then prove last-slot access and item GUID/quantity preservation independently on Steam Windows, PS5, and macOS. Run the exact release thresholds: steady CPU ≤1 percentage point; memory ≤100MB; 100-guild audit ≤5s; 100 empty migrations ≤10s; single 54→358 ≤100ms; scan ≥60s; save increase ≤15%; chest-open p95 ≤baseline+300ms; reconnect increase ≤10%; six-hour soak with zero critical errors.
-- [ ] **Step 5:** Generate the checksummed release report and pinned certification artifact, inject exact non-zero `MinRevision`, build the server-only archive, run package/security/full completion audits, and reject release if any manual evidence is absent.
+- [ ] **Step 4:** Run concurrent access and the exact removal protocol: back up the world, disable the mod, restart, then prove last-slot access and item GUID/quantity preservation independently on Steam Windows, PS5, and macOS. Also run guild leave/rejoin, guild-owner transfer, three consecutive restarts, 80%-full storage, eight distinct chests, four clients on one chest, and autosave-concurrent manipulation. Run the exact release thresholds: steady CPU ≤1 percentage point; memory ≤100MB; 100-guild audit ≤5s; 100 empty migrations ≤10s; single 54→358 ≤100ms; scan ≥60s; save increase ≤15%; chest-open p95 ≤baseline+300ms; reconnect increase ≤10%; six-hour soak with zero critical errors.
+- [ ] **Step 5:** Execute a forced fatal path on a disposable world, stop without a normal save, restore the official backup, restart, and re-prove world/item integrity on Steam Windows, PS5, and macOS. Bind this rollback evidence checksum into the release report.
+- [ ] **Step 6:** Install the final archive through the Official Mod Loader on a clean Windows server, update from the prior version, disable/remove, and reinstall it. Prove dependency detection, server-only placement, startup, and post-reinstall audit with primary evidence.
+- [ ] **Step 7:** Generate and independently verify the canonical self-checksummed release report and pinned certification artifact. `certification.verify` must compare the supplied actual manifest, Gate A acceptance, and release-report checksums for exact equality—not merely validate their shape—and the build must pin that verified certification checksum in constants/metadata. Inject exact non-zero `MinRevision`, build the server-only archive, run package/security/full completion audits, and reject release if any checksum link or manual evidence is absent.
 
 ## Plan Self-Review
 
@@ -529,4 +546,6 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Actual save/reload, removal, performance, PS5, and macOS claims remain explicitly unproven until Task 14 produces primary evidence.
 - The apparent §32 circularity is resolved operationally as Gate A (items 1–16, read-only discovery) followed by Gate B (items 17–20, disposable test-world mutation/certification); production mutation remains disabled between them.
 - Fresh audit checksum binding, fatal no-save mode, persisted-state restart verification, config-only certification escalation rejection, path containment, conflict detection, hook cleanup, new-guild evidence, and exact performance thresholds are explicit gates.
+- The Gate A validator exists before mutation source; release apply uses a separate authorized command/state path; durable-ledger failure after mutation is fatal; public artifact checksums are compared to actual inputs; and the shipped target is the highest Steam Windows/PS5/macOS common certified prefix.
+- Rollback restoration, Official Mod Loader clean-install/update/reinstall, three restarts, guild membership/owner changes, autosave concurrency, and the explicit multi-chest/client load matrix are release evidence rather than documentation-only claims.
 - No placeholder game revision or guessed Palworld symbol is accepted as a release manifest.
