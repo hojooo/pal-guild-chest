@@ -114,6 +114,17 @@ local function expect_context_error(field, context)
     a.equal("string", type(err.detail))
 end
 
+local function expect_binding_error(code, field, callback)
+    local ok, err = pcall(callback)
+    a.equal(false, ok)
+    a.equal("table", type(err))
+    a.equal(code, err.code)
+    a.equal(field, err.field)
+    a.equal("string", type(err.detail))
+    a.equal(nil, err.detail:find("0x", 1, true))
+    return err
+end
+
 describe("revision_guard.check", function()
     it("reads live revision exactly once and supports only an exact verified runtime manifest", function()
         local runtime, text = manifest("runtime")
@@ -130,6 +141,166 @@ describe("revision_guard.check", function()
         a.equal(1, calls.load)
         a.equal(27, calls.inspect)
         a.equal(0, calls.invoke)
+    end)
+
+    it("returns an opaque verified binding session only for a supported runtime manifest", function()
+        local runtime, text = manifest("runtime")
+        local context, calls = exact_context(text)
+        local result, session = revision_guard.check(context)
+
+        a.equal("SUPPORTED", result.status)
+        a.equal("function", type(session))
+        a.equal(nil, getmetatable(session))
+
+        local metadata = revision_guard.binding_metadata(session)
+        a.deep_equal({
+            game_revision = result.game_revision,
+            manifest_checksum = result.manifest_checksum,
+            source_audit_checksum = runtime.source_audit_checksum,
+            manifest_kind = result.manifest_kind,
+        }, metadata)
+
+        metadata.game_revision = 1
+        metadata.manifest_checksum = string.rep("f", 64)
+        a.deep_equal({
+            game_revision = 123456,
+            manifest_checksum = runtime.checksum,
+            source_audit_checksum = runtime.source_audit_checksum,
+            manifest_kind = "runtime",
+        }, revision_guard.binding_metadata(session))
+        a.equal(1, calls.read)
+        a.equal(1, calls.load)
+        a.equal(27, calls.inspect)
+        a.equal(0, calls.invoke)
+    end)
+
+    it("returns no binding session for blocked or unsupported outcomes", function()
+        local unsupported_context = exact_context(nil)
+        local unsupported, unsupported_session = revision_guard.check(unsupported_context)
+        a.equal("UNSUPPORTED", unsupported.status)
+        a.equal(nil, unsupported_session)
+
+        local blocked_context = exact_context(nil, {
+            read_revision = function()
+                return nil
+            end,
+        })
+        local blocked, blocked_session = revision_guard.check(blocked_context)
+        a.equal("BLOCKED", blocked.status)
+        a.equal(nil, blocked_session)
+
+        unsupported.status = "SUPPORTED"
+        unsupported.manifest_kind = "runtime"
+        unsupported.manifest_checksum = string.rep("a", 64)
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.binding_metadata(unsupported)
+        end)
+    end)
+
+    it("serves fresh descriptors from the privately verified manifest snapshot", function()
+        local _, text = manifest("runtime")
+        local context, calls = exact_context(text)
+        local inspected_class
+        context.inspect_descriptor = function(logical_name, expected)
+            calls.inspect = calls.inspect + 1
+            local actual = {}
+            for key, value in pairs(expected) do
+                actual[key] = value
+            end
+            if logical_name == "guild_chest_class" then
+                inspected_class = expected
+            end
+            return actual
+        end
+
+        local result, session = revision_guard.check(context)
+        a.equal("SUPPORTED", result.status)
+        inspected_class.path = "/Mutated/InspectorCopy"
+        inspected_class.type_signature = "Mutated"
+
+        local class = revision_guard.descriptor(session, "guild_chest_class")
+        a.deep_equal(descriptor("guild_chest_class"), class)
+        class.path = "/Mutated/CallerCopy"
+        class.type_signature = "Mutated"
+        a.deep_equal(
+            descriptor("guild_chest_class"),
+            revision_guard.descriptor(session, "guild_chest_class")
+        )
+
+        local property = revision_guard.descriptor(session, "world_id_property")
+        a.deep_equal(descriptor("world_id_property"), property)
+        property.owner_path = "/Mutated/Owner"
+        property.member_name = "MutatedMember"
+        a.deep_equal(
+            descriptor("world_id_property"),
+            revision_guard.descriptor(session, "world_id_property")
+        )
+        a.equal(27, calls.inspect)
+        a.equal(0, calls.invoke)
+    end)
+
+    it("rejects forged sessions and unknown logical names without rendering supplied values", function()
+        local _, text = manifest("runtime")
+        local context = exact_context(text)
+        local _, session = revision_guard.check(context)
+
+        local hostile = setmetatable({}, {
+            __tostring = function()
+                error("must not render hostile value")
+            end,
+        })
+        for _, forged in ipairs({ {}, function() end, "forged", false, hostile }) do
+            expect_binding_error("CGCE-REV-SESSION", "session", function()
+                revision_guard.binding_metadata(forged)
+            end)
+        end
+        expect_binding_error("CGCE-REV-SESSION", "session", function()
+            revision_guard.descriptor(nil, "world_id_property")
+        end)
+
+        local unknown = expect_binding_error("CGCE-REV-LOGICAL-NAME", "logical_name", function()
+            revision_guard.descriptor(session, "secret-unknown-logical-name")
+        end)
+        a.equal(nil, unknown.detail:find("secret", 1, true))
+        expect_binding_error("CGCE-REV-LOGICAL-NAME", "logical_name", function()
+            revision_guard.descriptor(session, hostile)
+        end)
+    end)
+
+    it("keeps session authority private from mutable outcomes and public module slots", function()
+        local runtime, text = manifest("runtime")
+        local context = exact_context(text)
+        local original_metadata = revision_guard.binding_metadata
+        local original_descriptor = revision_guard.descriptor
+        revision_guard.binding_metadata = function()
+            return {
+                game_revision = 1,
+                manifest_checksum = string.rep("f", 64),
+            }
+        end
+        revision_guard.descriptor = function()
+            return descriptor("world_ready_function")
+        end
+
+        local result, session = revision_guard.check(context)
+
+        revision_guard.binding_metadata = original_metadata
+        revision_guard.descriptor = original_descriptor
+        result.status = "BLOCKED"
+        result.game_revision = 1
+        result.manifest_kind = "discovery"
+        result.manifest_checksum = string.rep("f", 64)
+
+        a.deep_equal({
+            game_revision = 123456,
+            manifest_checksum = runtime.checksum,
+            source_audit_checksum = runtime.source_audit_checksum,
+            manifest_kind = "runtime",
+        }, original_metadata(session))
+        a.deep_equal(
+            descriptor("world_ready_function"),
+            original_descriptor(session, "world_ready_function")
+        )
     end)
 
     it("classifies a missing exact manifest as unsupported after a valid live read", function()

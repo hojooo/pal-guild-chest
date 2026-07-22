@@ -7,6 +7,8 @@ local json_array = json.array
 local parse_manifest = binding_manifest.parse
 local verify_manifest_types = binding_manifest.verify_types
 
+local binding_sessions = setmetatable({}, { __mode = "k" })
+
 local context_fields = {
     read_revision = true,
     load_manifest = true,
@@ -141,6 +143,72 @@ local function safe_manifest_error(value)
     return { code = code, field = field, detail = detail }
 end
 
+local function copy_descriptor(value)
+    local copy = {
+        kind = value.kind,
+        path = value.path,
+        type_signature = value.type_signature,
+    }
+    if value.kind == "property" then
+        copy.owner_path = value.owner_path
+        copy.member_name = value.member_name
+    end
+    return copy
+end
+
+local function snapshot_runtime_manifest(value)
+    local descriptors = {}
+    for logical_name, descriptor in next, value.symbols do
+        descriptors[logical_name] = copy_descriptor(descriptor)
+    end
+    return {
+        game_revision = value.game_revision,
+        manifest_checksum = value.checksum,
+        source_audit_checksum = value.source_audit_checksum,
+        manifest_kind = value.kind,
+        descriptors = descriptors,
+    }
+end
+
+local function create_binding_session(snapshot)
+    local handle = function() end
+    binding_sessions[handle] = snapshot
+    return handle
+end
+
+local function require_binding_session(session)
+    local trusted = type(session) == "function" and binding_sessions[session] or nil
+    if trusted == nil then
+        fail("CGCE-REV-SESSION", "session", "value is not a verified binding session")
+    end
+    return trusted
+end
+
+function revision_guard.binding_metadata(session)
+    local trusted = require_binding_session(session)
+    return {
+        game_revision = trusted.game_revision,
+        manifest_checksum = trusted.manifest_checksum,
+        source_audit_checksum = trusted.source_audit_checksum,
+        manifest_kind = trusted.manifest_kind,
+    }
+end
+
+function revision_guard.descriptor(session, logical_name)
+    local trusted = require_binding_session(session)
+    local value = type(logical_name) == "string"
+        and trusted.descriptors[logical_name]
+        or nil
+    if value == nil then
+        fail(
+            "CGCE-REV-LOGICAL-NAME",
+            "logical_name",
+            "logical name is not present in the verified binding session"
+        )
+    end
+    return copy_descriptor(value)
+end
+
 function revision_guard.check(context)
     local ports = capture_context(context)
 
@@ -229,6 +297,9 @@ function revision_guard.check(context)
     local manifest = manifest_or_error
     local manifest_kind = rawget(manifest, "kind")
     local manifest_checksum = rawget(manifest, "checksum")
+    local manifest_snapshot = manifest_kind == "runtime"
+        and snapshot_runtime_manifest(manifest)
+        or nil
     local verified, verification_errors = verify_manifest_types(manifest, {
         read_revision = function()
             return live_revision
@@ -265,7 +336,7 @@ function revision_guard.check(context)
         manifest_kind,
         manifest_checksum,
         json_array()
-    )
+    ), create_binding_session(manifest_snapshot)
 end
 
 return revision_guard
