@@ -194,9 +194,6 @@ function config.parse(text)
     end
     validate_boolean(value.require_operator_approval, "require_operator_approval")
     require_type(value.approval_token, "string", "approval_token")
-    if value.mode == "apply" and value.require_operator_approval and #value.approval_token == 0 then
-        fail("CGCE-CFG-APPROVAL", "approval_token", "apply requires an operator approval token")
-    end
 
     validate_boolean(value.fail_fast, "fail_fast")
     local included = validate_guild_ids(value.include_guild_ids, "include_guild_ids")

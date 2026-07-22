@@ -187,11 +187,24 @@ describe("config.parse", function()
         a.equal(nil, parsed.production_authorized_slots)
     end)
 
-    it("requires a non-empty approval token for apply when approval is enabled", function()
-        local err = expect_error("CGCE-CFG-APPROVAL", "approval_token", function()
-            config.parse(json.encode(valid_config({ mode = "apply", approval_token = "secret-value" })):gsub("secret%-value", ""))
+    it("defers an empty apply approval token to audit orchestration without granting authority", function()
+        local parsed = config.parse(json.encode(valid_config({
+            mode = "apply",
+            require_operator_approval = true,
+            approval_token = "",
+        })))
+
+        a.equal("apply", parsed.mode)
+        a.equal("", parsed.approval_token)
+        a.equal(nil, parsed.mutation_authority)
+        a.equal(nil, parsed.certification_authority)
+        a.equal(nil, parsed.production_authorized_slots)
+    end)
+
+    it("type-checks approval tokens without copying token values into diagnostics", function()
+        expect_error("CGCE-CFG-TYPE", "approval_token", function()
+            config.parse(json.encode(valid_config({ mode = "apply", approval_token = 42 })))
         end)
-        a.equal(false, err.detail:find("secret", 1, true) ~= nil)
 
         local ok, mode_err = pcall(config.parse, json.encode(valid_config({
             mode = "invalid",
