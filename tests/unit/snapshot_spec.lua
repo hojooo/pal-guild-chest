@@ -11,6 +11,7 @@ local function expect_error(code, field, fn)
     a.equal(code, err.code)
     a.equal(field, err.field)
     a.equal("string", type(err.detail))
+    return err
 end
 
 local function capture(container, adapter)
@@ -132,6 +133,23 @@ describe("snapshot.capture", function()
         a.equal("guid/opaque", actual.slots[1].dynamic_guid)
         a.equal(nil, actual.slots[1].item)
         a.equal(nil, actual.slots[1].uobject)
+    end)
+
+    it("fails closed when total item quantity exceeds the Lua integer range", function()
+        local err = expect_error(
+            "CGCE-SNAP-QUANTITY-OVERFLOW",
+            "total_item_quantity",
+            function()
+                capture(fake_adapter.container({
+                    slots = {
+                        fake_adapter.slot(fake_adapter.item({ quantity = math.maxinteger })),
+                        fake_adapter.slot(fake_adapter.item({ quantity = 1 })),
+                    },
+                }))
+            end
+        )
+
+        a.equal("total item quantity exceeds Lua integer range", err.detail)
     end)
 
     it("rejects missing adapter methods", function()

@@ -114,6 +114,17 @@ local function validate_item(item, index)
     }
 end
 
+local function add_quantity(total, quantity)
+    if quantity > math.maxinteger - total then
+        fail(
+            "CGCE-SNAP-QUANTITY-OVERFLOW",
+            "total_item_quantity",
+            "total item quantity exceeds Lua integer range"
+        )
+    end
+    return total + quantity
+end
+
 function snapshot.capture(adapter, container)
     require_adapter(adapter)
 
@@ -147,7 +158,7 @@ function snapshot.capture(adapter, container)
             local record = validate_item(item, index)
             records[index] = record
             occupied_records[#occupied_records + 1] = record
-            total_quantity = total_quantity + record.quantity
+            total_quantity = add_quantity(total_quantity, record.quantity)
         end
     end
 
