@@ -292,13 +292,16 @@ local function safe_port_one(adapter, port_name, code, field, detail, ...)
     return results[2]
 end
 
-local function require_adapter(handle, allow_closed)
+local function require_adapter(handle, allow_closed, allow_poisoned)
     local record = adapter_records[handle]
     if record == nil then
         fail("CGCE-UE4SS-ADAPTER-HANDLE", "adapter", "adapter handle is invalid")
     end
     if record.closed and not allow_closed then
         fail("CGCE-UE4SS-CLOSED", "adapter", "adapter is closed")
+    end
+    if record.poisoned and not allow_poisoned then
+        fail("CGCE-UE4SS-POISONED", "adapter", "adapter cleanup state is terminally unsafe")
     end
     return record
 end
@@ -585,6 +588,25 @@ local function copy_observer_errors(errors)
     return result
 end
 
+local function same_observer_error(left, right)
+    return left.code == right.code
+        and left.path == right.path
+        and left.detail == right.detail
+end
+
+local function poison_adapter(adapter, err)
+    if not adapter.poisoned then
+        adapter.poisoned = true
+        adapter.generation = adapter.generation + 1
+    end
+    for _, existing in ipairs(adapter.terminal_errors) do
+        if same_observer_error(existing, err) then
+            return
+        end
+    end
+    adapter.terminal_errors[#adapter.terminal_errors + 1] = err
+end
+
 local function valid_hook_id(value)
     return type(value) == "number" and math.type(value) == "integer" and value > 0
 end
@@ -599,7 +621,7 @@ end
 
 local function close_observation_record(adapter, observation)
     if observation.state == "CLOSED" then
-        return true, nil
+        return observation.cleanup_error == nil, observation.cleanup_error
     end
     observation.state = "CLOSED"
     observation.generation = observation.generation + 1
@@ -615,7 +637,9 @@ local function close_observation_record(adapter, observation)
         observation.path,
         "hook unregister failed"
     )
+    observation.cleanup_error = err
     observation.errors[#observation.errors + 1] = err
+    poison_adapter(adapter, err)
     return false, err
 end
 
@@ -625,13 +649,15 @@ function ue4ss_adapter.new(port)
         port = capture_port(port),
         generation = 1,
         closed = false,
+        poisoned = false,
+        terminal_errors = {},
         observations = {},
     }
     return handle
 end
 
 function ue4ss_adapter.capabilities(handle)
-    require_adapter(handle, true)
+    require_adapter(handle, true, true)
     return {
         mutation_capability = false,
         function_invoke_capability = false,
@@ -775,13 +801,11 @@ function ue4ss_adapter.observe_function(handle, value, observer)
             or observation.state ~= "ACTIVE" then
             return nil
         end
-        local results = table.pack(pcall(observer, {
+        local observer_ok = pcall(observer, {
             phase = "post",
             path = observation.path,
-        }))
-        local secondary_error = results.n >= 3 and results[3] ~= nil
-        if (not results[1] or secondary_error or results.n > 3)
-            and observation.state ~= "CLOSED" then
+        })
+        if not observer_ok and observation.state ~= "CLOSED" then
             observation.state = "FAILED"
             observation.errors[#observation.errors + 1] = observer_problem(
                 "CGCE-UE4SS-OBSERVER-CALLBACK",
@@ -813,8 +837,22 @@ function ue4ss_adapter.observe_function(handle, value, observer)
         or adapter.generation ~= observation.adapter_generation then
         observation.state = "FAILED"
         observation.generation = observation.generation + 1
+        local cleanup_ok = false
         if ids_valid then
-            attempt_unregister(adapter, descriptor.path, pre_id, post_id)
+            cleanup_ok = attempt_unregister(adapter, descriptor.path, pre_id, post_id)
+        end
+        if not ids_valid then
+            poison_adapter(adapter, observer_problem(
+                "CGCE-UE4SS-OBSERVER-CLEANUP-UNCERTAIN",
+                descriptor.path,
+                "hook registration cleanup is uncertain"
+            ))
+        elseif not cleanup_ok then
+            poison_adapter(adapter, observer_problem(
+                "CGCE-UE4SS-OBSERVER-UNREGISTER",
+                descriptor.path,
+                "hook unregister failed"
+            ))
         end
         fail("CGCE-UE4SS-OBSERVER-REGISTER", "descriptor.path", "hook registration failed")
     end
@@ -837,7 +875,7 @@ local function require_observation(adapter_handle, observation_handle)
 end
 
 function ue4ss_adapter.observation_status(adapter_handle, observation_handle)
-    require_adapter(adapter_handle, true)
+    require_adapter(adapter_handle, true, true)
     local observation = require_observation(adapter_handle, observation_handle)
     return {
         state = observation.state,
@@ -846,7 +884,7 @@ function ue4ss_adapter.observation_status(adapter_handle, observation_handle)
 end
 
 function ue4ss_adapter.close_observation(adapter_handle, observation_handle)
-    local adapter = require_adapter(adapter_handle, true)
+    local adapter = require_adapter(adapter_handle, true, true)
     local observation = require_observation(adapter_handle, observation_handle)
     local ok, err = close_observation_record(adapter, observation)
     if ok then
@@ -858,24 +896,18 @@ function ue4ss_adapter.close_observation(adapter_handle, observation_handle)
 end
 
 function ue4ss_adapter.close(handle)
-    local adapter = require_adapter(handle, true)
+    local adapter = require_adapter(handle, true, true)
     if adapter.closed then
-        return true, json_array()
+        local closed_errors = copy_observer_errors(adapter.terminal_errors)
+        return #closed_errors == 0, closed_errors
     end
     adapter.closed = true
     adapter.generation = adapter.generation + 1
 
-    local errors = json_array()
     for index = #adapter.observations, 1, -1 do
-        local ok, err = close_observation_record(adapter, adapter.observations[index])
-        if not ok then
-            errors[#errors + 1] = {
-                code = err.code,
-                path = err.path,
-                detail = err.detail,
-            }
-        end
+        close_observation_record(adapter, adapter.observations[index])
     end
+    local errors = copy_observer_errors(adapter.terminal_errors)
     return #errors == 0, errors
 end
 
