@@ -179,7 +179,7 @@ end
 
 local function validate_mods(mods)
     local length = array_length(mods, "mods")
-    local validated = {}
+    local validated = new_json_array()
     for index = 1, length do
         local field = "mods[" .. index .. "]"
         local record = mods[index]
@@ -189,6 +189,7 @@ local function validate_mods(mods)
         validate_exact_path(record.package_path, field .. ".package_path")
         local claimed_length = array_length(record.claimed_paths, field .. ".claimed_paths")
         local seen = {}
+        local claimed_paths = new_json_array()
         for path_index = 1, claimed_length do
             local path_field = field .. ".claimed_paths[" .. path_index .. "]"
             local path = record.claimed_paths[path_index]
@@ -197,26 +198,63 @@ local function validate_mods(mods)
                 fail("CGCE-CONFLICT-VALUE", field .. ".claimed_paths", "claimed paths must be unique")
             end
             seen[path] = true
+            claimed_paths[path_index] = path
         end
-        validated[index] = record
+        table.sort(claimed_paths)
+        validated[index] = {
+            package_name = record.package_name,
+            package_version = record.package_version,
+            package_path = record.package_path,
+            claimed_paths = claimed_paths,
+        }
     end
+    table.sort(validated, function(left, right)
+        if left.package_name ~= right.package_name then
+            return left.package_name < right.package_name
+        end
+        if left.package_version ~= right.package_version then
+            return left.package_version < right.package_version
+        end
+        if left.package_path ~= right.package_path then
+            return left.package_path < right.package_path
+        end
+        local shared_length = math.min(#left.claimed_paths, #right.claimed_paths)
+        for index = 1, shared_length do
+            if left.claimed_paths[index] ~= right.claimed_paths[index] then
+                return left.claimed_paths[index] < right.claimed_paths[index]
+            end
+        end
+        return #left.claimed_paths < #right.claimed_paths
+    end)
     return validated
 end
 
 local function validate_hooks(hooks)
     local length = array_length(hooks, "hooks")
+    local validated = new_json_array()
     for index = 1, length do
         local field = "hooks[" .. index .. "]"
         local record = hooks[index]
         validate_object(record, hook_fields, field)
         validate_exact_path(record.function_path, field .. ".function_path")
         validate_exact_path(record.owner_package_path, field .. ".owner_package_path")
+        validated[index] = {
+            function_path = record.function_path,
+            owner_package_path = record.owner_package_path,
+        }
     end
-    return length
+    table.sort(validated, function(left, right)
+        if left.function_path ~= right.function_path then
+            return left.function_path < right.function_path
+        end
+        return left.owner_package_path < right.owner_package_path
+    end)
+    return validated
 end
 
 local function validate_containers(containers)
     local length = array_length(containers, "containers")
+    local validated = new_json_array()
     for index = 1, length do
         local field = "containers[" .. index .. "]"
         local record = containers[index]
@@ -226,8 +264,30 @@ local function validate_containers(containers)
         validate_exact_path(record.slot_type_path, field .. ".slot_type_path")
         validate_exact_type(record.slot_type_signature, field .. ".slot_type_signature")
         validate_positive_integer(record.slot_count, field .. ".slot_count")
+        validated[index] = {
+            class_path = record.class_path,
+            class_type_signature = record.class_type_signature,
+            slot_type_path = record.slot_type_path,
+            slot_type_signature = record.slot_type_signature,
+            slot_count = record.slot_count,
+        }
     end
-    return length
+    table.sort(validated, function(left, right)
+        if left.class_path ~= right.class_path then
+            return left.class_path < right.class_path
+        end
+        if left.class_type_signature ~= right.class_type_signature then
+            return left.class_type_signature < right.class_type_signature
+        end
+        if left.slot_type_path ~= right.slot_type_path then
+            return left.slot_type_path < right.slot_type_path
+        end
+        if left.slot_type_signature ~= right.slot_type_signature then
+            return left.slot_type_signature < right.slot_type_signature
+        end
+        return left.slot_count < right.slot_count
+    end)
+    return validated
 end
 
 local function add_finding(findings, code, severity, field, detail, forced_noop)
@@ -253,22 +313,8 @@ local function sort_findings(findings)
 end
 
 local function sorted_inventory(mods)
-    local ordered = {}
-    for index, record in ipairs(mods) do
-        ordered[index] = record
-    end
-    table.sort(ordered, function(left, right)
-        if left.package_name ~= right.package_name then
-            return left.package_name < right.package_name
-        end
-        if left.package_version ~= right.package_version then
-            return left.package_version < right.package_version
-        end
-        return left.package_path < right.package_path
-    end)
-
     local inventory = new_json_array()
-    for index, record in ipairs(ordered) do
+    for index, record in ipairs(mods) do
         inventory[index] = {
             package_name = record.package_name,
             package_version = record.package_version,
@@ -280,8 +326,8 @@ end
 function conflict_detector.scan(policy, mods, hooks, containers)
     validate_policy(policy)
     mods = validate_mods(mods)
-    local hook_count = validate_hooks(hooks)
-    local container_count = validate_containers(containers)
+    hooks = validate_hooks(hooks)
+    containers = validate_containers(containers)
 
     local findings = new_json_array()
     if not policy.gate_a_accepted then
@@ -322,8 +368,7 @@ function conflict_detector.scan(policy, mods, hooks, containers)
         end
     end
 
-    for index = 1, hook_count do
-        local record = hooks[index]
+    for index, record in ipairs(hooks) do
         if record.function_path == policy.paths.container_resizer_hook
             and record.owner_package_path ~= policy.paths.owner_package then
             add_finding(
@@ -341,8 +386,7 @@ function conflict_detector.scan(policy, mods, hooks, containers)
     for _, count in ipairs(policy.known_slot_counts) do
         known_counts[count] = true
     end
-    for index = 1, container_count do
-        local record = containers[index]
+    for index, record in ipairs(containers) do
         local prefix = "containers[" .. index .. "]"
         local expected_class = policy.types.container_class
         if record.class_path ~= expected_class.path

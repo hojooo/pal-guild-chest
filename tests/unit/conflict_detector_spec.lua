@@ -153,7 +153,7 @@ describe("conflict_detector.scan", function()
 
         a.equal(true, result.blocking)
         a.deep_equal({ "CGCE-CONFLICT-HOOK-COLLISION" }, finding_codes(result))
-        a.equal("hooks[3].function_path", result.findings[1].field)
+        a.equal("hooks[2].function_path", result.findings[1].field)
     end)
 
     it("blocks exact container-class and slot-type replacement evidence", function()
@@ -172,8 +172,8 @@ describe("conflict_detector.scan", function()
             "CGCE-CONFLICT-CONTAINER-TYPE-REPLACED",
             "CGCE-CONFLICT-SLOT-TYPE-REPLACED",
         }, finding_codes(result))
-        a.equal("containers[1].class_type_signature", result.findings[1].field)
-        a.equal("containers[2].slot_type_path", result.findings[2].field)
+        a.equal("containers[2].class_type_signature", result.findings[1].field)
+        a.equal("containers[1].slot_type_path", result.findings[2].field)
     end)
 
     it("blocks an unknown count below target and forces no-op for one above target", function()
@@ -303,5 +303,106 @@ describe("conflict_detector.scan", function()
         a.equal(true, ok)
         a.equal("[]", original_encode(result.findings))
         a.equal("[]", original_encode(result.mod_inventory))
+    end)
+
+    it("canonicalizes detached mods and claimed paths before deriving finding indexes", function()
+        local current_policy = policy(true)
+        local first_claims = {
+            current_policy.paths.target_default,
+            current_policy.paths.guild_chest_storage,
+        }
+        local first = mod("Zulu", "2", "/Mods/Zulu", first_claims)
+        local duplicate_one = mod("Alpha", "1", "/Mods/Alpha", {
+            current_policy.paths.guild_chest_storage,
+        })
+        local duplicate_two = mod("Alpha", "1", "/Mods/Alpha", {
+            current_policy.paths.guild_chest_storage,
+        })
+        local original_claims = json.encode(first_claims)
+
+        local forward = conflict_detector.scan(current_policy, {
+            first,
+            duplicate_one,
+            duplicate_two,
+        }, {}, { container(54) })
+        a.equal(original_claims, json.encode(first_claims))
+
+        local reverse = conflict_detector.scan(current_policy, {
+            mod("Alpha", "1", "/Mods/Alpha", {
+                current_policy.paths.guild_chest_storage,
+            }),
+            mod("Zulu", "2", "/Mods/Zulu", {
+                current_policy.paths.guild_chest_storage,
+                current_policy.paths.target_default,
+            }),
+            mod("Alpha", "1", "/Mods/Alpha", {
+                current_policy.paths.guild_chest_storage,
+            }),
+        }, {}, { container(54) })
+
+        a.equal(json.encode(forward), json.encode(reverse))
+    end)
+
+    it("canonicalizes detached hooks before deriving finding indexes", function()
+        local current_policy = policy(true)
+        local near = hook(current_policy.paths.container_resizer_hook .. "Candidate", "/Mods/Near")
+        local owner = hook(current_policy.paths.container_resizer_hook, current_policy.paths.owner_package)
+        local foreign_one = hook(current_policy.paths.container_resizer_hook, "/Mods/Foreign")
+        local foreign_two = hook(current_policy.paths.container_resizer_hook, "/Mods/Foreign")
+        local forward_input = { near, foreign_one, owner, foreign_two }
+
+        local forward = conflict_detector.scan(current_policy, {}, forward_input, { container(54) })
+        a.equal(near, forward_input[1])
+        a.equal(foreign_one, forward_input[2])
+
+        local reverse = conflict_detector.scan(current_policy, {}, {
+            hook(current_policy.paths.container_resizer_hook, "/Mods/Foreign"),
+            hook(current_policy.paths.container_resizer_hook, current_policy.paths.owner_package),
+            hook(current_policy.paths.container_resizer_hook, "/Mods/Foreign"),
+            hook(current_policy.paths.container_resizer_hook .. "Candidate", "/Mods/Near"),
+        }, { container(54) })
+
+        a.equal(json.encode(forward), json.encode(reverse))
+    end)
+
+    it("canonicalizes detached containers before deriving finding indexes", function()
+        local current_policy = policy(true)
+        local class_replaced = container(54)
+        class_replaced.class_type_signature = "class(/Script/Foreign.ReplacedContainer)"
+        local slot_replaced = container(54)
+        slot_replaced.slot_type_path = "/Script/Foreign.ReplacedSlot"
+        local below = container(100)
+        local above_one = container(400)
+        local above_two = container(400)
+        local forward_input = {
+            class_replaced,
+            above_one,
+            slot_replaced,
+            below,
+            above_two,
+        }
+
+        local forward = conflict_detector.scan(current_policy, {}, {}, forward_input)
+        a.equal(class_replaced, forward_input[1])
+        a.equal(above_one, forward_input[2])
+
+        local reverse_class = container(54)
+        reverse_class.class_type_signature = "class(/Script/Foreign.ReplacedContainer)"
+        local reverse_slot = container(54)
+        reverse_slot.slot_type_path = "/Script/Foreign.ReplacedSlot"
+        local reverse = conflict_detector.scan(current_policy, {}, {}, {
+            container(400),
+            container(100),
+            reverse_slot,
+            container(400),
+            reverse_class,
+        })
+
+        a.equal(json.encode(forward), json.encode(reverse))
+        for _, finding in ipairs(forward.findings) do
+            a.equal(nil, finding.detail:find("/Script/", 1, true))
+            a.equal(nil, finding.detail:find("/Save/", 1, true))
+            a.equal(nil, finding.detail:find("/Mods/", 1, true))
+        end
     end)
 end)
