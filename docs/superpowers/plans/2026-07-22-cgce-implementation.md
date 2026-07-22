@@ -274,11 +274,22 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Produces: `state_machine.new({mutation_capability = false})`, `machine:transition(event, context)`; `audit.capture(context) -> immutable_audit`.
 - The Discovery Build has no resizer module and exposes no mutation adapter method.
 
+**Exact contracts:**
+
+- Discovery states are `DISABLED`, `PREFLIGHT`, `WAITING`, `AUDIT`, `AUDIT_COMPLETE`, `AWAITING_APPROVAL`, `BLOCKED`, and `UNSUPPORTED`. Only `enable`, preflight outcomes, world-ready/timeout outcomes, audit conflicts, and `audit_complete` are valid events. `BLOCKED`, `UNSUPPORTED`, `AUDIT_COMPLETE`, and `AWAITING_APPROVAL` are terminal for one execution epoch.
+- When `mutation_capability=false`, the graph contains no `APPLYING`, `VALIDATING`, `COMPLETE`, or `FAILED_AFTER_MUTATION` node or edge. `apply` from any state returns `CGCE-STATE-MUTATION-BUILD-UNAVAILABLE` without changing state; a fresh execution creates a new machine instead of resetting an audit identity in place.
+- `audit.capture` accepts only scalar world/revision/profile/target/filter fields and three read-only ports: `list_guilds`, `resolve_guild_chest`, and `snapshot_container`. The context rejects unknown/write-capable dependencies and never reads `resize`, `append`, `mark_dirty`, `replicate`, game-thread, or raw UObject setter functions.
+- Canonical unsigned audit schema is `cgce.audit.v1` with exact world ID, integer game revision, deployment profile, target, sorted include/exclude arrays, all discovered guild records sorted by opaque guild ID, and deterministic top-level blocking errors. The returned audit adds `checksum = sha256(canonical_unsigned_json)`; timestamps never participate. Expose `audit.canonical_json(value)` and `audit.to_table(value)` because canonical JSON/checksum must be cached before wrapping the result in a recursive read-only proxy.
+- Each guild record contains exact guild ID/name, configured container ID when present, status, `eligible_action = expand|noop|none`, detached Task 4 snapshot when available, and deterministic errors. Missing configured chest IDs are reported as `not_initialized`, not resolved and not treated as conflicts.
+- Establish candidates only through `guild_id -> configured chest_container_id -> resolved owner_guild_id`. Never scan by class/name/position. Detect duplicate non-empty container IDs across every discovered guild before filters; owner mismatch, unresolved references, malformed/non-guild references, and malformed snapshots are blocking even for excluded guilds. Unrelated general containers are never included or snapshotted.
+- Empty include means every guild except explicit excludes. A non-empty include limits action eligibility, but non-selected guilds remain in the audit as `excluded_by_filter`. Include/exclude overlap fails closed. Counts below target are `eligible_expand`; counts at or above target are `eligible_noop`, so 358 and 400 never become shrink candidates.
+- Errors use `{code,field,detail}` and deterministic order. State errors use `CGCE-STATE-INVALID-EVENT`, `CGCE-STATE-INVALID-CONTEXT`, `CGCE-STATE-MUTATION-BUILD-UNAVAILABLE`, or `CGCE-STATE-TERMINAL`; audit errors use the `CGCE-AUD-*` namespace for context, filter overlap, projection, duplicate, unresolved container, owner mismatch, non-guild container, snapshot, and checksum failures.
+
 - [ ] **Step 1: Write failing state-transition table tests** for `DISABLED → PREFLIGHT → WAITING/AUDIT → AUDIT_COMPLETE/AWAITING_APPROVAL` plus terminal `BLOCKED` and `UNSUPPORTED`. Prove `APPLYING`, `VALIDATING`, `COMPLETE`, and `FAILED_AFTER_MUTATION` are unreachable when `mutation_capability=false`.
 - [ ] **Step 2: Verify RED**, implement the explicit discovery-safe transition table, verify GREEN.
 - [ ] **Step 3: Write failing read-only audit tests** for all discovered guilds, 358/400 no-op eligibility, owner mismatch, duplicate IDs, include/exclude, general-container exclusion, and deterministic audit checksum.
 - [ ] **Step 4: Verify RED**, implement audit capture without any write-capable dependency, verify GREEN.
-- [ ] **Step 5: Add an exported-surface test** proving no production file through Task 10 defines `resize`, `append`, `mark_dirty`, `replicate`, raw property writes, or an apply transition.
+- [ ] **Step 5: Add exported-surface tests** proving no production file through Task 10 defines/exports `resize`, `append`, `mark_dirty`, `replicate`, raw property writes, or a mutating state edge. Dynamically load pure production modules behind traps and prove the audit never accesses a write-capable member; permit only the literal `cgce apply` command added later when its tested result is `MUTATION_BUILD_UNAVAILABLE`.
 
 ### Task 6: Approval, reports, ledger, security boundaries, and structured logging
 
@@ -298,7 +309,7 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 **Interfaces:**
 - Produces: `approval.token(fields)`, `report.build(context)`, `report.persist(root, relative_path, value)`, `ledger.load/save/verify`, `path_guard.resolve(root, relative_path)`, `conflict_detector.scan(mods, hooks, container_types)`, `logger.text/jsonl`.
 
-- [ ] **Step 1: Write failing approval tests** using unambiguous length-prefixed UTF-8 fields for world ID, revision, report checksum, target, and profile; prove any field change invalidates the token.
+- [ ] **Step 1: Write failing approval tests** using unambiguous length-prefixed UTF-8 fields for world ID, revision, Task 5 `audit.checksum` as the canonical audit-report checksum, target, and profile; prove any field change invalidates the token. A timestamp-dependent wrapper/report checksum must never substitute for this binding.
 - [ ] **Step 2: Verify RED**, implement SHA-256 approval token, verify GREEN.
 - [ ] **Step 3: Write failing report/ledger tests** for deterministic JSON, atomic temp-write/rename adapter, live save-as-source-of-truth drift, per-guild results, and persistence failure blocking later apply. Prove a completed-guild cache never suppresses startup live-container reinspection and invalidates on revision, target, fingerprint, or owner change.
 - [ ] **Step 4: Verify RED**, implement persistence ports and verification, verify GREEN.
