@@ -25,6 +25,7 @@ local credential_markers = {
     "authorization",
     "apikey",
     "privatekey",
+    "cookie",
 }
 
 local required_fields = { "timestamp", "level", "event" }
@@ -273,9 +274,20 @@ local function find_per_slot_field(value, path)
         end
     end
     for _, key in ipairs(keys) do
+        local normalized = normalize_key(key)
+        if normalized == "granularity" and value[key] == "slot" then
+            return child_path(path, key)
+        end
+        if normalized == "slots" then
+            return child_path(path, key)
+        end
+    end
+    for _, key in ipairs(keys) do
         if is_secondary_per_slot_key(key) then
             return child_path(path, key)
         end
+    end
+    for _, key in ipairs(keys) do
         local found = find_per_slot_field(value[key], child_path(path, key))
         if found then
             return found
@@ -321,13 +333,22 @@ local function replacement_timestamp(timestamp)
     return "timestamp_omitted"
 end
 
-local function oversize_replacement(format, timestamp, original_size)
+local function replacement_event(event_name)
+    if #event_name <= 256 then
+        return event_name
+    end
+    return "event_name_omitted"
+end
+
+local function oversize_replacement(format, timestamp, event_name, original_size)
     return {
         timestamp = replacement_timestamp(timestamp),
         level = "WARNING",
         event = "log_event_oversize",
         format = format,
+        original_event = replacement_event(event_name),
         original_size_bytes = original_size,
+        dropped = true,
     }
 end
 
@@ -343,7 +364,7 @@ local function format_event(value, format)
         return encoded
     end
 
-    local replacement = oversize_replacement(format, sanitized.timestamp, #encoded)
+    local replacement = oversize_replacement(format, sanitized.timestamp, sanitized.event, #encoded)
     local compact = format == "jsonl" and encode_jsonl(replacement) or encode_text(replacement)
     if #compact > MAX_EVENT_BYTES then
         fail("CGCE-LOG-OVERSIZE", nil, "oversize replacement exceeded the fixed event limit")

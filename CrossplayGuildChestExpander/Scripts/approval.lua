@@ -75,16 +75,31 @@ local function valid_utf8(text)
     return true
 end
 
+local function unknown_field(fields)
+    local unknown = {}
+    local has_non_string = false
+    for key in next, fields do
+        if type(key) ~= "string" then
+            has_non_string = true
+        elseif not allowed_fields[key] then
+            unknown[#unknown + 1] = key
+        end
+    end
+    if has_non_string then
+        return "<non-string>"
+    end
+    table.sort(unknown)
+    return unknown[1]
+end
+
 local function validate_fields(fields)
     if type(fields) ~= "table" or getmetatable(fields) ~= nil then
         fail("CGCE-APP-FIELDS", nil, "approval fields must be a plain table")
     end
 
-    for key in next, fields do
-        if type(key) ~= "string" or not allowed_fields[key] then
-            local field = type(key) == "string" and key or "<non-string>"
-            fail("CGCE-APP-UNKNOWN-FIELD", field, "unknown approval field")
-        end
+    local unknown = unknown_field(fields)
+    if unknown then
+        fail("CGCE-APP-UNKNOWN-FIELD", unknown, "unknown approval field")
     end
     for _, field in ipairs(field_order) do
         if fields[field] == nil then

@@ -105,6 +105,22 @@ describe("approval", function()
         end)
     end)
 
+    it("reports unknown fields deterministically without rendering non-string keys", function()
+        expect_error("CGCE-APP-UNKNOWN-FIELD", "a_unknown", function()
+            approval.token(fields({
+                z_unknown = true,
+                a_unknown = true,
+            }))
+        end)
+
+        local non_string = fields({ z_unknown = true })
+        non_string[{}] = true
+        local err = expect_error("CGCE-APP-UNKNOWN-FIELD", "<non-string>", function()
+            approval.token(non_string)
+        end)
+        a.equal(false, err.detail:find("table:", 1, true) ~= nil)
+    end)
+
     it("returns false for malformed candidates without exposing them", function()
         local malformed = {
             false,

@@ -71,6 +71,8 @@ describe("logger", function()
                 ["approval-token"] = "approval-secret",
                 API_KEY = "api-secret",
                 Authorization = "bearer-secret",
+                Cookie = "cookie-secret",
+                ["session-cookie"] = "session-cookie-secret",
                 Credentials = {
                     private_key = "private-secret",
                     safe_value = "visible",
@@ -87,6 +89,8 @@ describe("logger", function()
         a.equal("[REDACTED]", decoded.nested["approval-token"])
         a.equal("[REDACTED]", decoded.nested.API_KEY)
         a.equal("[REDACTED]", decoded.nested.Authorization)
+        a.equal("[REDACTED]", decoded.nested.Cookie)
+        a.equal("[REDACTED]", decoded.nested["session-cookie"])
         a.equal("[REDACTED]", decoded.nested.Credentials)
         a.equal("[REDACTED]", decoded.items[1].refresh_token)
         a.equal("visible-item", decoded.items[1].name)
@@ -151,6 +155,18 @@ describe("logger", function()
                     details = { slot_index = 1, slot_fingerprint = string.rep("a", 64) },
                 }))
             end)
+            expect_error("CGCE-LOG-PER-SLOT", "granularity", function()
+                logger.jsonl(event({
+                    level = level,
+                    granularity = "slot",
+                }))
+            end)
+            expect_error("CGCE-LOG-PER-SLOT", "slots", function()
+                logger.jsonl(event({
+                    level = level,
+                    slots = json.array({ { occupied = false } }),
+                }))
+            end)
         end
 
         local debug = decode_jsonl(logger.jsonl(event({
@@ -163,8 +179,10 @@ describe("logger", function()
             before_slots = 54,
             after_slots = 358,
             occupied_slots = 27,
+            slot_count = 358,
         })))
         a.equal(358, aggregate.after_slots)
+        a.equal(358, aggregate.slot_count)
     end)
 
     it("enforces the 16 KiB boundary including newline and emits valid replacements", function()
@@ -183,6 +201,8 @@ describe("logger", function()
         a.equal("log_event_oversize", replacement.event)
         a.equal("WARNING", replacement.level)
         a.equal("jsonl", replacement.format)
+        a.equal("guild_chest_audited", replacement.original_event)
+        a.equal(true, replacement.dropped)
         a.equal(true, replacement.original_size_bytes > MAX_EVENT_BYTES)
         a.equal(false, oversized_json:find("must-not-appear", 1, true) ~= nil)
         a.equal(false, oversized_json:find(string.rep("x", 128), 1, true) ~= nil)
@@ -192,6 +212,25 @@ describe("logger", function()
         a.equal(true, #oversized_text <= MAX_EVENT_BYTES)
         a.equal(true, oversized_text:find("log_event_oversize", 1, true) ~= nil)
         a.equal(false, oversized_text:find(string.rep("y", 128), 1, true) ~= nil)
+
+        local event_256 = string.rep("a", 253) .. "한"
+        local event_257 = string.rep("a", 254) .. "한"
+        a.equal(256, #event_256)
+        a.equal(257, #event_257)
+
+        local bounded = decode_jsonl(logger.jsonl(event({
+            event = event_256,
+            message = string.rep("z", MAX_EVENT_BYTES),
+        })))
+        a.equal(event_256, bounded.original_event)
+        a.equal(true, bounded.dropped)
+
+        local omitted = decode_jsonl(logger.jsonl(event({
+            event = event_257,
+            message = string.rep("z", MAX_EVENT_BYTES),
+        })))
+        a.equal("event_name_omitted", omitted.original_event)
+        a.equal(true, omitted.dropped)
     end)
 
     it("performs formatting without I/O or mutable sibling dispatch", function()
