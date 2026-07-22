@@ -125,7 +125,11 @@ describe("world_ready bounded selected-world authority", function()
         local epoch = world_ready.epoch(detector)
         a.equal("function", type(epoch))
         a.equal("test-world-alpha", world_ready.world_id(epoch))
-        a.equal(true, world_ready.assert_current(epoch))
+        a.equal(true, world_ready.assert_current(
+            epoch,
+            runtime.adapter,
+            runtime.binding_session
+        ))
 
         local closed, errors = world_ready.close(detector)
         a.equal(true, closed)
@@ -246,7 +250,7 @@ describe("world_ready bounded selected-world authority", function()
         a.equal("CGCE-WORLD-EPOCH-STALE", status.errors[1].code)
         a.equal(1, runtime.fake.counters().unregister_hook)
         expect_problem("CGCE-WORLD-EPOCH", "epoch", function()
-            world_ready.assert_current(epoch)
+            world_ready.assert_current(epoch, runtime.adapter, runtime.binding_session)
         end)
         assert_zero_forbidden(runtime)
     end)
@@ -258,7 +262,11 @@ describe("world_ready bounded selected-world authority", function()
         superseded:supersede_session()
 
         expect_problem("CGCE-WORLD-EPOCH-STALE", "epoch", function()
-            world_ready.assert_current(first_epoch)
+            world_ready.assert_current(
+                first_epoch,
+                superseded.adapter,
+                superseded.binding_session
+            )
         end)
         a.equal("BLOCKED", world_ready.status(first_detector).state)
 
@@ -268,7 +276,11 @@ describe("world_ready bounded selected-world authority", function()
         drifted:set_container_manager(drifted:add_unlisted_container_manager())
 
         expect_problem("CGCE-WORLD-EPOCH-STALE", "epoch", function()
-            world_ready.assert_current(second_epoch)
+            world_ready.assert_current(
+                second_epoch,
+                drifted.adapter,
+                drifted.binding_session
+            )
         end)
         a.equal("BLOCKED", world_ready.status(second_detector).state)
         a.equal(
@@ -489,7 +501,11 @@ describe("world_ready bounded selected-world authority", function()
         poisoned_runtime:fail_world_ready_unregister()
         a.equal(false, ue4ss_adapter.close_observation(poisoned_runtime.adapter, observation))
         expect_problem("CGCE-WORLD-EPOCH-STALE", "epoch", function()
-            world_ready.assert_current(poisoned_epoch)
+            world_ready.assert_current(
+                poisoned_epoch,
+                poisoned_runtime.adapter,
+                poisoned_runtime.binding_session
+            )
         end)
         a.equal("BLOCKED", world_ready.status(poisoned_detector).state)
         assert_zero_forbidden(closed_runtime)
@@ -513,6 +529,29 @@ describe("world_ready bounded selected-world authority", function()
             world_ready.world_id(function() end)
         end)
         a.equal(nil, world_ready.scope)
+
+        local authority_runtime = runtime_binding_fixture.new()
+        local authority_detector = start(authority_runtime, timer_harness())
+        local authority_epoch = world_ready.epoch(authority_detector)
+        expect_problem("CGCE-WORLD-AUTHORITY", "adapter", function()
+            world_ready.assert_current(
+                authority_epoch,
+                function() end,
+                authority_runtime.binding_session
+            )
+        end)
+        expect_problem("CGCE-WORLD-AUTHORITY", "binding_session", function()
+            world_ready.assert_current(
+                authority_epoch,
+                authority_runtime.adapter,
+                function() end
+            )
+        end)
+        expect_problem("CGCE-WORLD-AUTHORITY", "adapter", function()
+            world_ready.assert_current(authority_epoch)
+        end)
+        a.equal(true, world_ready.close(authority_detector))
+        assert_zero_forbidden(authority_runtime)
 
         local exports = {}
         for name in pairs(world_ready) do
@@ -566,7 +605,11 @@ describe("world_ready bounded selected-world authority", function()
             local epoch = world_ready.epoch(detector)
             a.equal("READY", world_ready.status(detector).state)
             a.equal("test-world-alpha", world_ready.world_id(epoch))
-            a.equal(true, world_ready.assert_current(epoch))
+            a.equal(true, world_ready.assert_current(
+                epoch,
+                runtime.adapter,
+                runtime.binding_session
+            ))
             a.equal(true, world_ready.close(detector))
         end)
         for _, replacement in ipairs(replaced) do

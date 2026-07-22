@@ -707,7 +707,22 @@ function world_ready.world_id(epoch)
     return relation.world_id
 end
 
-function world_ready.assert_current(epoch)
+function world_ready.assert_current(epoch, adapter, binding_session)
+    local trusted = require_epoch(epoch)
+    if not rawequal(adapter, trusted.adapter) then
+        fail(
+            "CGCE-WORLD-AUTHORITY",
+            "adapter",
+            "world epoch and read-only adapter authority do not match"
+        )
+    end
+    if not rawequal(binding_session, trusted.binding_session) then
+        fail(
+            "CGCE-WORLD-AUTHORITY",
+            "binding_session",
+            "world epoch and verified binding authority do not match"
+        )
+    end
     validate_epoch(epoch)
     return true
 end
