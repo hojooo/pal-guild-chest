@@ -19,6 +19,8 @@ local function ports(overrides)
     local source = {
         nested = { value = "detached" },
     }
+    local ignored_status_extra = {}
+    ignored_status_extra.self = ignored_status_extra
     local values = {
         status = {
             revision = 12345,
@@ -26,6 +28,8 @@ local function ports(overrides)
             target = 358,
             state = "AUDIT_COMPLETE",
             diagnostic = source,
+            approval_token = "never-expose-status-secret",
+            ignored_status_extra = ignored_status_extra,
         },
         audit = { blocking_errors = {}, source = source },
         guilds = { { name = "Test Guild", state = "observed" } },
@@ -82,8 +86,16 @@ describe("command_router", function()
                 response.payload.source.nested.value = "caller mutation"
                 a.equal("detached", source.nested.value)
             elseif command == "status" then
-                response.payload.diagnostic.nested.value = "caller mutation"
-                a.equal("detached", source.nested.value)
+                a.deep_equal({
+                    revision = 12345,
+                    mode = "audit",
+                    target = 358,
+                    state = "AUDIT_COMPLETE",
+                }, response.payload)
+                local encoded = json.encode(response)
+                a.equal(false, encoded:find("approval_token", 1, true) ~= nil)
+                a.equal(false, encoded:find("never-expose-status-secret", 1, true) ~= nil)
+                a.equal(false, encoded:find("diagnostic", 1, true) ~= nil)
             end
         end
     end)
@@ -108,7 +120,7 @@ describe("command_router", function()
         for _, line in ipairs(rejected) do
             local response, err = run(router, line)
             a.equal(nil, response)
-            assert_error("INVALID_COMMAND", err)
+            assert_error("CGCE-CMD-INVALID-COMMAND", err)
         end
         a.deep_equal({ status = 0, audit = 0, guilds = 0, verify = 0, report_path = 0 }, calls)
     end)
@@ -141,7 +153,7 @@ describe("command_router", function()
         for _, line in ipairs({ false, {}, "cgce status\nsecret", "cgce\tstatus", "cgce status\0secret" }) do
             local response, err = run(router, line)
             a.equal(nil, response)
-            assert_error("INVALID_COMMAND", err)
+            assert_error("CGCE-CMD-INVALID-COMMAND", err)
             a.equal(false, err.detail:find("secret", 1, true) ~= nil)
         end
         a.deep_equal({ status = 0, audit = 0, guilds = 0, verify = 0, report_path = 0 }, calls)
@@ -152,7 +164,7 @@ describe("command_router", function()
         local router = command_router.new(failing_ports)
         local response, err = run(router, "cgce audit")
         a.equal(nil, response)
-        assert_error("COMMAND_PORT_FAILED", err)
+        assert_error("CGCE-CMD-PORT-FAILED", err)
         a.equal(false, err.detail:find("sensitive", 1, true) ~= nil)
 
         local cyclic = {}
@@ -161,7 +173,7 @@ describe("command_router", function()
         router = command_router.new(unsafe_ports)
         response, err = run(router, "cgce verify")
         a.equal(nil, response)
-        assert_error("COMMAND_OUTPUT_INVALID", err)
+        assert_error("CGCE-CMD-OUTPUT-INVALID", err)
     end)
 
     it("preserves empty JSON arrays and explicitly rejects the shared null sentinel", function()
@@ -173,7 +185,7 @@ describe("command_router", function()
         local null_ports = ports({ audit = { missing = json.null } })
         response, err = run(command_router.new(null_ports), "cgce audit")
         a.equal(nil, response)
-        assert_error("COMMAND_OUTPUT_INVALID", err)
+        assert_error("CGCE-CMD-OUTPUT-INVALID", err)
     end)
 
     it("requires semantic revision, mode, target, and state status fields", function()
@@ -188,7 +200,7 @@ describe("command_router", function()
             local read_ports = ports({ status = status })
             local response, err = run(command_router.new(read_ports), "cgce status")
             a.equal(nil, response)
-            assert_error("COMMAND_OUTPUT_INVALID", err)
+            assert_error("CGCE-CMD-OUTPUT-INVALID", err)
         end
     end)
 

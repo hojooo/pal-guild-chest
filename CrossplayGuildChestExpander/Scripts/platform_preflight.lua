@@ -1,3 +1,5 @@
+local json = require("CrossplayGuildChestExpander.Scripts.json")
+
 local platform_preflight = {}
 
 local required_platforms = { "Steam", "PS5", "Mac" }
@@ -39,7 +41,7 @@ end
 
 local function malformed_option(field, detail)
     return nil, make_error(
-        "OPTION_SETTINGS_MALFORMED",
+        "CGCE-PF-OPTION-SETTINGS-MALFORMED",
         field or "option_settings",
         detail or "OptionSettings tuple is malformed"
     )
@@ -70,7 +72,7 @@ local function matching_parenthesis(text, open_index)
             end
             if depth < 0 then
                 return nil, make_error(
-                    "OPTION_SETTINGS_MALFORMED",
+                    "CGCE-PF-OPTION-SETTINGS-MALFORMED",
                     "option_settings",
                     "OptionSettings tuple has an unmatched parenthesis"
                 )
@@ -78,7 +80,7 @@ local function matching_parenthesis(text, open_index)
         end
     end
     return nil, make_error(
-        "OPTION_SETTINGS_MALFORMED",
+        "CGCE-PF-OPTION-SETTINGS-MALFORMED",
         "option_settings",
         "OptionSettings tuple has an unterminated quote or parenthesis"
     )
@@ -108,7 +110,7 @@ local function split_top_level(text, first, last)
         elseif character == ")" then
             if depth == 0 then
                 return nil, make_error(
-                    "OPTION_SETTINGS_MALFORMED",
+                    "CGCE-PF-OPTION-SETTINGS-MALFORMED",
                     "option_settings",
                     "OptionSettings value has an unmatched parenthesis"
                 )
@@ -122,7 +124,7 @@ local function split_top_level(text, first, last)
 
     if quote ~= nil or escaped or depth ~= 0 then
         return nil, make_error(
-            "OPTION_SETTINGS_MALFORMED",
+            "CGCE-PF-OPTION-SETTINGS-MALFORMED",
             "option_settings",
             "OptionSettings value has an unterminated quote or tuple"
         )
@@ -210,7 +212,7 @@ local function parse_platform_tuple(value)
     local first, last = trim_bounds(value, 1, #value)
     if first > last or value:sub(first, first) ~= "(" then
         return nil, make_error(
-            "OPTION_SETTINGS_MALFORMED",
+            "CGCE-PF-OPTION-SETTINGS-MALFORMED",
             "CrossplayPlatforms",
             "CrossplayPlatforms must be a tuple"
         )
@@ -218,7 +220,7 @@ local function parse_platform_tuple(value)
     local close_index, close_error = matching_parenthesis(value, first)
     if close_error or close_index ~= last then
         return nil, make_error(
-            "OPTION_SETTINGS_MALFORMED",
+            "CGCE-PF-OPTION-SETTINGS-MALFORMED",
             "CrossplayPlatforms",
             "CrossplayPlatforms tuple is malformed"
         )
@@ -237,14 +239,14 @@ local function parse_platform_tuple(value)
         local platform = value:sub(item_first, item_last)
         if not allowed_platforms[platform] then
             return nil, make_error(
-                "UNKNOWN_CROSSPLAY_PLATFORM",
+                "CGCE-PF-UNKNOWN-CROSSPLAY-PLATFORM",
                 "CrossplayPlatforms",
                 "CrossplayPlatforms contains an unsupported value"
             )
         end
         if platform_set[platform] then
             return nil, make_error(
-                "DUPLICATE_OPTION_VALUE",
+                "CGCE-PF-DUPLICATE-OPTION-VALUE",
                 "CrossplayPlatforms",
                 "CrossplayPlatforms contains a duplicate value"
             )
@@ -291,7 +293,7 @@ local function parse_option_settings(text)
             local normalized = string.lower(key)
             if by_key[normalized] ~= nil then
                 return nil, make_error(
-                    "DUPLICATE_OPTION_KEY",
+                    "CGCE-PF-DUPLICATE-OPTION-KEY",
                     "option_settings",
                     "OptionSettings contains a duplicate key"
                 )
@@ -352,7 +354,7 @@ end
 local function parse_argv(args)
     local length = dense_argv_length(args)
     if length == nil then
-        return nil, make_error("ARGV_MALFORMED", "args", "argv must be a dense array")
+        return nil, make_error("CGCE-PF-ARGV-MALFORMED", "args", "argv must be a dense array")
     end
 
     local result = { public_lobby = false }
@@ -360,7 +362,7 @@ local function parse_argv(args)
     for index = 1, length do
         local argument = args[index]
         if type(argument) ~= "string" or has_control(argument) then
-            return nil, make_error("ARGV_MALFORMED", "args", "argv entries must be control-free strings")
+            return nil, make_error("CGCE-PF-ARGV-MALFORMED", "args", "argv entries must be control-free strings")
         end
 
         local key, suffix = argument:match("^%-([A-Za-z][A-Za-z0-9%-]*)(.*)$")
@@ -368,7 +370,7 @@ local function parse_argv(args)
             local normalized = string.lower(key)
             if seen[normalized] then
                 return nil, make_error(
-                    "DUPLICATE_CLI_KEY",
+                    "CGCE-PF-DUPLICATE-CLI-KEY",
                     "args",
                     "argv contains a duplicate option key"
                 )
@@ -378,7 +380,7 @@ local function parse_argv(args)
             if normalized == "publiclobby" then
                 if suffix ~= "" then
                     return nil, make_error(
-                        "PUBLIC_LOBBY_INVALID",
+                        "CGCE-PF-PUBLIC-LOBBY-INVALID",
                         "public_lobby",
                         "-publiclobby must be a standalone switch"
                     )
@@ -418,7 +420,7 @@ local function failure_report(finding)
             required_platforms = { Steam = false, PS5 = false, Mac = false },
             xbox = false,
         },
-        findings = { finding },
+        findings = json.array({ finding }),
     }
 end
 
@@ -443,7 +445,7 @@ function platform_preflight.check(args, option_settings)
     local platforms = parsed_options.platforms
     local client_mod_entry = parsed_options.by_key.ballowclientmod
     local log_format_entry = parsed_options.by_key.logformattype
-    local findings = {}
+    local findings = json.array({})
     local client_mod_allowed = nil
     if client_mod_entry ~= nil then
         if client_mod_entry.value == "True" then
@@ -458,26 +460,26 @@ function platform_preflight.check(args, option_settings)
     end
 
     if not parsed_args.public_lobby then
-        add_finding(findings, "PUBLIC_LOBBY_REQUIRED", "public_lobby", "-publiclobby is required")
+        add_finding(findings, "CGCE-PF-PUBLIC-LOBBY-REQUIRED", "public_lobby", "-publiclobby is required")
     end
     if cli_port == nil then
-        add_finding(findings, "GAME_PORT_INVALID", "port", "-port must be an integer from 1 to 65535")
+        add_finding(findings, "CGCE-PF-GAME-PORT-INVALID", "port", "-port must be an integer from 1 to 65535")
     end
     if cli_public_port == nil then
-        add_finding(findings, "PUBLIC_PORT_INVALID", "public_port", "-publicport must be an integer from 1 to 65535")
+        add_finding(findings, "CGCE-PF-PUBLIC-PORT-INVALID", "public_port", "-publicport must be an integer from 1 to 65535")
     end
     if ini_port == nil then
-        add_finding(findings, "OPTION_PUBLIC_PORT_INVALID", "PublicPort", "PublicPort must be an integer from 1 to 65535")
+        add_finding(findings, "CGCE-PF-OPTION-PUBLIC-PORT-INVALID", "PublicPort", "PublicPort must be an integer from 1 to 65535")
     end
     if cli_port ~= nil and cli_public_port ~= nil and ini_port ~= nil
         and (cli_port ~= cli_public_port or cli_port ~= ini_port) then
-        add_finding(findings, "PUBLIC_PORT_MISMATCH", "PublicPort", "advertised and configured ports must match")
+        add_finding(findings, "CGCE-PF-PUBLIC-PORT-MISMATCH", "PublicPort", "advertised and configured ports must match")
     end
     for _, platform in ipairs(required_platforms) do
         if not platforms[platform] then
             add_finding(
                 findings,
-                "REQUIRED_PLATFORM_MISSING",
+                "CGCE-PF-REQUIRED-PLATFORM-MISSING",
                 "CrossplayPlatforms",
                 "a required vanilla client platform is missing"
             )
@@ -486,7 +488,7 @@ function platform_preflight.check(args, option_settings)
     if client_mod_entry == nil or client_mod_entry.value ~= "False" then
         add_finding(
             findings,
-            "CLIENT_MOD_MUST_BE_FALSE",
+            "CGCE-PF-CLIENT-MOD-MUST-BE-FALSE",
             "bAllowClientMod",
             "client mods must be disabled"
         )
@@ -494,7 +496,7 @@ function platform_preflight.check(args, option_settings)
     if log_format_entry == nil or log_format_entry.value ~= "Json" then
         add_finding(
             findings,
-            "LOG_FORMAT_MUST_BE_JSON",
+            "CGCE-PF-LOG-FORMAT-MUST-BE-JSON",
             "LogFormatType",
             "structured JSON logging is required"
         )
@@ -531,7 +533,7 @@ local merge_policy_fields = {
 
 local function validate_merge_policy(policy)
     if type(policy) ~= "table" then
-        return nil, make_error("MERGE_POLICY_INVALID", "policy", "merge policy must be a table")
+        return nil, make_error("CGCE-PF-MERGE-POLICY-INVALID", "policy", "merge policy must be a table")
     end
     local unknown = {}
     local non_string = false
@@ -543,11 +545,11 @@ local function validate_merge_policy(policy)
         end
     end
     if non_string then
-        return nil, make_error("MERGE_POLICY_INVALID", "policy", "merge policy contains an invalid field")
+        return nil, make_error("CGCE-PF-MERGE-POLICY-INVALID", "policy", "merge policy contains an invalid field")
     end
     table.sort(unknown)
     if unknown[1] then
-        return nil, make_error("MERGE_POLICY_INVALID", unknown[1], "merge policy contains an unknown field")
+        return nil, make_error("CGCE-PF-MERGE-POLICY-INVALID", unknown[1], "merge policy contains an unknown field")
     end
 
     local public_port = rawget(policy, "public_port")
@@ -555,11 +557,11 @@ local function validate_merge_policy(policy)
         or math.type(public_port) ~= "integer"
         or public_port < 1
         or public_port > 65535 then
-        return nil, make_error("MERGE_POLICY_INVALID", "public_port", "public_port must be an integer from 1 to 65535")
+        return nil, make_error("CGCE-PF-MERGE-POLICY-INVALID", "public_port", "public_port must be an integer from 1 to 65535")
     end
     local include_xbox = rawget(policy, "include_xbox")
     if include_xbox ~= nil and type(include_xbox) ~= "boolean" then
-        return nil, make_error("MERGE_POLICY_INVALID", "include_xbox", "include_xbox must be a boolean")
+        return nil, make_error("CGCE-PF-MERGE-POLICY-INVALID", "include_xbox", "include_xbox must be a boolean")
     end
     return {
         public_port = public_port,

@@ -2,6 +2,8 @@ local json = require("CrossplayGuildChestExpander.Scripts.json")
 
 local scheduler = {}
 
+local controller_operations = setmetatable({}, { __mode = "k" })
+
 local function make_error(code, field, detail)
     return {
         code = code,
@@ -60,7 +62,7 @@ local retry_option_names = {
 }
 
 local function invalid_options(field, detail)
-    error(make_error("INVALID_SCHEDULER_OPTIONS", field, detail), 0)
+    error(make_error("CGCE-SCHED-INVALID-OPTIONS", field, detail), 0)
 end
 
 local function validate_retry_options(options, probe)
@@ -170,7 +172,7 @@ function scheduler.retry(options, probe)
             if not ok then
                 state = "FAILED"
                 terminal_error = make_error(
-                    "SCHEDULER_CALLBACK_FAILED",
+                    "CGCE-SCHED-CALLBACK-FAILED",
                     "on_terminal",
                     "terminal callback failed"
                 )
@@ -204,7 +206,7 @@ function scheduler.retry(options, probe)
     end
 
     local function callback_failure(field, detail)
-        local err = make_error("SCHEDULER_CALLBACK_FAILED", field, detail)
+        local err = make_error("CGCE-SCHED-CALLBACK-FAILED", field, detail)
         if state == "PENDING" then
             finish("FAILED", err)
         else
@@ -285,7 +287,7 @@ function scheduler.retry(options, probe)
             if not ok then
                 state = "FAILED"
                 terminal_error = make_error(
-                    "SCHEDULER_PROBE_FAILED",
+                    "CGCE-SCHED-PROBE-FAILED",
                     "probe",
                     "world-ready probe failed"
                 )
@@ -295,7 +297,7 @@ function scheduler.retry(options, probe)
         end
         if not ok then
             finish("FAILED", make_error(
-                "SCHEDULER_PROBE_FAILED",
+                "CGCE-SCHED-PROBE-FAILED",
                 "probe",
                 "world-ready probe failed"
             ))
@@ -304,7 +306,7 @@ function scheduler.retry(options, probe)
         end
         if type(ready) ~= "boolean" then
             finish("FAILED", make_error(
-                "SCHEDULER_PROBE_FAILED",
+                "CGCE-SCHED-PROBE-FAILED",
                 "probe",
                 "world-ready probe must return a boolean"
             ))
@@ -315,7 +317,7 @@ function scheduler.retry(options, probe)
         local detached, detached_ok = detach(observed)
         if not detached_ok then
             finish("FAILED", make_error(
-                "SCHEDULER_PROBE_FAILED",
+                "CGCE-SCHED-PROBE-FAILED",
                 "probe",
                 "world-ready probe returned a non-JSON-safe result"
             ))
@@ -379,24 +381,34 @@ function scheduler.retry(options, probe)
         return snapshot()
     end
 
-    local controller = setmetatable({}, {
-        __index = function(_, key)
-            if key == "status" then
-                return status_method
-            end
-            if key == "cancel" then
-                return cancel_method
-            end
-            return nil
-        end,
-        __newindex = function()
-            error("scheduler controller is read-only", 2)
-        end,
-        __metatable = false,
-    })
+    local controller = function() end
+    controller_operations[controller] = {
+        status = status_method,
+        cancel = cancel_method,
+    }
 
     request_pump()
     return controller
+end
+
+local function controller_operation(handle, name)
+    local operations = controller_operations[handle]
+    if operations == nil then
+        return nil, make_error(
+            "CGCE-SCHED-INVALID-HANDLE",
+            "handle",
+            "scheduler controller handle is invalid"
+        )
+    end
+    return operations[name](), nil
+end
+
+function scheduler.status(handle)
+    return controller_operation(handle, "status")
+end
+
+function scheduler.cancel(handle)
+    return controller_operation(handle, "cancel")
 end
 
 function scheduler.rescan_interval(value)
@@ -405,7 +417,7 @@ function scheduler.rescan_interval(value)
     end
     if not finite_number(value) or math.type(value) ~= "integer" or value < 30 then
         return nil, make_error(
-            "INVALID_RESCAN_INTERVAL",
+            "CGCE-SCHED-INVALID-RESCAN-INTERVAL",
             "interval",
             "fallback rescan interval must be an integer of at least 30 seconds"
         )
@@ -413,17 +425,51 @@ function scheduler.rescan_interval(value)
     return value, nil
 end
 
+local cache_fields = {
+    status = true,
+    game_revision = true,
+    target_slots = true,
+    item_fingerprint = true,
+    owner_guild_id = true,
+}
+
+local current_fields = {
+    game_revision = true,
+    target_slots = true,
+    item_fingerprint = true,
+    owner_guild_id = true,
+}
+
+local decision_fields = {
+    phase = true,
+    cache = true,
+    current = true,
+}
+
+local function has_only_fields(value, allowed)
+    if type(value) ~= "table" or getmetatable(value) ~= nil then
+        return false
+    end
+    for key in next, value do
+        if type(key) ~= "string" or not allowed[key] then
+            return false
+        end
+    end
+    return true
+end
+
 local function valid_identity(value, include_status)
-    if type(value) ~= "table" then
+    local allowed = include_status and cache_fields or current_fields
+    if not has_only_fields(value, allowed) then
         return false
     end
     if include_status and type(rawget(value, "status")) ~= "string" then
         return false
     end
-    local revision = rawget(value, "revision")
-    local target = rawget(value, "target")
-    local fingerprint = rawget(value, "fingerprint")
-    local owner = rawget(value, "owner")
+    local revision = rawget(value, "game_revision")
+    local target = rawget(value, "target_slots")
+    local fingerprint = rawget(value, "item_fingerprint")
+    local owner = rawget(value, "owner_guild_id")
     return type(revision) == "number"
         and math.type(revision) == "integer"
         and revision > 0
@@ -431,46 +477,53 @@ local function valid_identity(value, include_status)
         and math.type(target) == "integer"
         and target > 0
         and type(fingerprint) == "string"
-        and fingerprint ~= ""
+        and #fingerprint == 64
+        and fingerprint:match("^[0-9a-f]+$") ~= nil
         and type(owner) == "string"
         and owner ~= ""
 end
 
 function scheduler.cache_decision(input)
-    local reasons = {}
-    if type(input) ~= "table" then
-        return { action = "INSPECT", reasons = { "DECISION_INPUT_MALFORMED" } }
+    local reasons = json.array({})
+    if not has_only_fields(input, decision_fields) then
+        return {
+            action = "INSPECT",
+            reasons = json.array({ "CGCE-SCHED-DECISION-INPUT-MALFORMED" }),
+        }
     end
 
     local phase = rawget(input, "phase")
     local cache = rawget(input, "cache")
     local current = rawget(input, "current")
     if phase ~= "startup" and phase ~= "fallback" then
-        return { action = "INSPECT", reasons = { "DECISION_INPUT_MALFORMED" } }
+        return {
+            action = "INSPECT",
+            reasons = json.array({ "CGCE-SCHED-DECISION-INPUT-MALFORMED" }),
+        }
     end
     if phase == "startup" then
-        reasons[#reasons + 1] = "STARTUP_LIVE_INSPECTION"
+        reasons[#reasons + 1] = "CGCE-SCHED-STARTUP-LIVE-INSPECTION"
     end
 
     local cache_valid = valid_identity(cache, true)
     local current_valid = valid_identity(current, false)
     if cache == nil then
-        reasons[#reasons + 1] = "CACHE_MISSING"
+        reasons[#reasons + 1] = "CGCE-SCHED-CACHE-MISSING"
     elseif not cache_valid then
-        reasons[#reasons + 1] = "CACHE_MALFORMED"
+        reasons[#reasons + 1] = "CGCE-SCHED-CACHE-MALFORMED"
     elseif rawget(cache, "status") ~= "completed" then
-        reasons[#reasons + 1] = "CACHE_NOT_COMPLETED"
+        reasons[#reasons + 1] = "CGCE-SCHED-CACHE-NOT-COMPLETED"
     end
     if not current_valid then
-        reasons[#reasons + 1] = "CURRENT_MALFORMED"
+        reasons[#reasons + 1] = "CGCE-SCHED-CURRENT-MALFORMED"
     end
 
     if cache_valid and current_valid then
         for _, comparison in ipairs({
-            { field = "revision", reason = "REVISION_DRIFT" },
-            { field = "target", reason = "TARGET_DRIFT" },
-            { field = "fingerprint", reason = "FINGERPRINT_DRIFT" },
-            { field = "owner", reason = "OWNER_DRIFT" },
+            { field = "game_revision", reason = "CGCE-SCHED-REVISION-DRIFT" },
+            { field = "target_slots", reason = "CGCE-SCHED-TARGET-DRIFT" },
+            { field = "item_fingerprint", reason = "CGCE-SCHED-FINGERPRINT-DRIFT" },
+            { field = "owner_guild_id", reason = "CGCE-SCHED-OWNER-DRIFT" },
         }) do
             if rawget(cache, comparison.field) ~= rawget(current, comparison.field) then
                 reasons[#reasons + 1] = comparison.reason
@@ -479,7 +532,7 @@ function scheduler.cache_decision(input)
     end
 
     if phase == "fallback" and #reasons == 0 then
-        return { action = "SKIP", reasons = {} }
+        return { action = "SKIP", reasons = json.array({}) }
     end
     return { action = "INSPECT", reasons = reasons }
 end

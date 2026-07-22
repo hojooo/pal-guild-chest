@@ -70,6 +70,7 @@ describe("platform_preflight.check", function()
         a.equal("UNPROVEN", report.certification)
         a.equal(true, report.diagnostic_only)
         a.deep_equal({}, report.findings)
+        a.equal("[]", json.encode(report.findings))
         a.equal(true, report.evidence.public_lobby)
         a.equal(8211, report.evidence.game_port)
         a.equal(8211, report.evidence.public_port)
@@ -116,8 +117,8 @@ describe("platform_preflight.check", function()
         a.equal(false, report.preflight_ok)
         a.equal("PS5_CONNECTIVITY_MISCONFIGURED", report.state)
         a.equal("UNPROVEN", report.certification)
-        a.equal(true, contains(codes, "PUBLIC_LOBBY_REQUIRED"))
-        a.equal(true, contains(codes, "REQUIRED_PLATFORM_MISSING"))
+        a.equal(true, contains(codes, "CGCE-PF-PUBLIC-LOBBY-REQUIRED"))
+        a.equal(true, contains(codes, "CGCE-PF-REQUIRED-PLATFORM-MISSING"))
 
         report = platform_preflight.check(
             argv({ [5] = "-publicport=9000" }),
@@ -126,9 +127,9 @@ describe("platform_preflight.check", function()
                 :gsub("LogFormatType=Json", "LogFormatType=Text", 1)
         )
         codes = finding_codes(report)
-        a.equal(true, contains(codes, "PUBLIC_PORT_MISMATCH"))
-        a.equal(true, contains(codes, "CLIENT_MOD_MUST_BE_FALSE"))
-        a.equal(true, contains(codes, "LOG_FORMAT_MUST_BE_JSON"))
+        a.equal(true, contains(codes, "CGCE-PF-PUBLIC-PORT-MISMATCH"))
+        a.equal(true, contains(codes, "CGCE-PF-CLIENT-MOD-MUST-BE-FALSE"))
+        a.equal(true, contains(codes, "CGCE-PF-LOG-FORMAT-MUST-BE-JSON"))
     end)
 
     it("never treats AllowConnectPlatform or IsServer as compatibility evidence", function()
@@ -140,7 +141,7 @@ describe("platform_preflight.check", function()
         local codes = finding_codes(report)
 
         a.equal(false, report.preflight_ok)
-        a.equal(true, contains(codes, "REQUIRED_PLATFORM_MISSING"))
+        a.equal(true, contains(codes, "CGCE-PF-REQUIRED-PLATFORM-MISSING"))
         a.deep_equal({ Steam = false, PS5 = false, Mac = false }, report.evidence.required_platforms)
     end)
 
@@ -151,10 +152,10 @@ describe("platform_preflight.check", function()
         duplicate[#duplicate + 1] = "-port=8211"
 
         for _, scenario in ipairs({
-            { args = sparse, expected = "ARGV_MALFORMED" },
-            { args = duplicate, expected = "DUPLICATE_CLI_KEY" },
-            { args = argv({ [4] = "-port=not-a-port" }), expected = "GAME_PORT_INVALID" },
-            { args = argv({ [2] = "-publicip=secret\nvalue" }), expected = "ARGV_MALFORMED" },
+            { args = sparse, expected = "CGCE-PF-ARGV-MALFORMED" },
+            { args = duplicate, expected = "CGCE-PF-DUPLICATE-CLI-KEY" },
+            { args = argv({ [4] = "-port=not-a-port" }), expected = "CGCE-PF-GAME-PORT-INVALID" },
+            { args = argv({ [2] = "-publicip=secret\nvalue" }), expected = "CGCE-PF-ARGV-MALFORMED" },
         }) do
             local report = platform_preflight.check(scenario.args, realistic_options())
             a.equal(false, report.preflight_ok)
@@ -171,12 +172,12 @@ describe("platform_preflight.check", function()
                     "PublicPort=8211,publicport=8211",
                     1
                 ),
-                expected = "DUPLICATE_OPTION_KEY",
+                expected = "CGCE-PF-DUPLICATE-OPTION-KEY",
             },
-            { settings = 'OptionSettings=(ServerName="unterminated)', expected = "OPTION_SETTINGS_MALFORMED" },
-            { settings = "OptionSettings=(Nested=(1,2),PublicPort=8211", expected = "OPTION_SETTINGS_MALFORMED" },
-            { settings = "OptionSettings=(ServerName=bad\nvalue)", expected = "OPTION_SETTINGS_MALFORMED" },
-            { settings = realistic_options("(Steam,PS5,Mac,Switch)"), expected = "UNKNOWN_CROSSPLAY_PLATFORM" },
+            { settings = 'OptionSettings=(ServerName="unterminated)', expected = "CGCE-PF-OPTION-SETTINGS-MALFORMED" },
+            { settings = "OptionSettings=(Nested=(1,2),PublicPort=8211", expected = "CGCE-PF-OPTION-SETTINGS-MALFORMED" },
+            { settings = "OptionSettings=(ServerName=bad\nvalue)", expected = "CGCE-PF-OPTION-SETTINGS-MALFORMED" },
+            { settings = realistic_options("(Steam,PS5,Mac,Switch)"), expected = "CGCE-PF-UNKNOWN-CROSSPLAY-PLATFORM" },
         }
 
         for _, scenario in ipairs(scenarios) do
@@ -256,7 +257,7 @@ describe("platform_preflight.merge_option_settings", function()
             { public_port = 8211, include_xbox = false }
         )
         a.equal(nil, merged)
-        a.equal("UNKNOWN_CROSSPLAY_PLATFORM", err.code)
+        a.equal("CGCE-PF-UNKNOWN-CROSSPLAY-PLATFORM", err.code)
 
         merged, err = platform_preflight.merge_option_settings(without_xbox, {
             public_port = 8211,
@@ -264,6 +265,6 @@ describe("platform_preflight.merge_option_settings", function()
             platforms = { "Switch" },
         })
         a.equal(nil, merged)
-        a.equal("MERGE_POLICY_INVALID", err.code)
+        a.equal("CGCE-PF-MERGE-POLICY-INVALID", err.code)
     end)
 end)

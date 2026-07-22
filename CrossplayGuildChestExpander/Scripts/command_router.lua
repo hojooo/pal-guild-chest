@@ -33,7 +33,7 @@ local function make_error(code, field, detail)
 end
 
 local function fail_constructor(field, detail)
-    error(make_error("INVALID_COMMAND_PORTS", field, detail), 0)
+    error(make_error("CGCE-CMD-INVALID-PORTS", field, detail), 0)
 end
 
 local function sorted_unknown_field(value)
@@ -88,7 +88,7 @@ local function call_port(port)
     local called, value, port_error = pcall(port)
     if not called or port_error ~= nil or value == nil then
         return nil, make_error(
-            "COMMAND_PORT_FAILED",
+            "CGCE-CMD-PORT-FAILED",
             "port",
             "read-only command port failed"
         )
@@ -101,10 +101,22 @@ local function status_envelope(ports)
     if port_error then
         return nil, port_error
     end
-    local detached, ok = detach(value)
+    if type(value) ~= "table" then
+        return nil, make_error(
+            "CGCE-CMD-OUTPUT-INVALID",
+            "status",
+            "status output must be an object"
+        )
+    end
+    local detached, ok = detach({
+        revision = rawget(value, "revision"),
+        mode = rawget(value, "mode"),
+        target = rawget(value, "target"),
+        state = rawget(value, "state"),
+    })
     if not ok or type(detached) ~= "table" then
         return nil, make_error(
-            "COMMAND_OUTPUT_INVALID",
+            "CGCE-CMD-OUTPUT-INVALID",
             "status",
             "status output must be a detached JSON object"
         )
@@ -112,7 +124,7 @@ local function status_envelope(ports)
     for _, field in ipairs({ "revision", "mode", "target", "state" }) do
         if detached[field] == nil then
             return nil, make_error(
-                "COMMAND_OUTPUT_INVALID",
+                "CGCE-CMD-OUTPUT-INVALID",
                 field,
                 "status output is missing a required envelope field"
             )
@@ -122,14 +134,14 @@ local function status_envelope(ports)
         or math.type(detached.revision) ~= "integer"
         or detached.revision < 1 then
         return nil, make_error(
-            "COMMAND_OUTPUT_INVALID",
+            "CGCE-CMD-OUTPUT-INVALID",
             "revision",
             "status revision must be a positive integer"
         )
     end
     if detached.mode ~= "audit" and detached.mode ~= "apply" then
         return nil, make_error(
-            "COMMAND_OUTPUT_INVALID",
+            "CGCE-CMD-OUTPUT-INVALID",
             "mode",
             "status mode must be audit or apply"
         )
@@ -138,14 +150,14 @@ local function status_envelope(ports)
         or math.type(detached.target) ~= "integer"
         or detached.target < 1 then
         return nil, make_error(
-            "COMMAND_OUTPUT_INVALID",
+            "CGCE-CMD-OUTPUT-INVALID",
             "target",
             "status target must be a positive integer"
         )
     end
     if type(detached.state) ~= "string" or detached.state == "" then
         return nil, make_error(
-            "COMMAND_OUTPUT_INVALID",
+            "CGCE-CMD-OUTPUT-INVALID",
             "state",
             "status state must be a non-empty string"
         )
@@ -159,7 +171,7 @@ end
 
 local function parse_command(line)
     if type(line) ~= "string" or has_control(line) then
-        return nil, make_error("INVALID_COMMAND", "command", "command must be one control-free line")
+        return nil, make_error("CGCE-CMD-INVALID-COMMAND", "command", "command must be one control-free line")
     end
 
     if line == "cgce apply" or line:match("^cgce apply +") then
@@ -172,7 +184,7 @@ local function parse_command(line)
 
     local command = line:match("^cgce ([a-z%-]+)$")
     if command ~= "status" and command_ports[command] == nil then
-        return nil, make_error("INVALID_COMMAND", "command", "unknown or malformed discovery command")
+        return nil, make_error("CGCE-CMD-INVALID-COMMAND", "command", "unknown or malformed discovery command")
     end
     return command, nil
 end
@@ -180,7 +192,7 @@ end
 function command_router.execute(handle, line)
     local ports = router_ports[handle]
     if ports == nil then
-        return nil, make_error("INVALID_COMMAND_ROUTER", "handle", "command router handle is invalid")
+        return nil, make_error("CGCE-CMD-INVALID-HANDLE", "handle", "command router handle is invalid")
     end
 
     local command, parse_error = parse_command(line)
@@ -193,7 +205,12 @@ function command_router.execute(handle, line)
         return nil, status_error
     end
 
-    local payload = status
+    local payload = {
+        revision = status.revision,
+        mode = status.mode,
+        target = status.target,
+        state = status.state,
+    }
     if command ~= "status" then
         local value, port_error = call_port(ports[command_ports[command]])
         if port_error then
@@ -202,7 +219,7 @@ function command_router.execute(handle, line)
         if command == "export-report" then
             if type(value) ~= "string" or value == "" or has_control(value) then
                 return nil, make_error(
-                    "COMMAND_OUTPUT_INVALID",
+                    "CGCE-CMD-OUTPUT-INVALID",
                     "report_path",
                     "report path must be a non-empty control-free string"
                 )
@@ -213,7 +230,7 @@ function command_router.execute(handle, line)
         payload, ok = detach(value)
         if not ok then
             return nil, make_error(
-                "COMMAND_OUTPUT_INVALID",
+                "CGCE-CMD-OUTPUT-INVALID",
                 "payload",
                 "command output must be a detached JSON value"
             )

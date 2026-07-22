@@ -25,6 +25,18 @@ local function assert_scheduler_error(code, err)
     a.equal("string", type(err.detail))
 end
 
+local function status(controller)
+    local value, err = scheduler.status(controller)
+    a.equal(nil, err)
+    return value
+end
+
+local function cancel(controller)
+    local value, err = scheduler.cancel(controller)
+    a.equal(nil, err)
+    return value
+end
+
 describe("scheduler.retry", function()
     it("probes immediately and delivers one detached READY result", function()
         local terminal_calls = 0
@@ -41,20 +53,20 @@ describe("scheduler.retry", function()
             return true, probe_value
         end)
 
-        local status = controller:status()
-        a.equal("READY", status.state)
-        a.equal(1, status.attempts)
-        a.equal(false, status.timer_pending)
-        a.equal(true, status.result.world.ready)
+        local current = status(controller)
+        a.equal("READY", current.state)
+        a.equal(1, current.attempts)
+        a.equal(false, current.timer_pending)
+        a.equal(true, current.result.world.ready)
         a.equal(true, probe_value.world.ready)
         a.equal(1, terminal_calls)
         a.equal("READY", terminal_result.state)
 
-        status.result.world.ready = "caller change"
-        a.equal(true, controller:status().result.world.ready)
-        controller:cancel()
+        current.result.world.ready = "caller change"
+        a.equal(true, status(controller).result.world.ready)
+        cancel(controller)
         a.equal(1, terminal_calls)
-        a.equal("READY", controller:status().state)
+        a.equal("READY", status(controller).state)
     end)
 
     it("detaches JSON scalar probe results without treating false as failure", function()
@@ -67,8 +79,8 @@ describe("scheduler.retry", function()
             return true, false
         end)
 
-        a.equal("READY", controller:status().state)
-        a.equal(false, controller:status().result)
+        a.equal("READY", status(controller).state)
+        a.equal(false, status(controller).result)
         a.equal(false, terminal_result.result)
     end)
 
@@ -76,14 +88,14 @@ describe("scheduler.retry", function()
         local array_controller = scheduler.retry(options(), function()
             return true, { findings = json.array({}) }
         end)
-        a.equal("READY", array_controller:status().state)
-        a.equal('{"findings":[]}', json.encode(array_controller:status().result))
+        a.equal("READY", status(array_controller).state)
+        a.equal('{"findings":[]}', json.encode(status(array_controller).result))
 
         local null_controller = scheduler.retry(options(), function()
             return true, json.null
         end)
-        a.equal("FAILED", null_controller:status().state)
-        assert_scheduler_error("SCHEDULER_PROBE_FAILED", null_controller:status().error)
+        a.equal("FAILED", status(null_controller).state)
+        assert_scheduler_error("CGCE-SCHED-PROBE-FAILED", status(null_controller).error)
     end)
 
     it("keeps at most one timer and exhausts at the explicit attempt bound", function()
@@ -110,24 +122,24 @@ describe("scheduler.retry", function()
             return false, { observed = probes }
         end)
 
-        a.equal("PENDING", controller:status().state)
-        a.equal(1, controller:status().attempts)
-        a.equal(true, controller:status().timer_pending)
+        a.equal("PENDING", status(controller).state)
+        a.equal(1, status(controller).attempts)
+        a.equal(true, status(controller).timer_pending)
 
         local first = queued[1]
         queued[1] = nil
         first.callback()
         a.equal(2, probes)
-        a.equal("PENDING", controller:status().state)
+        a.equal("PENDING", status(controller).state)
         local second = queued[1]
 
         queued[1] = nil
         second.callback()
-        local status = controller:status()
-        a.equal("EXHAUSTED", status.state)
-        a.equal(3, status.attempts)
-        a.equal(false, status.timer_pending)
-        a.equal(3, status.last_result.observed)
+        local current = status(controller)
+        a.equal("EXHAUSTED", current.state)
+        a.equal(3, current.attempts)
+        a.equal(false, current.timer_pending)
+        a.equal(3, current.last_result.observed)
         a.equal(1, terminal_calls)
         a.equal(0, #cancelled)
 
@@ -161,8 +173,8 @@ describe("scheduler.retry", function()
             return false
         end)
 
-        a.equal("EXHAUSTED", controller:status().state)
-        a.equal(1000, controller:status().attempts)
+        a.equal("EXHAUSTED", status(controller).state)
+        a.equal(1000, status(controller).attempts)
         a.equal(1000, probes)
         a.equal(999, schedules)
         a.equal(1, terminal_calls)
@@ -191,16 +203,16 @@ describe("scheduler.retry", function()
             return false
         end)
 
-        local cancelled = controller:cancel()
+        local cancelled = cancel(controller)
         a.equal("CANCELLED", cancelled.state)
         a.equal(1, cancel_calls)
         a.equal(1, terminal_calls)
-        controller:cancel()
+        cancel(controller)
         callback()
         a.equal(1, probes)
         a.equal(1, cancel_calls)
         a.equal(1, terminal_calls)
-        a.equal("CANCELLED", controller:status().state)
+        a.equal("CANCELLED", status(controller).state)
     end)
 
     it("does not schedule after a probe reentrantly cancels the controller", function()
@@ -222,15 +234,15 @@ describe("scheduler.retry", function()
             end,
         }), function(attempt)
             if attempt == 2 then
-                controller:cancel()
+                cancel(controller)
             end
             return false
         end)
 
         callback()
-        local status = controller:status()
-        a.equal("CANCELLED", status.state)
-        a.equal(false, status.timer_pending)
+        local current = status(controller)
+        a.equal("CANCELLED", current.state)
+        a.equal(false, current.timer_pending)
         a.equal(1, schedule_calls)
         a.equal(1, terminal_calls)
     end)
@@ -249,7 +261,7 @@ describe("scheduler.retry", function()
                     first_callback = callback
                     return { generation = 1 }
                 end
-                controller:cancel()
+                cancel(controller)
                 return second_timer
             end,
             cancel = function(timer)
@@ -264,9 +276,9 @@ describe("scheduler.retry", function()
         end)
 
         first_callback()
-        local status = controller:status()
-        a.equal("CANCELLED", status.state)
-        a.equal(false, status.timer_pending)
+        local current = status(controller)
+        a.equal("CANCELLED", current.state)
+        a.equal(false, current.timer_pending)
         a.equal(2, schedule_calls)
         a.equal(1, cancel_calls)
         a.equal(1, terminal_calls)
@@ -284,7 +296,7 @@ describe("scheduler.retry", function()
                     first_callback = callback
                     return { generation = 1 }
                 end
-                controller:cancel()
+                cancel(controller)
                 return { generation = 2 }
             end,
             cancel = function()
@@ -298,37 +310,37 @@ describe("scheduler.retry", function()
         end)
 
         first_callback()
-        local status = controller:status()
-        a.equal("FAILED", status.state)
-        assert_scheduler_error("SCHEDULER_CALLBACK_FAILED", status.error)
+        local current = status(controller)
+        a.equal("FAILED", current.state)
+        assert_scheduler_error("CGCE-SCHED-CALLBACK-FAILED", current.error)
         a.equal(1, #terminal_results)
         a.equal("FAILED", terminal_results[1].state)
-        assert_scheduler_error("SCHEDULER_CALLBACK_FAILED", terminal_results[1].error)
+        assert_scheduler_error("CGCE-SCHED-CALLBACK-FAILED", terminal_results[1].error)
     end)
 
     it("fails closed on probe, scheduling, cancellation, and terminal callback errors", function()
         local probe_controller = scheduler.retry(options(), function()
             error("sensitive probe detail")
         end)
-        local probe_status = probe_controller:status()
+        local probe_status = status(probe_controller)
         a.equal("FAILED", probe_status.state)
-        assert_scheduler_error("SCHEDULER_PROBE_FAILED", probe_status.error)
+        assert_scheduler_error("CGCE-SCHED-PROBE-FAILED", probe_status.error)
         a.equal(false, probe_status.error.detail:find("sensitive", 1, true) ~= nil)
 
         local schedule_controller = scheduler.retry(options({
             schedule = function() error("sensitive schedule detail") end,
         }), function() return false end)
-        local schedule_status = schedule_controller:status()
+        local schedule_status = status(schedule_controller)
         a.equal("FAILED", schedule_status.state)
-        assert_scheduler_error("SCHEDULER_CALLBACK_FAILED", schedule_status.error)
+        assert_scheduler_error("CGCE-SCHED-CALLBACK-FAILED", schedule_status.error)
 
         local cancel_controller = scheduler.retry(options({
             schedule = function(_, callback) return callback end,
             cancel = function() error("sensitive cancel detail") end,
         }), function() return false end)
-        local cancel_status = cancel_controller:cancel()
+        local cancel_status = cancel(cancel_controller)
         a.equal("FAILED", cancel_status.state)
-        assert_scheduler_error("SCHEDULER_CALLBACK_FAILED", cancel_status.error)
+        assert_scheduler_error("CGCE-SCHED-CALLBACK-FAILED", cancel_status.error)
 
         local returned_error_controller = scheduler.retry(options({
             schedule = function(_, callback) return callback end,
@@ -336,9 +348,9 @@ describe("scheduler.retry", function()
                 return nil, { code = "SENSITIVE_CANCEL_FAILURE" }
             end,
         }), function() return false end)
-        local returned_error_status = returned_error_controller:cancel()
+        local returned_error_status = cancel(returned_error_controller)
         a.equal("FAILED", returned_error_status.state)
-        assert_scheduler_error("SCHEDULER_CALLBACK_FAILED", returned_error_status.error)
+        assert_scheduler_error("CGCE-SCHED-CALLBACK-FAILED", returned_error_status.error)
         a.equal(false, returned_error_status.error.detail:find("SENSITIVE", 1, true) ~= nil)
 
         local terminal_calls = 0
@@ -348,10 +360,10 @@ describe("scheduler.retry", function()
                 error("sensitive terminal detail")
             end,
         }), function() return true end)
-        a.equal("FAILED", terminal_controller:status().state)
-        assert_scheduler_error("SCHEDULER_CALLBACK_FAILED", terminal_controller:status().error)
+        a.equal("FAILED", status(terminal_controller).state)
+        assert_scheduler_error("CGCE-SCHED-CALLBACK-FAILED", status(terminal_controller).error)
         a.equal(1, terminal_calls)
-        terminal_controller:cancel()
+        cancel(terminal_controller)
         a.equal(1, terminal_calls)
     end)
 
@@ -373,6 +385,46 @@ describe("scheduler.retry", function()
             a.equal(false, ok)
         end
         a.equal(0, probes)
+
+        local ok, err = pcall(scheduler.retry, options({ max_attempts = 0 }), function()
+            return true
+        end)
+        a.equal(false, ok)
+        assert_scheduler_error("CGCE-SCHED-INVALID-OPTIONS", err)
+    end)
+
+    it("uses an opaque handle and rejects forged handles without shadowable methods", function()
+        local controller = scheduler.retry(options(), function()
+            return true
+        end)
+        a.equal("function", type(controller))
+        a.equal(false, pcall(function()
+            rawset(controller, "status", function() return { state = "READY" } end)
+        end))
+
+        for _, forged in ipairs({ function() end, {}, "forged", false }) do
+            local value, err = scheduler.status(forged)
+            a.equal(nil, value)
+            assert_scheduler_error("CGCE-SCHED-INVALID-HANDLE", err)
+
+            value, err = scheduler.cancel(forged)
+            a.equal(nil, value)
+            assert_scheduler_error("CGCE-SCHED-INVALID-HANDLE", err)
+        end
+        local value, err = scheduler.status(nil)
+        a.equal(nil, value)
+        assert_scheduler_error("CGCE-SCHED-INVALID-HANDLE", err)
+
+        local trusted_status = scheduler.status
+        local trusted_cancel = scheduler.cancel
+        rawset(scheduler, "status", function() return { state = "forged" } end)
+        rawset(scheduler, "cancel", function() return { state = "forged" } end)
+        local trusted_ok, trusted_value, trusted_error = pcall(trusted_status, controller)
+        rawset(scheduler, "status", trusted_status)
+        rawset(scheduler, "cancel", trusted_cancel)
+        a.equal(true, trusted_ok)
+        a.equal(nil, trusted_error)
+        a.equal("READY", trusted_value.state)
     end)
 end)
 
@@ -385,23 +437,23 @@ describe("scheduler rescan and cache policy", function()
         for _, value in ipairs({ 0, 29, 30.5, math.huge, "60" }) do
             local interval, err = scheduler.rescan_interval(value)
             a.equal(nil, interval)
-            assert_scheduler_error("INVALID_RESCAN_INTERVAL", err)
+            assert_scheduler_error("CGCE-SCHED-INVALID-RESCAN-INTERVAL", err)
         end
     end)
 
     it("always inspects live state at startup even when a completed cache matches", function()
         local cache = {
             status = "completed",
-            revision = 12345,
-            target = 358,
-            fingerprint = "sha256:fixture",
-            owner = "guild/fixture",
+            game_revision = 12345,
+            target_slots = 358,
+            item_fingerprint = string.rep("a", 64),
+            owner_guild_id = "guild/fixture",
         }
         local current = {
-            revision = 12345,
-            target = 358,
-            fingerprint = "sha256:fixture",
-            owner = "guild/fixture",
+            game_revision = 12345,
+            target_slots = 358,
+            item_fingerprint = string.rep("a", 64),
+            owner_guild_id = "guild/fixture",
         }
 
         local decision = scheduler.cache_decision({
@@ -410,7 +462,7 @@ describe("scheduler rescan and cache policy", function()
             current = current,
         })
         a.equal("INSPECT", decision.action)
-        a.deep_equal({ "STARTUP_LIVE_INSPECTION" }, decision.reasons)
+        a.deep_equal({ "CGCE-SCHED-STARTUP-LIVE-INSPECTION" }, decision.reasons)
 
         decision = scheduler.cache_decision({
             phase = "fallback",
@@ -419,6 +471,7 @@ describe("scheduler rescan and cache policy", function()
         })
         a.equal("SKIP", decision.action)
         a.deep_equal({}, decision.reasons)
+        a.equal("[]", json.encode(decision.reasons))
     end)
 
     it("invalidates fallback cache deterministically for every drift dimension", function()
@@ -426,47 +479,68 @@ describe("scheduler rescan and cache policy", function()
             phase = "fallback",
             cache = {
                 status = "completed",
-                revision = 100,
-                target = 54,
-                fingerprint = "old",
-                owner = "old-owner",
+                game_revision = 100,
+                target_slots = 54,
+                item_fingerprint = string.rep("a", 64),
+                owner_guild_id = "old-owner",
             },
             current = {
-                revision = 101,
-                target = 358,
-                fingerprint = "new",
-                owner = "new-owner",
+                game_revision = 101,
+                target_slots = 358,
+                item_fingerprint = string.rep("b", 64),
+                owner_guild_id = "new-owner",
             },
         })
 
         a.equal("INSPECT", decision.action)
         a.deep_equal({
-            "REVISION_DRIFT",
-            "TARGET_DRIFT",
-            "FINGERPRINT_DRIFT",
-            "OWNER_DRIFT",
+            "CGCE-SCHED-REVISION-DRIFT",
+            "CGCE-SCHED-TARGET-DRIFT",
+            "CGCE-SCHED-FINGERPRINT-DRIFT",
+            "CGCE-SCHED-OWNER-DRIFT",
         }, decision.reasons)
     end)
 
     it("inspects conservatively for missing, malformed, or incomplete cache data", function()
         local current = {
-            revision = 12345,
-            target = 358,
-            fingerprint = "sha256:fixture",
-            owner = "guild/fixture",
+            game_revision = 12345,
+            target_slots = 358,
+            item_fingerprint = string.rep("a", 64),
+            owner_guild_id = "guild/fixture",
         }
         local scenarios = {
-            { cache = nil, reason = "CACHE_MISSING" },
-            { cache = {}, reason = "CACHE_MALFORMED" },
+            { cache = nil, reason = "CGCE-SCHED-CACHE-MISSING" },
+            { cache = {}, reason = "CGCE-SCHED-CACHE-MALFORMED" },
             {
                 cache = {
                     status = "pending",
-                    revision = 12345,
-                    target = 358,
-                    fingerprint = "sha256:fixture",
-                    owner = "guild/fixture",
+                    game_revision = 12345,
+                    target_slots = 358,
+                    item_fingerprint = string.rep("a", 64),
+                    owner_guild_id = "guild/fixture",
                 },
-                reason = "CACHE_NOT_COMPLETED",
+                reason = "CGCE-SCHED-CACHE-NOT-COMPLETED",
+            },
+            {
+                cache = {
+                    status = "completed",
+                    game_revision = 12345,
+                    target_slots = 358,
+                    item_fingerprint = string.rep("A", 64),
+                    owner_guild_id = "guild/fixture",
+                },
+                reason = "CGCE-SCHED-CACHE-MALFORMED",
+            },
+            {
+                cache = {
+                    status = "completed",
+                    game_revision = 12345,
+                    target_slots = 358,
+                    item_fingerprint = string.rep("a", 64),
+                    owner_guild_id = "guild/fixture",
+                    extra = true,
+                },
+                reason = "CGCE-SCHED-CACHE-MALFORMED",
             },
         }
 
@@ -479,5 +553,33 @@ describe("scheduler rescan and cache policy", function()
             a.equal("INSPECT", decision.action)
             a.equal(scenario.reason, decision.reasons[1])
         end
+
+        local decision = scheduler.cache_decision({
+            phase = "fallback",
+            cache = {
+                status = "completed",
+                game_revision = 12345,
+                target_slots = 358,
+                item_fingerprint = string.rep("a", 64),
+                owner_guild_id = "guild/fixture",
+            },
+            current = {
+                game_revision = 12345,
+                target_slots = 358,
+                item_fingerprint = string.rep("a", 64),
+                owner_guild_id = "guild/fixture",
+                extra = true,
+            },
+        })
+        a.equal("INSPECT", decision.action)
+        a.equal("CGCE-SCHED-CURRENT-MALFORMED", decision.reasons[1])
+
+        decision = scheduler.cache_decision({
+            phase = "fallback",
+            cache = nil,
+            current = current,
+            unexpected = true,
+        })
+        a.deep_equal({ "CGCE-SCHED-DECISION-INPUT-MALFORMED" }, decision.reasons)
     end)
 end)
