@@ -127,28 +127,6 @@ describe("world_ready bounded selected-world authority", function()
         a.equal("test-world-alpha", world_ready.world_id(epoch))
         a.equal(true, world_ready.assert_current(epoch))
 
-        local scope = world_ready.scope(epoch)
-        a.deep_equal({
-            adapter = runtime.adapter,
-            binding_session = runtime.binding_session,
-            selected_world = scope.selected_world,
-            guild_manager = scope.guild_manager,
-            container_manager = scope.container_manager,
-        }, scope)
-        a.equal("function", type(scope.selected_world))
-        a.equal("function", type(scope.guild_manager))
-        a.equal("function", type(scope.container_manager))
-        scope.adapter = function() end
-        scope.selected_world = function() end
-        local fresh = world_ready.scope(epoch)
-        a.equal(runtime.adapter, fresh.adapter)
-        a.equal(runtime.binding_session, fresh.binding_session)
-        a.equal(true, ue4ss_adapter.same_object(
-            runtime.adapter,
-            fresh.selected_world,
-            world_ready.scope(epoch).selected_world
-        ))
-
         local closed, errors = world_ready.close(detector)
         a.equal(true, closed)
         a.equal("[]", json.encode(errors))
@@ -280,7 +258,7 @@ describe("world_ready bounded selected-world authority", function()
         superseded:supersede_session()
 
         expect_problem("CGCE-WORLD-EPOCH-STALE", "epoch", function()
-            world_ready.scope(first_epoch)
+            world_ready.assert_current(first_epoch)
         end)
         a.equal("BLOCKED", world_ready.status(first_detector).state)
 
@@ -299,6 +277,20 @@ describe("world_ready bounded selected-world authority", function()
         )
         assert_zero_forbidden(superseded)
         assert_zero_forbidden(drifted)
+    end)
+
+    it("freshly rejects relation drift before returning an epoch handle", function()
+        local runtime = runtime_binding_fixture.new()
+        local detector = start(runtime, timer_harness())
+        a.equal("READY", world_ready.status(detector).state)
+        runtime:set_guild_manager(runtime:add_unlisted_guild_manager())
+
+        expect_problem("CGCE-WORLD-EPOCH-STALE", "epoch", function()
+            world_ready.epoch(detector)
+        end)
+        a.equal("BLOCKED", world_ready.status(detector).state)
+        a.equal(nil, world_ready.epoch(detector))
+        assert_zero_forbidden(runtime)
     end)
 
     it("invalidates before close and fences late hook and timer callbacks", function()
@@ -402,6 +394,80 @@ describe("world_ready bounded selected-world authority", function()
         assert_zero_forbidden(runtime)
     end)
 
+    it("cannot issue an epoch from a relation changed during the initial inspection", function()
+        local trigger = false
+        local runtime = runtime_binding_fixture.new({
+            on_find_all = function(value, short_name)
+                if trigger and short_name == "CGCETestContainerManager" then
+                    trigger = false
+                    value:set_container_manager(value:add_loaded_container_manager())
+                end
+            end,
+        })
+        trigger = true
+
+        local detector = start(runtime, timer_harness())
+
+        local status = world_ready.status(detector)
+        a.equal("BLOCKED", status.state)
+        a.equal("CGCE-WORLD-RELATION-CHANGED", status.errors[1].code)
+        a.equal(nil, world_ready.epoch(detector))
+        a.equal(0, runtime.fake.counters().register_hook)
+        assert_zero_forbidden(runtime)
+    end)
+
+    it("keeps null references and unloaded exact manager inventories pending until a wake", function()
+        local cases = {
+            {
+                options = { guild_manager_reference = false },
+                repair = function(runtime)
+                    runtime:set_guild_manager(runtime.raw.guild_manager)
+                end,
+            },
+            {
+                options = { guild_manager_loaded = false },
+                repair = function(runtime)
+                    runtime:load_guild_manager()
+                end,
+            },
+            {
+                options = { container_manager_reference = false },
+                repair = function(runtime)
+                    runtime:set_container_manager(runtime.raw.container_manager)
+                end,
+            },
+            {
+                options = { container_manager_loaded = false },
+                repair = function(runtime)
+                    runtime:load_container_manager()
+                end,
+            },
+        }
+
+        for _, case in ipairs(cases) do
+            local runtime = runtime_binding_fixture.new(case.options)
+            local timers = timer_harness()
+            local detector = start(runtime, timers)
+            local pending = world_ready.status(detector)
+            a.equal("PENDING", pending.state)
+            a.equal(2, pending.attempts)
+            a.equal(true, pending.timer_pending)
+            a.equal(1, runtime.fake.counters().register_hook)
+
+            case.repair(runtime)
+            runtime:fire_world_ready()
+
+            a.equal("READY", world_ready.status(detector).state)
+            a.equal(3, world_ready.status(detector).attempts)
+            a.equal(2, timers.scheduled)
+            a.equal(2, timers.cancelled)
+            a.equal("function", type(world_ready.epoch(detector)))
+            a.equal(true, world_ready.close(detector))
+            a.equal(1, runtime.fake.counters().unregister_hook)
+            assert_zero_forbidden(runtime)
+        end
+    end)
+
     it("blocks epoch use after its adapter is closed or poisoned", function()
         local closed_runtime = runtime_binding_fixture.new()
         local closed_detector = start(closed_runtime, timer_harness())
@@ -444,8 +510,9 @@ describe("world_ready bounded selected-world authority", function()
             world_ready.status(function() end)
         end)
         expect_problem("CGCE-WORLD-EPOCH", "epoch", function()
-            world_ready.scope(function() end)
+            world_ready.world_id(function() end)
         end)
+        a.equal(nil, world_ready.scope)
 
         local exports = {}
         for name in pairs(world_ready) do
@@ -456,7 +523,6 @@ describe("world_ready bounded selected-world authority", function()
             "assert_current",
             "close",
             "epoch",
-            "scope",
             "start",
             "status",
             "world_id",
@@ -501,7 +567,6 @@ describe("world_ready bounded selected-world authority", function()
             a.equal("READY", world_ready.status(detector).state)
             a.equal("test-world-alpha", world_ready.world_id(epoch))
             a.equal(true, world_ready.assert_current(epoch))
-            a.equal(runtime.adapter, world_ready.scope(epoch).adapter)
             a.equal(true, world_ready.close(detector))
         end)
         for _, replacement in ipairs(replaced) do

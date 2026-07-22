@@ -16,6 +16,7 @@ local binding_metadata = revision_guard.binding_metadata
 local binding_descriptor = revision_guard.descriptor
 local json_array = json.array
 local json_encode = json.encode
+local json_null = json.null
 local scheduler_cancel = scheduler.cancel
 local scheduler_retry = scheduler.retry
 local scheduler_status = scheduler.status
@@ -275,7 +276,15 @@ local function inspect_relation(record)
             "exact guild-manager class is unavailable"
         )
     end
-    local guild_inventory = adapter_inventory_loaded(record.adapter, guild_manager_class)
+    local guild_inventory, guild_inventory_status = adapter_inventory_loaded(
+        record.adapter,
+        guild_manager_class
+    )
+    if guild_manager == json_null
+        or guild_inventory_status == "NOT_LOADED"
+        or #guild_inventory == 0 then
+        return "PENDING", nil, nil
+    end
     if exact_match_count(record.adapter, guild_manager, guild_inventory) ~= 1 then
         return "BLOCKED", nil, problem(
             "CGCE-WORLD-GUILD-MANAGER-RELATION",
@@ -300,7 +309,15 @@ local function inspect_relation(record)
             "exact container-manager class is unavailable"
         )
     end
-    local container_inventory = adapter_inventory_loaded(record.adapter, container_manager_class)
+    local container_inventory, container_inventory_status = adapter_inventory_loaded(
+        record.adapter,
+        container_manager_class
+    )
+    if container_manager == json_null
+        or container_inventory_status == "NOT_LOADED"
+        or #container_inventory == 0 then
+        return "PENDING", nil, nil
+    end
     if exact_match_count(record.adapter, container_manager, container_inventory) ~= 1 then
         return "BLOCKED", nil, problem(
             "CGCE-WORLD-CONTAINER-MANAGER-RELATION",
@@ -439,6 +456,28 @@ local function create_epoch(record, relation)
     return handle
 end
 
+local function same_relation(adapter, left, right)
+    if left == nil or right == nil or left.world_id ~= right.world_id then
+        return false
+    end
+    local values = table.pack(pcall(function()
+        return adapter_same_object(
+            adapter,
+            left.selected_world,
+            right.selected_world
+        ) and adapter_same_object(
+            adapter,
+            left.guild_manager,
+            right.guild_manager
+        ) and adapter_same_object(
+            adapter,
+            left.container_manager,
+            right.container_manager
+        )
+    end))
+    return values[1] and values.n == 2 and values[2] == true
+end
+
 local function scheduler_terminal(record, snapshot)
     if record.close_requested then
         return
@@ -451,8 +490,18 @@ local function scheduler_terminal(record, snapshot)
         and snapshot.result ~= nil
         and snapshot.result.outcome == "READY"
         and record.probe_relation ~= nil then
+        local confirmed_outcome, confirmed_relation = safe_inspect_relation(record)
+        if confirmed_outcome ~= "READY"
+            or not same_relation(record.adapter, record.probe_relation, confirmed_relation) then
+            block_and_cleanup_observation(record, problem(
+                "CGCE-WORLD-RELATION-CHANGED",
+                "relation",
+                "selected-world relation changed before epoch issuance"
+            ))
+            return
+        end
         record.state = "READY"
-        create_epoch(record, record.probe_relation)
+        create_epoch(record, confirmed_relation)
         return
     end
 
@@ -613,11 +662,14 @@ function world_ready.status(detector)
     }
 end
 
+local validate_epoch
+
 function world_ready.epoch(detector)
     local record = require_detector(detector)
     if record.state ~= "READY" then
         return nil
     end
+    validate_epoch(record.epoch)
     return record.epoch
 end
 
@@ -636,34 +688,10 @@ local function require_epoch(epoch)
     return trusted, detector
 end
 
-local function same_epoch_relation(trusted, relation)
-    if relation.world_id ~= trusted.world_id then
-        return false
-    end
-    local values = table.pack(pcall(
-        function()
-            return adapter_same_object(
-                trusted.adapter,
-                trusted.selected_world,
-                relation.selected_world
-            ) and adapter_same_object(
-                trusted.adapter,
-                trusted.guild_manager,
-                relation.guild_manager
-            ) and adapter_same_object(
-                trusted.adapter,
-                trusted.container_manager,
-                relation.container_manager
-            )
-        end
-    ))
-    return values[1] and values.n == 2 and values[2] == true
-end
-
-local function validate_epoch(epoch)
+validate_epoch = function(epoch)
     local trusted, detector = require_epoch(epoch)
     local outcome, relation = safe_inspect_relation(detector)
-    if outcome ~= "READY" or relation == nil or not same_epoch_relation(trusted, relation) then
+    if outcome ~= "READY" or relation == nil or not same_relation(trusted.adapter, trusted, relation) then
         block_and_cleanup_observation(detector, problem(
             "CGCE-WORLD-EPOCH-STALE",
             "epoch",
@@ -677,30 +705,6 @@ end
 function world_ready.world_id(epoch)
     local _, _, relation = validate_epoch(epoch)
     return relation.world_id
-end
-
-function world_ready.scope(epoch)
-    local trusted, detector, relation = validate_epoch(epoch)
-    local result = {
-        adapter = trusted.adapter,
-        binding_session = trusted.binding_session,
-        selected_world = relation.selected_world,
-        guild_manager = relation.guild_manager,
-        container_manager = relation.container_manager,
-    }
-
-    local second_trusted, second_detector, second_relation = validate_epoch(epoch)
-    if second_trusted ~= trusted
-        or second_detector ~= detector
-        or not same_epoch_relation(trusted, second_relation) then
-        block_and_cleanup_observation(detector, problem(
-            "CGCE-WORLD-EPOCH-STALE",
-            "epoch",
-            "selected-world relation changed while issuing scope"
-        ))
-        fail("CGCE-WORLD-EPOCH-STALE", "epoch", "selected-world epoch is stale")
-    end
-    return result
 end
 
 function world_ready.assert_current(epoch)

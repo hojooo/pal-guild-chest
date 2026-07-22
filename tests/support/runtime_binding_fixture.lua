@@ -150,8 +150,22 @@ function runtime_binding_fixture.new(options)
     })
 
     fake.add_loaded(raw_descriptors.selected_world_class, selected_world)
-    fake.add_loaded(raw_descriptors.guild_manager_class, guild_manager)
-    fake.add_loaded(raw_descriptors.container_manager_class, container_manager)
+    local guild_manager_loaded = options.guild_manager_loaded ~= false
+    local container_manager_loaded = options.container_manager_loaded ~= false
+    if guild_manager_loaded then
+        fake.add_loaded(raw_descriptors.guild_manager_class, guild_manager)
+    end
+    if container_manager_loaded then
+        fake.add_loaded(raw_descriptors.container_manager_class, container_manager)
+    end
+    local guild_manager_reference = guild_manager
+    if options.guild_manager_reference == false then
+        guild_manager_reference = nil
+    end
+    local container_manager_reference = container_manager
+    if options.container_manager_reference == false then
+        container_manager_reference = nil
+    end
     fake.set_property_value(
         selected_world,
         descriptors.world_ready_state_property.member_name,
@@ -165,12 +179,12 @@ function runtime_binding_fixture.new(options)
     fake.set_property_value(
         selected_world,
         descriptors.selected_world_guild_manager_property.member_name,
-        guild_manager
+        guild_manager_reference
     )
     fake.set_property_value(
         selected_world,
         descriptors.selected_world_container_manager_property.member_name,
-        container_manager
+        container_manager_reference
     )
 
     local adapter = ue4ss_adapter.new(port)
@@ -248,6 +262,31 @@ function runtime_binding_fixture.new(options)
             path = "/Runtime/CGCETest/ContainerManager/Unlisted",
             type_signature = "Object<CGCETestContainerManager>",
         })
+    end
+
+    function runtime:load_guild_manager()
+        if not guild_manager_loaded then
+            fake.add_loaded(raw_descriptors.guild_manager_class, guild_manager)
+            guild_manager_loaded = true
+        end
+        return guild_manager
+    end
+
+    function runtime:load_container_manager()
+        if not container_manager_loaded then
+            fake.add_loaded(raw_descriptors.container_manager_class, container_manager)
+            container_manager_loaded = true
+        end
+        return container_manager
+    end
+
+    function runtime:add_loaded_container_manager()
+        local replacement = fake.add_object({
+            path = "/Runtime/CGCETest/ContainerManager/Replacement",
+            type_signature = "Object<CGCETestContainerManager>",
+        })
+        fake.add_loaded(raw_descriptors.container_manager_class, replacement)
+        return replacement
     end
 
     function runtime:duplicate_guild_manager_inventory()
