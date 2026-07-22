@@ -97,7 +97,7 @@ Exit status: `0` (`Nothing to be done for 'all'.` after the initial successful b
 
 ## Commit
 
-Pending at report creation; updated after commit.
+Task implementation commit: `19c5572` (`test: bootstrap Lua harness`).
 
 ## Concerns
 
