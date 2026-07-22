@@ -200,7 +200,7 @@ a.equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", sha2
 - A runtime manifest additionally requires `source_audit_checksum`; exact logical symbol keys cover world readiness, guild manager/list/ID/chest ID, container manager/find/owner, slot array, empty-slot type, resize, dirty, replication, new-guild hook, container-in-use, and fatal-safe-stop descriptors. Descriptor keys/types are strict and reflection verification is read-only; candidates are never invoked.
 - `tested_platform_matrix` is non-authoritative metadata. Only the certification artifact authorizes release slots.
 - Manifest/artifact self-checksum is SHA-256 over canonical JSON after removing the top-level `checksum`; a release build separately pins the expected checksum.
-- A certification artifact binds exact revision, profile, binding-manifest checksum, Gate A checksum, release-report checksum, exact required clients, and per-slot evidence. Every authorized slot has one all-true evidence record for each required client; PS5 additionally requires Community Server list and DualSense last-slot evidence.
+- A certification artifact binds exact revision, profile, binding-manifest checksum, Gate A checksum, release-report checksum, exact required clients, and per-slot evidence. Every client record has a lowercase SHA-256 evidence checksum and all common Tier-0 checks: connect/reconnect, guild/chest access, first/last/all-row navigation, deposit/withdraw, split/quick-move/sort, last-slot after sort, close/reopen, server/app restart persistence, concurrent cross-platform access/state equality, last-slot display/quantity/GUID preservation, zero UI freeze/crash/disconnect, high-latency pass, and packet-loss pass. PS5 additionally requires Community Server discovery plus D-pad/analog/all-row/boundary/last-focus/tooltip/split/quick-move DualSense checks. Missing, false, unknown, or duplicate evidence blocks authorization.
 - `MinRevision` never appears in runtime authorization; exact live revision equality is mandatory.
 
 - [ ] **Step 1: Write failing config contract tests** covering the exact default, unknown keys, profile lock, required clients, include/exclude overlap, minimum rescan 30, expand-only lock, certification allow-list, and apply approval presence. Prove that adding `358` to config alone does not make it certified.
@@ -225,10 +225,12 @@ a.raises("unknown config key", function() config.parse('{"config_version":"1.1",
 ### Task 4: Snapshots, fingerprints, and invariants
 
 **Files:**
+- Modify: `CrossplayGuildChestExpander/Scripts/json.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/fingerprint.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/snapshot.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/validator.lua`
 - Create: `tests/support/fake_adapter.lua`
+- Modify: `tests/unit/json_spec.lua`
 - Create: `tests/unit/snapshot_spec.lua`
 - Create: `tests/unit/validator_spec.lua`
 
@@ -236,11 +238,21 @@ a.raises("unknown config key", function() config.parse('{"config_version":"1.1",
 - Consumes adapter methods: `container_id`, `owner_guild_id`, `slots`, `slot_item`.
 - Produces: `snapshot.capture(adapter, container) -> snapshot`; `validator.compare(before, after, target) -> ok, violations`.
 
-- [ ] **Step 1: Write failing snapshot tests** proving stable fingerprint independent of Lua table iteration while preserving slot index, static ID, dynamic GUID, quantity, durability, and instance metadata hash.
+**Exact contracts:**
+
+- Add `json.array(values?)` so newly constructed empty arrays encode as `[]`; do not use decode hacks to mark arrays.
+- Adapter IDs are non-empty opaque strings. `slots` returns a dense 1-based engine-order array. `slot_item` returns `nil` only for empty, otherwise exact `static_id`, `dynamic_guid`, integer quantity ≥1, canonical durability string, and lowercase SHA-256 instance metadata hash. Adapter failures and malformed projections fail closed with `CGCE-SNAP-*` errors.
+- Snapshot schema contains version, container/owner IDs, slot/occupied counts, total quantity, a detached per-index slots array, and item fingerprint. Empty records are exactly `{index=N,empty=true}`; occupied records copy all preservation fields and no UObject references.
+- Fingerprint is SHA-256 of canonical JSON `{schema="cgce.item-fingerprint.v1",items=[occupied records in ascending index]}`. Index participates; trailing empty slots do not.
+- Validator expected count is `target` only when `before.slot_count < target`; otherwise it is unchanged `before.slot_count`, so 358→358 and 400→400 are valid no-ops.
+- Violations are deterministic structured records: `CGCE-VAL-001` container ID, `002` owner, `003` slot count, `004` fingerprint, `005` occupied count, `006` total quantity, `007` existing slot/field, `008` appended non-empty. Return all applicable violations in code/index order.
+
+- [ ] **Step 0: Write a failing JSON constructor test**, implement `json.array(values?)`, and verify new empty/non-empty arrays encode deterministically without changing decoded-array behavior.
+- [ ] **Step 1: Write failing snapshot tests** proving stable fingerprint independent of Lua table iteration while preserving slot index, static ID, dynamic GUID, quantity, durability, and instance metadata hash. Cover detached copies and every malformed/missing adapter projection.
 
 - [ ] **Step 2: Verify RED**, implement canonical per-slot representation and SHA-256 fingerprint, verify GREEN.
 
-- [ ] **Step 3: Write failing invariant tests** for every PRD §16.1 rule, including empty appended slots and unchanged containers above target.
+- [ ] **Step 3: Write failing invariant tests** for every PRD §16.1 rule, including empty appended slots, valid 358/400 no-ops, every existing field change, empty↔occupied, item index swaps, invalid slot counts, and deterministic multi-fault ordering.
 
 ```lua
 local ok, errors = validator.compare(before, after, 358)
