@@ -28,9 +28,9 @@
 ```text
 CrossplayGuildChestExpander/
 ├── Info.json
+├── thumbnail.png
 ├── README.md
 ├── CHANGELOG.md
-├── LICENSE
 ├── config/config.default.json
 └── Scripts/
     ├── main.lua
@@ -40,15 +40,22 @@ CrossplayGuildChestExpander/
     ├── sha256.lua
     ├── config.lua
     ├── binding_manifest.lua
+    ├── certification.lua
     ├── state_machine.lua
     ├── fingerprint.lua
     ├── snapshot.lua
     ├── validator.lua
     ├── migration.lua
+    ├── gate_a.lua
+    ├── mutation_guard.lua
+    ├── fatal_safety.lua
+    ├── persisted_verifier.lua
     ├── approval.lua
     ├── ledger.lua
     ├── report.lua
     ├── logger.lua
+    ├── path_guard.lua
+    ├── conflict_detector.lua
     ├── command_router.lua
     ├── scheduler.lua
     ├── revision_guard.lua
@@ -82,14 +89,19 @@ docs/
 
 **Files:**
 - Create: `.gitignore`
+- Vendor: `third_party/lua-5.4.8/**` from the official Lua 5.4.8 source archive
+- Create: `third_party/README.md`
 - Create: `tests/run.lua`
 - Create: `tests/support/assertions.lua`
 - Create: `tests/unit/test_harness_spec.lua`
 - Create: `scripts/run-tests.sh`
-- Create: `CrossplayGuildChestExpander/LICENSE`
 
 **Interfaces:**
 - Produces: `describe(name, fn)`, `it(name, fn)`, `assertions.equal(expected, actual)`, `assertions.deep_equal(expected, actual)`, `assertions.raises(pattern, fn)`.
+
+- [ ] **Step 0: Vendor and build the test-only Lua runtime**
+
+Download `https://www.lua.org/ftp/lua-5.4.8.tar.gz`, verify SHA-256 `4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae`, extract it under `third_party/`, and run `make -C third_party/lua-5.4.8 all`. Record that this runtime is test tooling and is excluded from the CGCE release package. The CGCE project license is a separate owner decision and is not invented during bootstrap.
 
 - [ ] **Step 1: Write the failing harness self-test**
 
@@ -169,14 +181,15 @@ a.equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", sha2
 - Create: `CrossplayGuildChestExpander/Scripts/constants.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/config.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/binding_manifest.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/certification.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/bindings/README.md`
 - Create: `tests/unit/config_spec.lua`
 - Create: `tests/unit/binding_manifest_spec.lua`
 
 **Interfaces:**
-- Produces: `config.parse(text) -> validated_config`; `binding_manifest.parse(text) -> manifest`; `binding_manifest.verify_types(manifest, adapter) -> ok, errors`.
+- Produces: `config.parse(text) -> validated_config`; `binding_manifest.parse(text) -> manifest`; `binding_manifest.verify_types(manifest, adapter) -> ok, errors`; `certification.verify(release_artifact, pinned_checksum, revision, profile) -> certified_slots`.
 
-- [ ] **Step 1: Write failing config contract tests** covering the exact default, unknown keys, profile lock, required clients, include/exclude overlap, minimum rescan 30, expand-only lock, certification allow-list, and apply approval presence.
+- [ ] **Step 1: Write failing config contract tests** covering the exact default, unknown keys, profile lock, required clients, include/exclude overlap, minimum rescan 30, expand-only lock, certification allow-list, and apply approval presence. Prove that adding `358` to config alone does not make it certified.
 
 ```lua
 local cfg = config.parse(default_text)
@@ -190,6 +203,10 @@ a.raises("unknown config key", function() config.parse('{"config_version":"1.1",
 - [ ] **Step 3: Write failing manifest tests** for exact revision, required symbol descriptors, allowed keys, checksum, type signatures, and empty discovery-only manifests.
 
 - [ ] **Step 4: Verify RED**, implement parser/runtime type checks, verify GREEN.
+
+- [ ] **Step 5: Write failing certification artifact tests** proving the artifact is bound to exact revision, deployment profile, Steam Windows·PS5·macOS evidence, certified slots, and a checksum pinned by the release build; reject config-only escalation and artifact checksum drift.
+
+- [ ] **Step 6: Verify RED**, implement certification verification, verify GREEN.
 
 ### Task 4: Snapshots, fingerprints, and invariants
 
@@ -219,32 +236,33 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 
 - [ ] **Step 4: Verify RED**, implement structured violations, verify GREEN and full suite.
 
-### Task 5: State machine and adapter-driven migration engine
+### Task 5: Discovery-safe state machine and read-only audit engine
 
 **Files:**
 - Create: `CrossplayGuildChestExpander/Scripts/state_machine.lua`
-- Create: `CrossplayGuildChestExpander/Scripts/migration.lua`
-- Create: `CrossplayGuildChestExpander/Scripts/resizer.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/audit.lua`
 - Create: `tests/unit/state_machine_spec.lua`
-- Create: `tests/integration/migration_spec.lua`
+- Create: `tests/integration/audit_spec.lua`
 
 **Interfaces:**
-- Produces: `state_machine.new()`, `machine:transition(event, context)`; `migration.audit(context) -> report`; `migration.apply(context) -> result`.
-- Adapter mutation interface: `execute_in_game_thread(fn)`, `resize_container(container, target)`, `mark_dirty(container)`, `replicate(container)`, `is_container_in_use(container)`.
+- Produces: `state_machine.new({mutation_capability = false})`, `machine:transition(event, context)`; `audit.capture(context) -> immutable_audit`.
+- The Discovery Build has no resizer module and exposes no mutation adapter method.
 
-- [ ] **Step 1: Write failing state-transition table tests** for every PRD §12 path and forbidden transitions from `BLOCKED`, `UNSUPPORTED`, `FAILED`.
-- [ ] **Step 2: Verify RED**, implement explicit transition table, verify GREEN.
-- [ ] **Step 3: Write failing synthetic migration tests** for 54→358 empty/occupied, 358/400 no-op, owner mismatch, duplicate IDs, include/exclude, append exception, fingerprint mismatch, idempotent second run, in-use refusal, and fail-fast.
-- [ ] **Step 4: Verify RED**, implement audit and apply through the injected adapter only, verify GREEN.
-- [ ] **Step 5: Add a production guard test** proving `apply` never calls adapter mutation unless revision, bindings, certified target, report persistence, and approval all pass.
+- [ ] **Step 1: Write failing state-transition table tests** for `DISABLED → PREFLIGHT → WAITING/AUDIT → AUDIT_COMPLETE/AWAITING_APPROVAL` plus terminal `BLOCKED` and `UNSUPPORTED`. Prove `APPLYING`, `VALIDATING`, `COMPLETE`, and `FAILED_AFTER_MUTATION` are unreachable when `mutation_capability=false`.
+- [ ] **Step 2: Verify RED**, implement the explicit discovery-safe transition table, verify GREEN.
+- [ ] **Step 3: Write failing read-only audit tests** for all discovered guilds, 358/400 no-op eligibility, owner mismatch, duplicate IDs, include/exclude, general-container exclusion, and deterministic audit checksum.
+- [ ] **Step 4: Verify RED**, implement audit capture without any write-capable dependency, verify GREEN.
+- [ ] **Step 5: Add an exported-surface test** proving no production file through Task 10 defines `resize`, `append`, `mark_dirty`, `replicate`, raw property writes, or an apply transition.
 
-### Task 6: Approval, reports, ledger, and structured logging
+### Task 6: Approval, reports, ledger, security boundaries, and structured logging
 
 **Files:**
 - Create: `CrossplayGuildChestExpander/Scripts/approval.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/report.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/ledger.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/logger.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/path_guard.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/conflict_detector.lua`
 - Create: `docs/release-report.schema.json`
 - Create: `tests/unit/approval_spec.lua`
 - Create: `tests/unit/report_spec.lua`
@@ -252,15 +270,17 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Create: `tests/unit/logger_spec.lua`
 
 **Interfaces:**
-- Produces: `approval.token(fields)`, `report.build(context)`, `report.persist(path, value)`, `ledger.load/save/verify`, `logger.text/jsonl`.
+- Produces: `approval.token(fields)`, `report.build(context)`, `report.persist(root, relative_path, value)`, `ledger.load/save/verify`, `path_guard.resolve(root, relative_path)`, `conflict_detector.scan(mods, hooks, container_types)`, `logger.text/jsonl`.
 
 - [ ] **Step 1: Write failing approval tests** using unambiguous length-prefixed UTF-8 fields for world ID, revision, report checksum, target, and profile; prove any field change invalidates the token.
 - [ ] **Step 2: Verify RED**, implement SHA-256 approval token, verify GREEN.
-- [ ] **Step 3: Write failing report/ledger tests** for deterministic JSON, atomic temp-write/rename adapter, save-as-source-of-truth drift, per-guild results, and persistence failure blocking apply.
+- [ ] **Step 3: Write failing report/ledger tests** for deterministic JSON, atomic temp-write/rename adapter, live save-as-source-of-truth drift, per-guild results, and persistence failure blocking later apply. Prove a completed-guild cache never suppresses startup live-container reinspection and invalidates on revision, target, fingerprint, or owner change.
 - [ ] **Step 4: Verify RED**, implement persistence ports and verification, verify GREEN.
 - [ ] **Step 5: Write failing log tests** for control-character escaping, credential field redaction, event size bound, and no per-slot INFO logs; implement and verify.
 
-### Task 7: Commands, bounded scheduling, and connectivity preflight
+- [ ] **Step 6: Write failing containment/conflict tests** rejecting absolute paths, `..`, symlink escape, package-external manifests, unallowlisted manifest keys/function paths, colliding storage mods/hooks, unexpected slot counts, and replaced container types. Capture mod package names/versions in the report; implement and verify.
+
+### Task 7: Discovery commands, bounded scheduling, and connectivity preflight
 
 **Files:**
 - Create: `CrossplayGuildChestExpander/Scripts/command_router.lua`
@@ -271,13 +291,13 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Create: `tests/unit/platform_preflight_spec.lua`
 
 **Interfaces:**
-- Produces exact commands: `cgce status|audit|apply|guilds|verify|export-report`; `scheduler.retry(options, probe)`; `platform_preflight.check(args, settings)`.
+- Produces Discovery Build commands: `cgce status|audit|guilds|verify|export-report`; `cgce apply` returns `MUTATION_BUILD_UNAVAILABLE`; `scheduler.retry(options, probe)`; `platform_preflight.check(args, option_settings)`.
 
-- [ ] **Step 1: Write failing command tests** proving unknown commands and arguments do not mutate, apply delegates only after guard success, and output contains revision/mode/target/state.
+- [ ] **Step 1: Write failing command tests** proving unknown commands and arguments do not mutate, Discovery Build `apply` always returns `MUTATION_BUILD_UNAVAILABLE`, and output contains revision/mode/target/state.
 - [ ] **Step 2: Verify RED**, implement command routing, verify GREEN.
-- [ ] **Step 3: Write failing scheduler tests** proving bounded world-ready retries, 30-second minimum fallback, 60-second default, completed-guild cache, and no infinite polling.
+- [ ] **Step 3: Write failing scheduler tests** proving bounded world-ready retries, 30-second minimum fallback, 60-second default, no infinite polling, and cache invalidation on revision/target/fingerprint/owner drift with mandatory startup live reinspection.
 - [ ] **Step 4: Verify RED**, implement scheduler as injected clock callbacks, verify GREEN.
-- [ ] **Step 5: Write failing connectivity tests** for `-publiclobby`, `CrossplayPlatforms` containing PS5 and Mac, public port match, and diagnostic-only behavior; implement and verify.
+- [ ] **Step 5: Write failing connectivity tests** that parse the real `PalWorldSettings.ini` `OptionSettings` tuple for `-publiclobby`, `CrossplayPlatforms` containing PS5 and Mac, public port match, and diagnostic-only behavior; do not use the deprecated REST `AllowConnectPlatform` field. Implement and verify.
 
 ### Task 8: UE4SS read-only runtime adapter and Discovery Build
 
@@ -291,38 +311,36 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Create: `docs/discovery-runbook.md`
 
 **Interfaces:**
-- Produces: `ue4ss_adapter.capabilities()`, `read_revision()`, `find_all_of(class_name)`, `resolve_property(object, descriptor)`, `validate_function(descriptor)`, `register_hook(path, pre, post)`, `execute_in_game_thread(fn)`.
+- Produces: `ue4ss_adapter.capabilities()`, `read_revision()`, `find_all_of(class_name)`, `static_find_object(path)`, `resolve_property(object, descriptor)`, `validate_function(descriptor)`, `register_hook(path, pre, post)`, `unregister_hook(pre_id, post_id)`, and discovery-only metadata for `execute_in_game_thread` without invoking mutation.
 
-- [ ] **Step 1: Write failing contract tests** using a fake UE4SS global surface and proving missing APIs/symbols yield `UNSUPPORTED`/`BLOCKED`, never fuzzy matching.
+- [ ] **Step 1: Write failing contract tests** against the selected stable UE4SS v3.0.1 API surface using fakes. Prove missing APIs/symbols yield `UNSUPPORTED`/`BLOCKED`, `/Script/` and non-`/Script/` hook callback contracts are distinguished, hook IDs are unregistered on shutdown/reload, and fuzzy matching/raw writes are absent.
 - [ ] **Step 2: Verify RED**, implement exact-name reflection wrappers and read-only capability detection, verify GREEN.
 - [ ] **Step 3: Write failing guild traversal tests** proving `guild_id → container_id → owner_guild_id` and duplicate/container-type rejection.
 - [ ] **Step 4: Verify RED**, implement repositories/resolver, verify GREEN.
-- [ ] **Step 5: Implement discovery report fields** for PRD §32 items 1–16 while leaving production `resize_container` unavailable until an exact manifest passes.
+- [ ] **Step 5: Implement explicit discovery evidence fields and rejection rules** for every PRD §32 Gate A item: revision; guild manager/list/ID/chest-ID; container manager/find/slot array; empty-slot type; exact resize/add-slot candidates and signatures; dirty and replication candidates/signatures; world-ready and new-guild hook candidates; in-use detection method; canonical 54-slot snapshot. Candidate discovery is read-only, never invokes a candidate, records provenance/type signatures, and leaves all mutation functions unavailable.
 
-### Task 9: Runtime orchestration, replication, and new-guild lifecycle
+### Task 9: Discovery runtime orchestration
 
 **Files:**
-- Create: `CrossplayGuildChestExpander/Scripts/replication.lua`
-- Create: `CrossplayGuildChestExpander/Scripts/new_guild_hook.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/cgce.lua`
 - Create: `CrossplayGuildChestExpander/Scripts/main.lua`
-- Create: `tests/integration/runtime_spec.lua`
-- Create: `tests/integration/new_guild_spec.lua`
+- Create: `tests/integration/discovery_runtime_spec.lua`
 
 **Interfaces:**
-- Produces: `cgce.new(dependencies)`, `app:start()`, `app:handle_command(line)`, `new_guild_hook.install(app, manifest, adapter)`.
+- Produces: `cgce.new(read_only_dependencies)`, `app:start()`, `app:shutdown()`, `app:handle_command(line)`.
 
-- [ ] **Step 1: Write failing startup tests** for unsupported revision, invalid config, missing report path, audit default, world-ready retry, and no mutation hook registration before all gates pass.
-- [ ] **Step 2: Verify RED**, implement dependency-injected orchestration, verify GREEN.
-- [ ] **Step 3: Write failing new-guild tests** proving exact hook, limited initialization retries, empty/non-empty invariant handling, same migration engine reuse, and 60-second cached fallback.
-- [ ] **Step 4: Verify RED**, implement lifecycle modules and existing dirty/replication functions only, verify GREEN.
+- [ ] **Step 1: Write failing startup tests** for unsupported revision, invalid config, path escape, missing report path, audit default, world-ready retry, conflict detection, and zero write-capable hook registration.
+- [ ] **Step 2: Verify RED**, implement dependency-injected read-only orchestration, verify GREEN.
+- [ ] **Step 3: Write failing shutdown/reload tests** proving every registered discovery hook ID and timer is released and duplicate initialization is rejected.
+- [ ] **Step 4: Verify RED**, implement lifecycle cleanup, verify GREEN and the exported-surface no-mutation check.
 
-### Task 10: Official package, release verifier, and operator documentation
+### Task 10: Discovery package, static verifier, and operator documentation
 
 **Files:**
 - Create: `CrossplayGuildChestExpander/Info.json`
 - Create: `CrossplayGuildChestExpander/README.md`
 - Create: `CrossplayGuildChestExpander/CHANGELOG.md`
+- Create: `CrossplayGuildChestExpander/thumbnail.png`
 - Create: `scripts/verify-package.sh`
 - Create: `scripts/build-release.sh`
 - Create: `tests/integration/package_spec.lua`
@@ -330,51 +348,99 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Create: `docs/requirements-traceability.md`
 
 **Interfaces:**
-- Produces: deterministic release archive only when exact `MinRevision`, one exact binding manifest, Tier-0 certification report, and server-only file allow-list pass.
+- Produces: a deterministic **Discovery Build** archive that is server-only and mutation-incapable. The release build path remains hard-blocked until Tasks 11–13.
 
-- [ ] **Step 1: Write a failing package test** asserting one Lua `InstallRule` with `IsServer=true`, non-zero `MinRevision`, UE4SS dependency, no client assets, and only allow-listed files.
-- [ ] **Step 2: Verify RED**, create package metadata and static verifier, verify GREEN for development package and prove release build remains blocked without certification artifacts.
+- [ ] **Step 1: Write a failing package test** asserting one Lua `InstallRule` with `IsServer=true`, UE4SS dependency, allow-listed metadata thumbnail, no client scripts/assets/PAK/DLL, no mutation modules, and no `MinRevision=0` in any release archive. Treat `IsServer=true` only as a deployment target, not a network-safety proof.
+- [ ] **Step 2: Verify RED**, create package metadata and static verifier, verify GREEN for a clearly labeled non-release Discovery Build and prove release build remains blocked without Gate A acceptance, exact manifest checksum, pinned certification artifact, and non-zero `MinRevision`.
 - [ ] **Step 3: Document exact backup, audit, approval, apply, verify, update, removal, rollback, discovery, Steam/PS5/macOS certification, performance, and six-hour soak procedures.
-- [ ] **Step 4: Populate requirement traceability** mapping every `FR-*`, `AT-*`, DoD item, and §32 artifact to code/test/manual evidence.
+- [ ] **Step 4: Populate requirement traceability** mapping every `FR-*`, `AT-*`, DoD item, and §32 artifact to code/test/manual evidence, with unproven runtime/platform rows marked blocked rather than passed.
 
 ### Task 11: Gate A real Windows server discovery
 
 **Files:**
 - Create after capture: `CrossplayGuildChestExpander/Scripts/bindings/<revision>.json`
 - Create after capture: `artifacts/discovery/<revision>/audit-report.json`
+- Create after review: `artifacts/discovery/<revision>/gate-a-acceptance.json`
 - Modify: `docs/requirements-traceability.md`
 
 **Interfaces:**
 - Consumes a user-provided Windows Palworld Dedicated Server with UE4SS and a disposable backed-up test world.
-- Produces PRD §32 evidence items 1–16 and an exact checksum-bound manifest.
+- Produces PRD §32 evidence items 1–16, a verified fatal-save suppression or immediate safe-shutdown capability, an exact checksum-bound manifest, and a reviewed Gate A acceptance record containing the report checksum, manifest checksum, world ID, game revision, UE4SS version, reviewer, and timestamp. If Palworld exposes no verified way to prevent a subsequent save or force a safe stop after invariant failure, Gate A cannot authorize mutation.
 
 - [ ] **Step 1:** Run the Discovery Build in audit-only mode on the exact target revision.
-- [ ] **Step 2:** Inspect runtime types/functions and record exact paths/signatures; reject ambiguous candidates.
+- [ ] **Step 2:** Inspect runtime types/functions and record exact paths/signatures for all 16 evidence fields, including empty-slot type, resize/add-slot candidate, dirty/replication candidates, both hooks, and in-use detection. Additionally discover and safely prove a fatal path that suppresses later normal/autosave or immediately stops the server without saving. Reject missing, ambiguous, fuzzy, unloaded, or mismatched candidates; absence of the fatal capability blocks mutation authorization.
 - [ ] **Step 3:** Verify three-way guild/container ownership on representative guilds and prove general containers are excluded.
-- [ ] **Step 4:** Add the exact manifest, run contract tests, and retain mutation disabled until independent review of the report.
+- [ ] **Step 4:** Add the exact manifest, run contract tests, independently review the report, and create a checksum-bound `gate-a-acceptance.json`. Mutation remains absent until this acceptance file passes automated validation.
 
-### Task 12: Gate B isolated mutation and Tier-0 certification
+### Task 12: Post-Gate-A mutation engine and fatal safety controls
+
+**Files:**
+- Create: `CrossplayGuildChestExpander/Scripts/gate_a.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/mutation_guard.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/migration.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/resizer.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/fatal_safety.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/persisted_verifier.lua`
+- Create: `tests/integration/mutation_guard_spec.lua`
+- Create: `tests/integration/migration_spec.lua`
+
+**Interfaces:**
+- `mutation_guard.authorize(context) -> authorization` requires a valid Gate A acceptance checksum; exact manifest checksum; a verified fatal-save/stop capability; fresh audit captured immediately before apply; approval token matching that fresh audit checksum; live revision/world/profile; pinned release certification artifact for production, or the isolated certification exception below.
+- Certification exception requires `certification_mode=true`, disposable test-world ID allow-list, candidate slot in `{120,256,358}`, valid Gate A acceptance, and an explicit checksum-bound certification approval token. It is rejected by production builds.
+- Mutation adapter: `execute_in_game_thread(fn)`, `online_player_count()`, `is_any_guild_chest_in_use()`, `is_container_in_use(container)`, `resize_via_verified_function(container,target)`, `mark_dirty(container)`, `replicate(container)`, `enter_fatal_no_save_mode(reason)`.
+- `persisted_verifier` records `VALIDATING_RESTART_REQUIRED`; only next-start live save/reload verification may transition to `COMPLETE`.
+
+- [ ] **Step 1: Write failing guard tests** proving zero mutation for missing/changed Gate A acceptance, manifest checksum drift, absent/unverified fatal-save capability, stale audit, world/revision/profile mismatch, config-only slot escalation, missing Tier-0 certification, non-allow-listed test world, or invalid approval token.
+- [ ] **Step 2: Verify RED**, implement authorization with exact checksum equality and fresh audit recapture, verify GREEN.
+- [ ] **Step 3: Write failing synthetic migration tests** for 54→target empty/occupied, target/400 no-op, owner mismatch, duplicate IDs, include/exclude, use-state race, online-player/global-chest preflight, per-container immediate recheck, append exception, fingerprint mismatch, and idempotent second run.
+- [ ] **Step 4: Verify RED**, implement only the exact Gate-A-approved resize/add-slot function path; blind raw `TArray` append remains unsupported unless Gate A explicitly proves its factory and persistence semantics. Execute mutation, dirty/replicate, after snapshot, and invariant validation in one `ExecuteInGameThread` callback.
+- [ ] **Step 5: Write failing fatal-safety tests** proving any post-mutation invariant failure enters terminal `FAILED_AFTER_MUTATION`, calls `enter_fatal_no_save_mode`, emits `STOP_SERVER_AND_RESTORE_BACKUP`, and rejects all later mutation/save automation.
+- [ ] **Step 6: Write failing persisted-state tests** proving successful in-memory apply reaches only `VALIDATING_RESTART_REQUIRED`; a next-start live snapshot matching the ledger reaches `COMPLETE`, while mismatch reaches fatal `FAILED` and blocks release.
+
+### Task 13: Post-Gate-A replication and new-guild lifecycle
+
+**Files:**
+- Create: `CrossplayGuildChestExpander/Scripts/replication.lua`
+- Create: `CrossplayGuildChestExpander/Scripts/new_guild_hook.lua`
+- Modify: `CrossplayGuildChestExpander/Scripts/cgce.lua`
+- Create: `tests/integration/runtime_mutation_spec.lua`
+- Create: `tests/integration/new_guild_spec.lua`
+
+**Interfaces:**
+- Produces `new_guild_hook.install(app, accepted_manifest, adapter)` and uses the same guarded migration engine as existing guilds.
+- Exact hooks are registered only after world readiness and unregistered by both returned hook IDs; a 60-second cached rescan backs up native-call paths that bypass UFunction hooks.
+
+- [ ] **Step 1: Write failing runtime tests** proving mutation hooks are absent without Gate A acceptance and authorization, all UObject work is game-thread queued, and post-mutation validation remains in the same callback.
+- [ ] **Step 2: Verify RED**, integrate the guarded engine and verified dirty/replication functions, verify GREEN.
+- [ ] **Step 3: Write failing new-guild tests** proving exact hook registration, limited initialization retries, empty/non-empty invariant handling, common engine reuse, hook cleanup, and fallback rescan cache invalidation from live state.
+- [ ] **Step 4: Verify RED**, implement lifecycle modules, verify GREEN.
+
+### Task 14: Gate B isolated mutation, Tier-0 certification, and release
 
 **Files:**
 - Create after test: `artifacts/certification/<revision>/release-report.json`
+- Create after test: `artifacts/certification/<revision>/release-certification.json`
 - Modify: `CrossplayGuildChestExpander/config/config.default.json`
 - Modify: `CrossplayGuildChestExpander/Info.json`
 - Modify: `docs/requirements-traceability.md`
 
 **Interfaces:**
-- Consumes disposable backed-up Windows server worlds plus Steam Windows, PS5, and macOS vanilla clients.
-- Produces certified target slots, after snapshots, removal evidence, performance baselines, and final release eligibility.
+- Consumes Gate A acceptance, a disposable-world allow-list, explicit certification approval, backed-up Windows server worlds, and Steam Windows, PS5, and macOS vanilla clients.
+- Produces a checksum-pinned release certification artifact, after/reload snapshots, removal evidence, performance baselines, new-guild evidence, and final release eligibility.
 
-- [ ] **Step 1:** Run 54→120 on a disposable world, save/reload, verify all invariants and idempotency.
-- [ ] **Step 2:** Repeat `120→256→358`; add a value to `certified_target_slots` only after all three Tier-0 clients pass.
-- [ ] **Step 3:** Run concurrent access, restart/reconnect, removal, 32-player load model, and six-hour soak protocols.
-- [ ] **Step 4:** Generate the signed/checksummed release report, inject exact `MinRevision`, build the server-only archive, and run the full completion audit.
+- [ ] **Step 1:** Validate all Gate B admission artifacts mechanically, then run 54→120 on an allow-listed disposable world; save/restart/reload, verify every invariant and a second-run mutation count of zero.
+- [ ] **Step 2:** Repeat `120→256→358`; add a slot value to the release certification artifact only after Steam Windows, PS5, and macOS all pass UI, last-slot, restart/reconnect, and cross-platform data checks. PS5 evidence must include discovery through the Community Server list while the server runs with `-publiclobby` and matching advertised/listen ports.
+- [ ] **Step 3:** Create 20 new guilds and prove first-use expansion, hook/fallback behavior, zero tick stalls, and live-state cache invalidation.
+- [ ] **Step 4:** Run concurrent access and the exact removal protocol: back up the world, disable the mod, restart, then prove last-slot access and item GUID/quantity preservation independently on Steam Windows, PS5, and macOS. Run the exact release thresholds: steady CPU ≤1 percentage point; memory ≤100MB; 100-guild audit ≤5s; 100 empty migrations ≤10s; single 54→358 ≤100ms; scan ≥60s; save increase ≤15%; chest-open p95 ≤baseline+300ms; reconnect increase ≤10%; six-hour soak with zero critical errors.
+- [ ] **Step 5:** Generate the checksummed release report and pinned certification artifact, inject exact non-zero `MinRevision`, build the server-only archive, run package/security/full completion audits, and reject release if any manual evidence is absent.
 
 ## Plan Self-Review
 
-- Every P0/P1 functional requirement maps to Tasks 3–10.
-- Every synthetic/unit test category maps to Tasks 1–9.
-- Actual runtime, save/reload, removal, performance, PS5, and macOS claims remain explicitly unproven until Tasks 11–12 produce primary evidence.
+- Every P0/P1 functional requirement maps to Tasks 3–14.
+- Every pre-discovery synthetic/unit test category maps to Tasks 1–10.
+- Tasks 1–10 contain no production mutation surface. Task 11 is the mandatory real-server Gate A.
+- Mutation code begins only in Task 12 after a machine-validated Gate A acceptance record exists.
+- Actual save/reload, removal, performance, PS5, and macOS claims remain explicitly unproven until Task 14 produces primary evidence.
 - The apparent §32 circularity is resolved operationally as Gate A (items 1–16, read-only discovery) followed by Gate B (items 17–20, disposable test-world mutation/certification); production mutation remains disabled between them.
+- Fresh audit checksum binding, fatal no-save mode, persisted-state restart verification, config-only certification escalation rejection, path containment, conflict detection, hook cleanup, new-guild evidence, and exact performance thresholds are explicit gates.
 - No placeholder game revision or guessed Palworld symbol is accepted as a release manifest.
-

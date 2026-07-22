@@ -65,6 +65,8 @@ Crossplay Guild Chest Expander는 Palworld Windows 데디케이트 서버에만 
 8. 서버 모드는 세이브 손상이나 크래시 위험이 있으므로 백업과 단계적 검증이 필수다.
 9. UE4SS Lua는 UFunction 후킹, 런타임 UObject 검색, 게임 스레드 실행 기능을 제공한다.
 10. PS5 또는 macOS 기본 UI가 목표 슬롯 수를 처리하지 못하면 클라이언트 패치로 보완하지 않고, 모든 필수 클라이언트가 통과한 슬롯 수로 낮춘다.
+11. 공식 패키지의 `MinRevision`은 정확한 빌드 고정값이 아니라 최소 지원 revision이므로, 정확한 허용 revision은 런타임 Binding Manifest allow-list로 별도 통제한다.
+12. `IsServer=true`는 서버 배포 대상을 지정할 뿐 네트워크·클라이언트 호환성을 보증하지 않으므로 Tier 0 실기기 인증을 대체하지 않는다.
 
 이 제약은 제품 요구사항의 일부이며, 릴리스마다 현재 공식 문서와 다시 대조한다.
 
@@ -93,7 +95,7 @@ PalServer.exe -publiclobby -port=8211 -publicport=8211 -logformat=json
 
 `-publicport`는 서버가 실제로 수신하는 포트를 바꾸지 않으므로 `-port`와 함께 일치시킨다. 공인 IP 자동 감지가 실패할 때만 `-publicip=<공인IP>`를 추가한다.
 
-`PalWorldSettings.ini`에는 최소 다음 의도가 반영되어야 한다.
+`PalWorldSettings.ini`의 기존 `OptionSettings=(...)` 튜플에는 최소 다음 의도가 병합되어야 한다. 아래 네 줄은 완전한 INI 파일 예시가 아니다.
 
 ```ini
 CrossplayPlatforms=(Steam,PS5,Mac)
@@ -532,6 +534,8 @@ ledger는 감사와 운영자 확인을 위한 데이터다. 실제 컨테이너
 - 이벤트 hook이 불가능한 revision에서는 저빈도 rescan fallback을 허용한다.
 - fallback 기본 주기는 60초이며, 변경되지 않은 길드는 캐시로 건너뛴다.
 - 신규 길드 적용에도 동일 `ContainerResizer`와 `InvariantValidator`를 사용한다.
+- `RegisterHook`이 반환한 pre/post hook ID는 종료·리로드 시 모두 해제한다.
+- 네이티브 C++ 직접 호출이 UFunction hook을 우회할 수 있으므로 hook 성공만으로 신규 길드 적용을 보장하지 않는다.
 
 ---
 
@@ -805,7 +809,7 @@ approval_token = SHA-256(
 4. 그 외 방식은 지원하지 않음
 ```
 
-3번을 사용하는 release는 모든 플랫폼에서 별도 회귀 테스트를 요구한다.
+UE4SS의 일반 `TArray` 접근만으로는 안전한 빈 슬롯 생성·저장·복제가 보장되지 않는다. 따라서 3번은 Gate A에서 빈 슬롯 factory, append 동작, dirty/save/replication 의미가 모두 입증된 경우에만 허용하며, blind index 확장은 지원하지 않는다. 3번을 사용하는 release는 모든 플랫폼에서 별도 회귀 테스트를 요구한다.
 
 ---
 
@@ -980,6 +984,8 @@ CrossplayGuildChestExpander/
 ```
 
 릴리스 빌드는 `MinRevision=0`을 허용하지 않는다. 인증한 최소 게임 revision을 빌드 단계에서 주입하고, 값이 없으면 패키징을 실패시킨다.
+
+`MinRevision`은 최소 버전 필터이므로 정확한 revision 일치 검증에는 사용하지 않는다. 정확한 revision과 심볼 타입 일치는 `RevisionGuard`와 Binding Manifest가 fail-closed로 검증한다.
 
 ### 18.3 클라이언트 파일 금지
 
