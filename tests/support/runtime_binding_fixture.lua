@@ -135,6 +135,14 @@ function runtime_binding_fixture.new(options)
             return values
         end
     end
+    local original_get_property_value = port.get_property_value
+    if options.on_get_property ~= nil then
+        port.get_property_value = function(property, object)
+            local value = original_get_property_value(property, object)
+            options.on_get_property(runtime, property, object, value)
+            return value
+        end
+    end
 
     local selected_world = fake.add_object({
         path = "/Runtime/CGCETest/SelectedWorld/1",
@@ -186,6 +194,17 @@ function runtime_binding_fixture.new(options)
         descriptors.selected_world_container_manager_property.member_name,
         container_manager_reference
     )
+
+    local guilds = {}
+    local guild_sequence = 0
+    local function publish_guild_list()
+        fake.set_property_value(
+            guild_manager,
+            descriptors.guild_list_property.member_name,
+            fake.array(guilds)
+        )
+    end
+    publish_guild_list()
 
     local adapter = ue4ss_adapter.new(port)
 
@@ -291,6 +310,64 @@ function runtime_binding_fixture.new(options)
 
     function runtime:duplicate_guild_manager_inventory()
         fake.add_loaded(raw_descriptors.guild_manager_class, guild_manager)
+    end
+
+    function runtime:add_guild(guild_id, guild_name, chest_container_id, guild_options)
+        guild_options = guild_options or {}
+        guild_sequence = guild_sequence + 1
+        local value = fake.add_object({
+            path = "/Runtime/CGCETest/Guild/" .. guild_sequence,
+            type_signature = "Object<CGCETestGuild>",
+        })
+        fake.set_property_value(value, descriptors.guild_id_property.member_name, guild_id)
+        fake.set_property_value(value, descriptors.guild_name_property.member_name, guild_name)
+        fake.set_property_value(
+            value,
+            descriptors.guild_chest_container_id_property.member_name,
+            chest_container_id
+        )
+        if guild_options.loaded ~= false then
+            fake.add_loaded(raw_descriptors.guild_class, value)
+        end
+        if guild_options.listed ~= false then
+            guilds[#guilds + 1] = value
+            publish_guild_list()
+        end
+        return value
+    end
+
+    function runtime:set_guild_list(values)
+        for index = #guilds, 1, -1 do
+            guilds[index] = nil
+        end
+        for index, value in ipairs(values) do
+            guilds[index] = value
+        end
+        publish_guild_list()
+    end
+
+    function runtime:set_guild_list_null()
+        fake.set_property_value(guild_manager, descriptors.guild_list_property.member_name, nil)
+    end
+
+    function runtime:duplicate_guild_inventory(value)
+        fake.add_loaded(raw_descriptors.guild_class, value)
+    end
+
+    function runtime:set_guild_id(value, guild_id)
+        fake.set_property_value(value, descriptors.guild_id_property.member_name, guild_id)
+    end
+
+    function runtime:set_guild_name(value, guild_name)
+        fake.set_property_value(value, descriptors.guild_name_property.member_name, guild_name)
+    end
+
+    function runtime:set_guild_chest_id(value, chest_container_id)
+        fake.set_property_value(
+            value,
+            descriptors.guild_chest_container_id_property.member_name,
+            chest_container_id
+        )
     end
 
     function runtime:add_selected_world()
