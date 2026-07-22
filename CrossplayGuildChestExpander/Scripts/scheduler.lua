@@ -331,6 +331,10 @@ function scheduler.retry(options, probe)
             finish("READY", nil)
         elseif attempts >= max_attempts then
             finish("EXHAUSTED", nil)
+        elseif pump_requested then
+            -- A wake observed while the probe was running is already queued by
+            -- the non-recursive pump. Do not introduce a timer between the
+            -- current observation and that coalesced re-probe.
         else
             schedule_next()
         end
@@ -381,10 +385,43 @@ function scheduler.retry(options, probe)
         return snapshot()
     end
 
+    local function wake_method()
+        if state ~= "PENDING" then
+            return snapshot()
+        end
+
+        -- A wake raised from inside the active probe is only a freshness hint.
+        -- The running observation is allowed to finish, and at most one more
+        -- probe is queued by the pump. In particular, this cannot recurse or
+        -- consume an attempt beyond max_attempts.
+        if pumping and timer == nil then
+            pump_requested = true
+            return snapshot()
+        end
+
+        begin_terminal_scope()
+        generation = generation + 1
+        local pending_timer = timer
+        timer = nil
+        pump_requested = true
+        if pending_timer ~= nil and pending_timer ~= scheduling_sentinel then
+            if not cancel_handle(pending_timer) then
+                end_terminal_scope()
+                return snapshot()
+            end
+        end
+        if state == "PENDING" then
+            request_pump()
+        end
+        end_terminal_scope()
+        return snapshot()
+    end
+
     local controller = function() end
     controller_operations[controller] = {
         status = status_method,
         cancel = cancel_method,
+        wake = wake_method,
     }
 
     request_pump()
@@ -409,6 +446,10 @@ end
 
 function scheduler.cancel(handle)
     return controller_operation(handle, "cancel")
+end
+
+function scheduler.wake(handle)
+    return controller_operation(handle, "wake")
 end
 
 function scheduler.rescan_interval(value)
