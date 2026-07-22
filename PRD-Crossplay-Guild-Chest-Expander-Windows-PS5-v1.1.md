@@ -739,7 +739,7 @@ Mods/NativeMods/UE4SS/Mods/CrossplayGuildChestExpander/config.json
 - `deployment_profile`은 정식 1.x에서 `windows-dedicated-ps5-macos-required`로 고정한다.
 - `required_clients`에서 `PS5` 또는 `Mac`을 제거할 수 없다.
 - `expand_only`는 정식 빌드에서 `false`로 설정할 수 없다.
-- `mode=apply`이고 승인이 필요한 경우 유효한 approval token이 있어야 한다.
+- `mode=apply`의 `approval_token`은 설정 파싱 단계에서는 문자열 형식만 검증한다. 토큰은 fresh audit report checksum이 생성된 뒤에만 유효성을 판정할 수 있으며, 비어 있거나 불일치하면 mutation 없이 `AWAITING_APPROVAL`로 전환한다.
 - include와 exclude에 같은 guild ID가 있으면 시작을 차단한다.
 - fallback rescan 최소값은 30초다.
 - 알 수 없는 설정 키는 경고가 아니라 오류로 처리한다.
