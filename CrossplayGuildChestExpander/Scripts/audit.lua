@@ -115,15 +115,21 @@ local function dense_length(value)
     return count
 end
 
-local function sorted_raw_keys(value)
-    local keys = {}
+local function unknown_context_field(value, allowed)
+    local unknown_strings = {}
+    local has_non_string = false
     for key in next, value do
-        keys[#keys + 1] = key
+        if type(key) ~= "string" then
+            has_non_string = true
+        elseif not allowed[key] then
+            unknown_strings[#unknown_strings + 1] = key
+        end
     end
-    table.sort(keys, function(left, right)
-        return tostring(left) < tostring(right)
-    end)
-    return keys
+    if has_non_string then
+        return "context"
+    end
+    table.sort(unknown_strings)
+    return unknown_strings[1]
 end
 
 local function validate_filter(context, field)
@@ -151,10 +157,9 @@ local function validate_context(context)
     if type(context) ~= "table" then
         fail("CGCE-AUD-CONTEXT", "context", "audit context must be a table")
     end
-    for _, key in ipairs(sorted_raw_keys(context)) do
-        if type(key) ~= "string" or not context_keys[key] then
-            fail("CGCE-AUD-CONTEXT", tostring(key), "unknown audit context field")
-        end
+    local unknown = unknown_context_field(context, context_keys)
+    if unknown ~= nil then
+        fail("CGCE-AUD-CONTEXT", unknown, "unknown audit context field")
     end
 
     local world_id = rawget(context, "world_id")
@@ -162,8 +167,8 @@ local function validate_context(context)
         fail("CGCE-AUD-CONTEXT", "world_id", "world_id must be a non-empty opaque string")
     end
     local game_revision = rawget(context, "game_revision")
-    if not is_integer(game_revision, 0) then
-        fail("CGCE-AUD-CONTEXT", "game_revision", "game_revision must be a non-negative integer")
+    if not is_integer(game_revision, 1) then
+        fail("CGCE-AUD-CONTEXT", "game_revision", "game_revision must be a positive integer")
     end
     local deployment_profile = rawget(context, "deployment_profile")
     if not is_json_string(deployment_profile, false) then
@@ -391,44 +396,6 @@ local function add_guild_error(record, blocking_errors, index, code, field, deta
     )
 end
 
-local function make_readonly(value, memo)
-    if type(value) ~= "table" then
-        return value
-    end
-    local existing = memo[value]
-    if existing then
-        return existing
-    end
-
-    local proxy = {}
-    memo[value] = proxy
-    local function wrapped(item)
-        return make_readonly(item, memo)
-    end
-    setmetatable(proxy, {
-        __index = function(_, key)
-            return wrapped(rawget(value, key))
-        end,
-        __newindex = function()
-            error("captured audit is read-only", 2)
-        end,
-        __len = function()
-            return #value
-        end,
-        __pairs = function()
-            local key
-            return function()
-                key = next(value, key)
-                if key ~= nil then
-                    return key, wrapped(rawget(value, key))
-                end
-            end
-        end,
-        __metatable = "captured audit is read-only",
-    })
-    return proxy
-end
-
 local function finalize(unsigned)
     local ok, unsigned_json = pcall(json.encode, unsigned)
     if not ok then
@@ -445,9 +412,12 @@ local function finalize(unsigned)
         fail("CGCE-AUD-CHECKSUM", "audit", "canonical audit encoding failed")
     end
 
-    local proxy = make_readonly(unsigned, {})
-    captured[proxy] = canonical
-    return proxy
+    local handle = function() end
+    captured[handle] = {
+        canonical = canonical,
+        checksum = checksum,
+    }
+    return handle
 end
 
 function audit.capture(context)
@@ -614,11 +584,19 @@ function audit.capture(context)
 end
 
 function audit.canonical_json(value)
-    local canonical = captured[value]
-    if canonical == nil then
+    local trusted = captured[value]
+    if trusted == nil then
         fail("CGCE-AUD-CHECKSUM", "audit", "value is not a captured audit")
     end
-    return canonical
+    return trusted.canonical
+end
+
+function audit.checksum(value)
+    local trusted = captured[value]
+    if trusted == nil then
+        fail("CGCE-AUD-CHECKSUM", "audit", "value is not a captured audit")
+    end
+    return trusted.checksum
 end
 
 function audit.to_table(value)

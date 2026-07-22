@@ -59,20 +59,16 @@ describe("discovery build surface", function()
         local machine = state_machine.new({ mutation_capability = false })
 
         local state_write_ok = pcall(function()
-            machine._state = "injected"
+            rawset(machine, "_state", "injected")
         end)
         local method_write_ok = pcall(function()
-            machine.transition = function()
-                return "injected"
-            end
+            rawset(machine, "transition", function() return "injected" end)
         end)
 
         a.equal(false, state_write_ok)
         a.equal(false, method_write_ok)
-        a.equal("DISABLED", machine:state())
-
-        rawset(machine, "_state", "injected")
-        a.equal("DISABLED", machine:state())
+        a.equal("function", type(machine))
+        a.equal("DISABLED", state_machine.state(machine))
     end)
 
     it("loads the audit behind write traps without accessing any trap", function()
@@ -106,5 +102,28 @@ describe("discovery build surface", function()
 
         a.deep_equal({}, result.guilds)
         a.deep_equal({}, result.blocking_errors)
+    end)
+
+    it("exposes audit data only through trusted module functions", function()
+        local context = {
+            world_id = "world/opaque-audit",
+            game_revision = 12345,
+            deployment_profile = "windows-dedicated-ps5-macos-required",
+            target_slots = 358,
+            include_guild_ids = {},
+            exclude_guild_ids = {},
+            list_guilds = function() return {} end,
+            resolve_guild_chest = function() error("must not run") end,
+            snapshot_container = function() error("must not run") end,
+        }
+        local handle = audit.capture(context)
+
+        local direct_ok = pcall(function() return handle.world_id end)
+        local rawset_ok = pcall(function() rawset(handle, "checksum", "shadow") end)
+
+        a.equal("function", type(handle))
+        a.equal(false, direct_ok)
+        a.equal(false, rawset_ok)
+        a.equal(audit.to_table(handle).checksum, audit.checksum(handle))
     end)
 end)

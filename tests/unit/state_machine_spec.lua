@@ -13,10 +13,12 @@ local function new_machine()
 end
 
 local function transition(machine, event, context, expected_state)
-    local state, err = machine:transition(event, context)
+    local state, err = state_machine.transition(machine, event, context)
     a.equal(expected_state, state)
     a.equal(nil, err)
-    a.equal(expected_state, machine:state())
+    local current, state_err = state_machine.state(machine)
+    a.equal(expected_state, current)
+    a.equal(nil, state_err)
 end
 
 local function at_audit()
@@ -29,7 +31,8 @@ end
 describe("discovery-safe state machine", function()
     it("takes the direct ready path to an audit-only completion", function()
         local machine = new_machine()
-        a.equal("DISABLED", machine:state())
+        a.equal("function", type(machine))
+        a.equal("DISABLED", state_machine.state(machine))
 
         transition(machine, "enable", nil, "PREFLIGHT")
         transition(machine, "world_ready", nil, "AUDIT")
@@ -116,10 +119,10 @@ describe("discovery-safe state machine", function()
         terminal_machines[#terminal_machines + 1] = unsupported
 
         for _, machine in ipairs(terminal_machines) do
-            local before = machine:state()
-            local state, err = machine:transition("enable")
+            local before = state_machine.state(machine)
+            local state, err = state_machine.transition(machine, "enable")
             a.equal(before, state)
-            a.equal(before, machine:state())
+            a.equal(before, state_machine.state(machine))
             assert_error("CGCE-STATE-TERMINAL", "event", err)
         end
     end)
@@ -162,25 +165,29 @@ describe("discovery-safe state machine", function()
         machines[#machines + 1] = unsupported
 
         for _, machine in ipairs(machines) do
-            local before = machine:state()
-            local state, err = machine:transition("apply", { token = "must-not-be-read" })
+            local before = state_machine.state(machine)
+            local state, err = state_machine.transition(
+                machine,
+                "apply",
+                { token = "must-not-be-read" }
+            )
             a.equal(before, state)
-            a.equal(before, machine:state())
+            a.equal(before, state_machine.state(machine))
             assert_error("CGCE-STATE-MUTATION-BUILD-UNAVAILABLE", "event", err)
         end
     end)
 
     it("rejects invalid events and contexts without changing state", function()
         local machine = new_machine()
-        local state, err = machine:transition("world_ready")
+        local state, err = state_machine.transition(machine, "world_ready")
         a.equal("DISABLED", state)
         assert_error("CGCE-STATE-INVALID-EVENT", "event", err)
 
-        state, err = machine:transition("enable", { unexpected = true })
+        state, err = state_machine.transition(machine, "enable", { unexpected = true })
         a.equal("DISABLED", state)
         assert_error("CGCE-STATE-INVALID-CONTEXT", "unexpected", err)
 
-        state, err = machine:transition("enable", "not-a-table")
+        state, err = state_machine.transition(machine, "enable", "not-a-table")
         a.equal("DISABLED", state)
         assert_error("CGCE-STATE-INVALID-CONTEXT", "context", err)
     end)
@@ -195,23 +202,80 @@ describe("discovery-safe state machine", function()
             { mode = "audit", approval_present = false, token = "secret" },
         }) do
             local machine = at_audit()
-            local state, err = machine:transition("audit_complete", context)
+            local state, err = state_machine.transition(machine, "audit_complete", context)
             a.equal("AUDIT", state)
             a.equal("CGCE-STATE-INVALID-CONTEXT", err.code)
             a.equal(false, err.detail:find("secret", 1, true) ~= nil)
         end
     end)
 
+    it("uses deterministic fields for invalid context keys without address leakage", function()
+        local machine = new_machine()
+        local state, err = state_machine.transition(machine, "enable", {
+            zebra = true,
+            alpha = true,
+        })
+        a.equal("DISABLED", state)
+        assert_error("CGCE-STATE-INVALID-CONTEXT", "alpha", err)
+
+        local non_string_context = {}
+        non_string_context[{}] = true
+        non_string_context[function() end] = true
+        non_string_context[io.stdout] = true
+        state, err = state_machine.transition(machine, "enable", non_string_context)
+        a.equal("DISABLED", state)
+        assert_error("CGCE-STATE-INVALID-CONTEXT", "context", err)
+        a.equal(false, err.detail:find("0x", 1, true) ~= nil)
+
+        local constructor_context = {
+            mutation_capability = false,
+            zebra = true,
+            alpha = true,
+        }
+        local ok, constructor_err = pcall(state_machine.new, constructor_context)
+        a.equal(false, ok)
+        assert_error("CGCE-STATE-INVALID-CONTEXT", "alpha", constructor_err)
+
+        local non_string_constructor = { mutation_capability = false }
+        non_string_constructor[{}] = true
+        non_string_constructor[io.stdout] = true
+        ok, constructor_err = pcall(state_machine.new, non_string_constructor)
+        a.equal(false, ok)
+        assert_error("CGCE-STATE-INVALID-CONTEXT", "context", constructor_err)
+        a.equal(false, constructor_err.detail:find("0x", 1, true) ~= nil)
+    end)
+
+    it("rejects forged and invalid opaque handles without changing a real machine", function()
+        local real = new_machine()
+        local function assert_forged(forged)
+            local state, err = state_machine.state(forged)
+            a.equal(nil, state)
+            assert_error("CGCE-STATE-INVALID-CONTEXT", "handle", err)
+
+            state, err = state_machine.transition(forged, "enable")
+            a.equal(nil, state)
+            assert_error("CGCE-STATE-INVALID-CONTEXT", "handle", err)
+        end
+        for _, forged in ipairs({ function() end, {}, "forged", false }) do
+            assert_forged(forged)
+        end
+        assert_forged(nil)
+        a.equal("DISABLED", state_machine.state(real))
+    end)
+
     it("accepts only a discovery build constructor context", function()
-        for _, context in ipairs({
-            {},
-            { mutation_capability = true },
-            { mutation_capability = false, resizer = function() end },
-            "not-a-table",
+        for _, scenario in ipairs({
+            { context = {}, field = "mutation_capability" },
+            { context = { mutation_capability = true }, field = "mutation_capability" },
+            {
+                context = { mutation_capability = false, resizer = function() end },
+                field = "resizer",
+            },
+            { context = "not-a-table", field = "context" },
         }) do
-            local ok, err = pcall(state_machine.new, context)
+            local ok, err = pcall(state_machine.new, scenario.context)
             a.equal(false, ok)
-            assert_error("CGCE-STATE-INVALID-CONTEXT", nil, err)
+            assert_error("CGCE-STATE-INVALID-CONTEXT", scenario.field, err)
         end
     end)
 
@@ -238,9 +302,9 @@ describe("discovery-safe state machine", function()
 
         for _, event in ipairs(events) do
             local machine = new_machine()
-            local state = machine:transition(event, { mode = "audit" })
+            local state = state_machine.transition(machine, event, { mode = "audit" })
             a.equal(false, forbidden[state] == true)
-            a.equal(false, forbidden[machine:state()] == true)
+            a.equal(false, forbidden[state_machine.state(machine)] == true)
         end
     end)
 end)

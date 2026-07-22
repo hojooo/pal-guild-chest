@@ -453,12 +453,13 @@ describe("read-only discovery audit", function()
         plain.checksum = nil
 
         a.equal(sha256.hex(json.encode(plain)), checksum)
-        a.equal(checksum, second.checksum)
+        a.equal(checksum, audit.checksum(first))
+        a.equal(checksum, audit.checksum(second))
         a.equal(audit.canonical_json(first), audit.canonical_json(second))
         a.equal(false, audit.canonical_json(first):find("timestamp", 1, true) ~= nil)
     end)
 
-    it("returns a recursive read-only view backed by cached canonical data", function()
+    it("returns an opaque handle backed by cached canonical data", function()
         local context = fixture({
             guild("guild/a", "A", "container/a"),
         }, {
@@ -467,28 +468,73 @@ describe("read-only discovery audit", function()
         local result = audit.capture(context)
         local canonical = audit.canonical_json(result)
 
-        local root_ok = pcall(function()
-            result.world_id = "changed"
+        local direct_ok = pcall(function()
+            return result.world_id
         end)
-        local nested_ok = pcall(function()
-            result.guilds[1].snapshot.slot_count = 999
+        local shadow_ok = pcall(function()
+            rawset(result, "checksum", string.rep("0", 64))
         end)
-        a.equal(false, root_ok)
-        a.equal(false, nested_ok)
+        a.equal("function", type(result))
+        a.equal(false, direct_ok)
+        a.equal(false, shadow_ok)
         a.equal(canonical, audit.canonical_json(result))
 
         local detached = audit.to_table(result)
+        local trusted_checksum = audit.checksum(result)
         detached.world_id = "changed"
         detached.guilds[1].snapshot.slot_count = 999
-        a.equal("world/test", result.world_id)
-        a.equal(54, result.guilds[1].snapshot.slot_count)
+        detached.checksum = string.rep("0", 64)
+        a.equal("world/test", audit.to_table(result).world_id)
+        a.equal(54, audit.to_table(result).guilds[1].snapshot.slot_count)
+        a.equal(trusted_checksum, audit.checksum(result))
         a.equal(canonical, json.encode(audit.to_table(result)))
+    end)
+
+    it("rejects forged opaque audit handles", function()
+        local function assert_forged(forged)
+            for _, operation in ipairs({
+                audit.canonical_json,
+                audit.to_table,
+                audit.checksum,
+            }) do
+                local ok, err = pcall(operation, forged)
+                a.equal(false, ok)
+                a.equal("CGCE-AUD-CHECKSUM", err.code)
+                a.equal("audit", err.field)
+                a.equal("string", type(err.detail))
+            end
+        end
+        for _, forged in ipairs({ function() end, {}, "forged", false }) do
+            assert_forged(forged)
+        end
+        assert_forged(nil)
+    end)
+
+    it("uses deterministic fields for unknown context keys without address leakage", function()
+        local string_context = fixture({}, {})
+        string_context.zebra = true
+        string_context.alpha = true
+        local ok, err = pcall(audit.capture, string_context)
+        a.equal(false, ok)
+        a.equal("CGCE-AUD-CONTEXT", err.code)
+        a.equal("alpha", err.field)
+
+        local non_string_context = fixture({}, {})
+        non_string_context[{}] = true
+        non_string_context[function() end] = true
+        non_string_context[io.stdout] = true
+        ok, err = pcall(audit.capture, non_string_context)
+        a.equal(false, ok)
+        a.equal("CGCE-AUD-CONTEXT", err.code)
+        a.equal("context", err.field)
+        a.equal(false, err.detail:find("0x", 1, true) ~= nil)
     end)
 
     it("validates the exact scalar, filter, and read-port context", function()
         local valid = fixture({}, {})
         local scenarios = {
             { field = "world_id", value = "" },
+            { field = "game_revision", value = 0 },
             { field = "game_revision", value = 1.5 },
             { field = "deployment_profile", value = false },
             { field = "target_slots", value = 0 },

@@ -1,12 +1,5 @@
 local state_machine = {}
 
-local machine_methods = {}
-machine_methods.__index = machine_methods
-machine_methods.__newindex = function()
-    error("discovery state machine is read-only", 2)
-end
-machine_methods.__metatable = "discovery state machine is read-only"
-
 local machine_states = setmetatable({}, { __mode = "k" })
 
 local terminal_states = {
@@ -46,19 +39,25 @@ local function make_error(code, field, detail)
     }
 end
 
-local function invalid_constructor(detail)
-    error(make_error("CGCE-STATE-INVALID-CONTEXT", nil, detail), 0)
+local function invalid_constructor(field, detail)
+    error(make_error("CGCE-STATE-INVALID-CONTEXT", field, detail), 0)
 end
 
-local function sorted_keys(value)
-    local keys = {}
+local function unknown_context_field(value, allowed)
+    local unknown_strings = {}
+    local has_non_string = false
     for key in next, value do
-        keys[#keys + 1] = key
+        if type(key) ~= "string" then
+            has_non_string = true
+        elseif not allowed[key] then
+            unknown_strings[#unknown_strings + 1] = key
+        end
     end
-    table.sort(keys, function(left, right)
-        return tostring(left) < tostring(right)
-    end)
-    return keys
+    if has_non_string then
+        return "context"
+    end
+    table.sort(unknown_strings)
+    return unknown_strings[1]
 end
 
 local function validate_no_context(context)
@@ -72,11 +71,11 @@ local function validate_no_context(context)
             "event context must be a table"
         )
     end
-    local key = next(context)
-    if key ~= nil then
+    local field = unknown_context_field(context, {})
+    if field ~= nil then
         return make_error(
             "CGCE-STATE-INVALID-CONTEXT",
-            tostring(key),
+            field,
             "event does not accept context fields"
         )
     end
@@ -96,14 +95,13 @@ local function audit_completion_state(context)
         mode = true,
         approval_present = true,
     }
-    for _, key in ipairs(sorted_keys(context)) do
-        if type(key) ~= "string" or not allowed[key] then
-            return nil, make_error(
-                "CGCE-STATE-INVALID-CONTEXT",
-                tostring(key),
-                "unknown audit completion context field"
-            )
-        end
+    local unknown = unknown_context_field(context, allowed)
+    if unknown ~= nil then
+        return nil, make_error(
+            "CGCE-STATE-INVALID-CONTEXT",
+            unknown,
+            "unknown audit completion context field"
+        )
     end
 
     local mode = rawget(context, "mode")
@@ -140,12 +138,27 @@ local function audit_completion_state(context)
     )
 end
 
-function machine_methods:state()
-    return machine_states[self]
+local function require_state(handle)
+    local current = machine_states[handle]
+    if current == nil then
+        return nil, make_error(
+            "CGCE-STATE-INVALID-CONTEXT",
+            "handle",
+            "state machine handle is invalid"
+        )
+    end
+    return current, nil
 end
 
-function machine_methods:transition(event, context)
-    local current = machine_states[self]
+function state_machine.state(handle)
+    return require_state(handle)
+end
+
+function state_machine.transition(handle, event, context)
+    local current, handle_error = require_state(handle)
+    if handle_error then
+        return nil, handle_error
+    end
     if event == "apply" then
         return current, make_error(
             "CGCE-STATE-MUTATION-BUILD-UNAVAILABLE",
@@ -189,26 +202,28 @@ function machine_methods:transition(event, context)
         return current, context_error
     end
 
-    machine_states[self] = target
+    machine_states[handle] = target
     return target, nil
 end
 
 function state_machine.new(context)
     if type(context) ~= "table" then
-        invalid_constructor("constructor context must be a table")
+        invalid_constructor("context", "constructor context must be a table")
     end
-    for key in next, context do
-        if key ~= "mutation_capability" then
-            invalid_constructor("unknown constructor context field")
-        end
+    local unknown = unknown_context_field(context, { mutation_capability = true })
+    if unknown ~= nil then
+        invalid_constructor(unknown, "unknown constructor context field")
     end
     if rawget(context, "mutation_capability") ~= false then
-        invalid_constructor("discovery build requires mutation_capability=false")
+        invalid_constructor(
+            "mutation_capability",
+            "discovery build requires mutation_capability=false"
+        )
     end
 
-    local machine = setmetatable({}, machine_methods)
-    machine_states[machine] = "DISABLED"
-    return machine
+    local handle = function() end
+    machine_states[handle] = "DISABLED"
+    return handle
 end
 
 return state_machine
