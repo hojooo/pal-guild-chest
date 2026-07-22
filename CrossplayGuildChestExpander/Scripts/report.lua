@@ -442,7 +442,14 @@ local function validate_id_array(value, field)
 end
 
 local function audit_error_mirror_key(index, code, field, detail)
-    return tostring(index) .. "\0" .. code .. "\0" .. field .. "\0" .. detail
+    local function length_prefixed(value)
+        return tostring(#value) .. ":" .. value
+    end
+
+    return length_prefixed(tostring(index))
+        .. length_prefixed(code)
+        .. length_prefixed(field)
+        .. length_prefixed(detail)
 end
 
 local function validate_audit_error_mirrors(value)
@@ -849,7 +856,11 @@ local function validate_terminal_consistency(mode, state, audit_value, platform,
             or finding.severity == "BLOCKING"
             or finding.severity == "CRITICAL"
     end
-    local explicit_blocker = #audit_value.blocking_errors > 0
+    local audit_blocked = #audit_value.blocking_errors > 0
+    for _, guild in ipairs(audit_value.guilds) do
+        audit_blocked = audit_blocked or guild.status == "blocked"
+    end
+    local explicit_blocker = audit_blocked
         or conflict.blocking
         or unified_blocking
     local must_block = explicit_blocker

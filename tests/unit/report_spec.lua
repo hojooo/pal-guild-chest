@@ -105,6 +105,38 @@ local function blocked_audit()
     })
 end
 
+local function filter_overlap_audit()
+    local container = fake_adapter.container({
+        container_id = "container/alpha",
+        owner_guild_id = "guild/alpha",
+        slots = slots(54),
+    })
+    return audit.capture({
+        world_id = "world/alpha",
+        game_revision = 12345,
+        deployment_profile = PROFILE,
+        target_slots = 358,
+        include_guild_ids = { "guild/alpha" },
+        exclude_guild_ids = { "guild/alpha" },
+        list_guilds = function()
+            return {
+                { guild_id = "guild/alpha", guild_name = "Alpha", chest_container_id = "container/alpha" },
+            }
+        end,
+        resolve_guild_chest = function()
+            return {
+                container_id = "container/alpha",
+                owner_guild_id = "guild/alpha",
+                is_guild_chest = true,
+                container = container,
+            }
+        end,
+        snapshot_container = function(value)
+            return snapshot.capture(readonly_adapter, value)
+        end,
+    })
+end
+
 local function platform_projection()
     return {
         preflight_ok = true,
@@ -449,6 +481,61 @@ describe("operational report", function()
                 report.validate(value)
             end)
         end
+    end)
+
+    it("treats blocked guild status as explicit terminal blocking evidence", function()
+        local value = json.decode(json.encode(report.build(build_context({
+            audit = blocked_audit(),
+            state = "BLOCKED",
+        }))))
+        value.audit.guilds[1].errors = json.array()
+        value.audit.blocking_errors = json.array()
+        value.state = "AUDIT_COMPLETE"
+        resign_report(value)
+
+        expect_error("CGCE-REPORT-STATE", "state", function()
+            report.validate(value)
+        end)
+    end)
+
+    it("preserves valid filter-overlap blocked evidence", function()
+        local value = report.build(build_context({
+            audit = filter_overlap_audit(),
+            state = "BLOCKED",
+        }))
+
+        a.equal("blocked", value.audit.guilds[1].status)
+        a.equal(0, #value.audit.guilds[1].errors)
+        a.equal("CGCE-AUD-FILTER-OVERLAP", value.audit.blocking_errors[1].code)
+        a.deep_equal(value, report.validate(json.decode(json.encode(value))))
+    end)
+
+    it("rejects NUL-delimited audit error tuple collisions", function()
+        local value = json.decode(json.encode(report.build(build_context({
+            audit = blocked_audit(),
+            state = "BLOCKED",
+        }))))
+        value.audit.guilds[1].errors[1].field = "owner_guild_id\0forged"
+        value.audit.guilds[1].errors[1].detail = "detail"
+        value.audit.blocking_errors[1].field = "guilds[1].owner_guild_id"
+        value.audit.blocking_errors[1].detail = "forged\0detail"
+        resign_report(value)
+
+        expect_error("CGCE-REPORT-AUDIT", "audit.blocking_errors", function()
+            report.validate(value)
+        end)
+    end)
+
+    it("accepts exactly mirrored NUL-containing audit error strings", function()
+        local value = json.decode(json.encode(report.build(build_context({
+            audit = blocked_audit(),
+            state = "BLOCKED",
+        }))))
+        value.audit.guilds[1].errors[1].detail = "owner\0detail"
+        value.audit.blocking_errors[1].detail = "owner\0detail"
+        resign_report(value)
+
+        a.deep_equal(value, report.validate(value))
     end)
 
     it("uses module-initialization audit accessors instead of mutable public slots", function()
