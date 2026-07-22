@@ -32,15 +32,53 @@ for _, client in ipairs(constants.required_clients) do
 end
 
 local common_evidence_fields = {
-    "ui_access",
+    "vanilla_connect",
+    "reconnect",
+    "guild_join",
+    "chest_open",
+    "first_slot_access",
     "last_slot_access",
-    "restart_reconnect",
-    "cross_platform_consistency",
+    "navigate_all_rows",
+    "item_deposit",
+    "item_withdraw",
+    "stack_split",
+    "quick_move",
+    "sort_all_slots",
+    "last_slot_after_sort",
+    "close_reopen",
+    "server_restart_persistence",
+    "app_restart_persistence",
+    "concurrent_cross_platform_access",
+    "cross_platform_state_match",
+    "last_slot_item_display",
+    "last_slot_quantity_preserved",
+    "last_slot_guid_preserved",
+    "no_ui_freeze",
+    "no_client_crash",
+    "no_network_disconnect",
+    "high_latency_pass",
+    "packet_loss_pass",
 }
 
 local common_evidence_set = {}
 for _, field in ipairs(common_evidence_fields) do
     common_evidence_set[field] = true
+end
+
+local ps5_evidence_fields = {
+    "community_server_list",
+    "dualsense_dpad_all_rows",
+    "dualsense_analog_all_rows",
+    "dualsense_row_boundary",
+    "dualsense_last_row_focus",
+    "dualsense_tooltip",
+    "dualsense_stack_split",
+    "dualsense_quick_move",
+}
+
+local ps5_evidence_set = {}
+for _, field in ipairs(ps5_evidence_fields) do
+    ps5_evidence_set[field] = true
 end
 
 local function fail(code, field, detail)
@@ -119,9 +157,16 @@ local function validate_required_clients(clients)
     end
 end
 
-local function validate_evidence_record(record, field, client)
+local function validate_evidence_record(record, field)
     if type(record) ~= "table" then
         fail("CGCE-CERT-CLIENT-EVIDENCE", field, "client evidence record is missing")
+    end
+    local client = record.client
+    if type(client) ~= "string" or not required_client_set[client] then
+        fail("CGCE-CERT-CLIENT-EVIDENCE", field .. ".client", "evidence client is not required by the release profile")
+    end
+    if not is_sha256(record.evidence_checksum) then
+        fail("CGCE-CERT-EVIDENCE-CHECKSUM", field .. ".evidence_checksum", "evidence checksum must be lowercase SHA-256")
     end
     for _, required_field in ipairs(common_evidence_fields) do
         if record[required_field] == nil then
@@ -129,29 +174,29 @@ local function validate_evidence_record(record, field, client)
         end
     end
     if client == "PS5" then
-        if record.community_server_list ~= true then
-            fail("CGCE-CERT-PS5-COMMUNITY", field .. ".community_server_list", "PS5 Community Server list evidence is required")
-        end
-        if record.dualsense_last_slot ~= true then
-            fail("CGCE-CERT-PS5-DUALSENSE", field .. ".dualsense_last_slot", "PS5 DualSense last-slot evidence is required")
+        for _, required_field in ipairs(ps5_evidence_fields) do
+            if record[required_field] == nil then
+                if required_field == "community_server_list" then
+                    fail("CGCE-CERT-PS5-COMMUNITY", field .. "." .. required_field, "PS5 Community Server list evidence is required")
+                end
+                fail("CGCE-CERT-EVIDENCE-MISSING", field .. "." .. required_field, "required PS5 evidence check is missing")
+            end
         end
     end
 
-    local count = 0
     for check, passed in pairs(record) do
-        count = count + 1
-        local allowed = common_evidence_set[check]
-            or (client == "PS5" and (check == "community_server_list" or check == "dualsense_last_slot"))
+        local allowed = check == "client"
+            or check == "evidence_checksum"
+            or common_evidence_set[check]
+            or (client == "PS5" and ps5_evidence_set[check])
         if not allowed then
             fail("CGCE-CERT-EVIDENCE-UNKNOWN", field .. "." .. tostring(check), "unknown client evidence check")
         end
-        if type(check) ~= "string" or #check == 0 or passed ~= true then
+        if check ~= "client" and check ~= "evidence_checksum" and passed ~= true then
             fail("CGCE-CERT-EVIDENCE-NOT-PASSED", field .. "." .. tostring(check), "every client evidence check must be true")
         end
     end
-    if count == 0 then
-        fail("CGCE-CERT-CLIENT-EVIDENCE", field, "client evidence record must not be empty")
-    end
+    return client
 end
 
 local function validate_slot(slot, index, previous)
@@ -173,16 +218,20 @@ local function validate_slot(slot, index, previous)
         or not target_candidates[slot.target_slots] or (previous and slot.target_slots <= previous) then
         fail("CGCE-CERT-SLOT", prefix .. ".target_slots", "certified slots must be unique ascending candidates")
     end
-    if type(slot.evidence) ~= "table" then
-        fail("CGCE-CERT-CLIENT-EVIDENCE", prefix .. ".evidence", "per-client evidence must be an object")
-    end
-    for client in pairs(slot.evidence) do
-        if not required_client_set[client] then
-            fail("CGCE-CERT-CLIENT-EVIDENCE", prefix .. ".evidence." .. tostring(client), "unexpected client evidence")
+    local evidence_length = array_length(slot.evidence, prefix .. ".evidence")
+    local seen_clients = {}
+    for evidence_index = 1, evidence_length do
+        local field = prefix .. ".evidence[" .. evidence_index .. "]"
+        local client = validate_evidence_record(slot.evidence[evidence_index], field)
+        if seen_clients[client] then
+            fail("CGCE-CERT-CLIENT-EVIDENCE", field .. ".client", "duplicate client evidence")
         end
+        seen_clients[client] = true
     end
     for _, client in ipairs(constants.required_clients) do
-        validate_evidence_record(slot.evidence[client], prefix .. ".evidence." .. client, client)
+        if not seen_clients[client] then
+            fail("CGCE-CERT-CLIENT-EVIDENCE", prefix .. ".evidence." .. client, "required client evidence is missing")
+        end
     end
     return slot.target_slots
 end

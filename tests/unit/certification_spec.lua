@@ -7,25 +7,69 @@ local sha256 = require("CrossplayGuildChestExpander.Scripts.sha256")
 local REVISION = 123456
 local PROFILE = "windows-dedicated-ps5-macos-required"
 
-local function common_evidence()
-    return {
-        ui_access = true,
-        last_slot_access = true,
-        restart_reconnect = true,
-        cross_platform_consistency = true,
+local COMMON_CHECKS = {
+    "vanilla_connect",
+    "reconnect",
+    "guild_join",
+    "chest_open",
+    "first_slot_access",
+    "last_slot_access",
+    "navigate_all_rows",
+    "item_deposit",
+    "item_withdraw",
+    "stack_split",
+    "quick_move",
+    "sort_all_slots",
+    "last_slot_after_sort",
+    "close_reopen",
+    "server_restart_persistence",
+    "app_restart_persistence",
+    "concurrent_cross_platform_access",
+    "cross_platform_state_match",
+    "last_slot_item_display",
+    "last_slot_quantity_preserved",
+    "last_slot_guid_preserved",
+    "no_ui_freeze",
+    "no_client_crash",
+    "no_network_disconnect",
+    "high_latency_pass",
+    "packet_loss_pass",
+}
+
+local PS5_CHECKS = {
+    "community_server_list",
+    "dualsense_dpad_all_rows",
+    "dualsense_analog_all_rows",
+    "dualsense_row_boundary",
+    "dualsense_last_row_focus",
+    "dualsense_tooltip",
+    "dualsense_stack_split",
+    "dualsense_quick_move",
+}
+
+local function client_evidence(client, checksum_character)
+    local record = {
+        client = client,
+        evidence_checksum = string.rep(checksum_character or "e", 64),
     }
+    for _, check in ipairs(COMMON_CHECKS) do
+        record[check] = true
+    end
+    if client == "PS5" then
+        for _, check in ipairs(PS5_CHECKS) do
+            record[check] = true
+        end
+    end
+    return record
 end
 
 local function slot_evidence(target_slots)
-    local ps5 = common_evidence()
-    ps5.community_server_list = true
-    ps5.dualsense_last_slot = true
     return {
         target_slots = target_slots,
         evidence = {
-            SteamWindows = common_evidence(),
-            PS5 = ps5,
-            Mac = common_evidence(),
+            client_evidence("SteamWindows", "d"),
+            client_evidence("PS5", "e"),
+            client_evidence("Mac", "f"),
         },
     }
 end
@@ -66,7 +110,14 @@ end
 describe("certification.verify", function()
     it("returns only slots authorized by an exactly pinned release artifact", function()
         local release_artifact = artifact({ 54, 120, 358 })
-        local certified = certification.verify(release_artifact, release_artifact.checksum, REVISION, PROFILE)
+        local ok, certified = pcall(
+            certification.verify,
+            release_artifact,
+            release_artifact.checksum,
+            REVISION,
+            PROFILE
+        )
+        a.equal(true, ok)
         a.deep_equal({ 54, 120, 358 }, certified)
     end)
 
@@ -102,55 +153,80 @@ describe("certification.verify", function()
 
     it("requires exactly one all-true evidence record for every required client", function()
         local missing_mac = artifact()
-        missing_mac.slots[1].evidence.Mac = nil
+        missing_mac.slots[1].evidence[3] = nil
         refresh_checksum(missing_mac)
         expect_error("CGCE-CERT-CLIENT-EVIDENCE", "slots[1].evidence.Mac", function()
             certification.verify(missing_mac, missing_mac.checksum, REVISION, PROFILE)
         end)
 
+        local duplicate_mac = artifact()
+        duplicate_mac.slots[1].evidence[4] = client_evidence("Mac", "1")
+        refresh_checksum(duplicate_mac)
+        expect_error("CGCE-CERT-CLIENT-EVIDENCE", "slots[1].evidence[4].client", function()
+            certification.verify(duplicate_mac, duplicate_mac.checksum, REVISION, PROFILE)
+        end)
+
         local failed_check = artifact()
-        failed_check.slots[1].evidence.SteamWindows.restart_reconnect = false
+        failed_check.slots[1].evidence[1].reconnect = false
         refresh_checksum(failed_check)
-        expect_error("CGCE-CERT-EVIDENCE-NOT-PASSED", "slots[1].evidence.SteamWindows.restart_reconnect", function()
+        expect_error("CGCE-CERT-EVIDENCE-NOT-PASSED", "slots[1].evidence[1].reconnect", function()
             certification.verify(failed_check, failed_check.checksum, REVISION, PROFILE)
         end)
 
         local missing_check = artifact()
-        missing_check.slots[1].evidence.Mac.last_slot_access = nil
+        missing_check.slots[1].evidence[3].last_slot_access = nil
         refresh_checksum(missing_check)
-        expect_error("CGCE-CERT-EVIDENCE-MISSING", "slots[1].evidence.Mac.last_slot_access", function()
+        expect_error("CGCE-CERT-EVIDENCE-MISSING", "slots[1].evidence[3].last_slot_access", function()
             certification.verify(missing_check, missing_check.checksum, REVISION, PROFILE)
         end)
 
         local unknown_check = artifact()
-        unknown_check.slots[1].evidence.Mac.unreviewed_claim = true
+        unknown_check.slots[1].evidence[3].unreviewed_claim = true
         refresh_checksum(unknown_check)
-        expect_error("CGCE-CERT-EVIDENCE-UNKNOWN", "slots[1].evidence.Mac.unreviewed_claim", function()
+        expect_error("CGCE-CERT-EVIDENCE-UNKNOWN", "slots[1].evidence[3].unreviewed_claim", function()
             certification.verify(unknown_check, unknown_check.checksum, REVISION, PROFILE)
         end)
 
         local unexpected_client = artifact()
-        unexpected_client.slots[1].evidence.Xbox = common_evidence()
+        unexpected_client.slots[1].evidence[3] = client_evidence("Xbox", "a")
         refresh_checksum(unexpected_client)
-        expect_error("CGCE-CERT-CLIENT-EVIDENCE", "slots[1].evidence.Xbox", function()
+        expect_error("CGCE-CERT-CLIENT-EVIDENCE", "slots[1].evidence[3].client", function()
             certification.verify(unexpected_client, unexpected_client.checksum, REVISION, PROFILE)
+        end)
+
+        local malformed_checksum = artifact()
+        malformed_checksum.slots[1].evidence[1].evidence_checksum = string.rep("A", 64)
+        refresh_checksum(malformed_checksum)
+        expect_error("CGCE-CERT-EVIDENCE-CHECKSUM", "slots[1].evidence[1].evidence_checksum", function()
+            certification.verify(malformed_checksum, malformed_checksum.checksum, REVISION, PROFILE)
         end)
     end)
 
-    it("requires PS5 Community Server list and DualSense last-slot evidence", function()
+    it("requires PS5 Community Server and complete DualSense evidence", function()
         local no_community = artifact()
-        no_community.slots[1].evidence.PS5.community_server_list = nil
+        no_community.slots[1].evidence[2].community_server_list = nil
         refresh_checksum(no_community)
-        expect_error("CGCE-CERT-PS5-COMMUNITY", "slots[1].evidence.PS5.community_server_list", function()
+        expect_error("CGCE-CERT-PS5-COMMUNITY", "slots[1].evidence[2].community_server_list", function()
             certification.verify(no_community, no_community.checksum, REVISION, PROFILE)
         end)
 
-        local no_dualsense = artifact()
-        no_dualsense.slots[1].evidence.PS5.dualsense_last_slot = false
-        refresh_checksum(no_dualsense)
-        expect_error("CGCE-CERT-PS5-DUALSENSE", "slots[1].evidence.PS5.dualsense_last_slot", function()
-            certification.verify(no_dualsense, no_dualsense.checksum, REVISION, PROFILE)
+        local failed_dualsense = artifact()
+        failed_dualsense.slots[1].evidence[2].dualsense_row_boundary = false
+        refresh_checksum(failed_dualsense)
+        expect_error("CGCE-CERT-EVIDENCE-NOT-PASSED", "slots[1].evidence[2].dualsense_row_boundary", function()
+            certification.verify(failed_dualsense, failed_dualsense.checksum, REVISION, PROFILE)
         end)
+    end)
+
+    it("rejects 358 when sorting, stack split, GUID, or no-crash evidence is absent", function()
+        for _, check in ipairs({ "sort_all_slots", "stack_split", "last_slot_guid_preserved", "no_client_crash" }) do
+            local release_artifact = artifact({ 358 })
+            release_artifact.slots[1].evidence[1][check] = nil
+            refresh_checksum(release_artifact)
+            expect_error("CGCE-CERT-EVIDENCE-MISSING", "slots[1].evidence[1]." .. check, function()
+                certification.verify(release_artifact, release_artifact.checksum, REVISION, PROFILE)
+            end)
+        end
     end)
 
     it("rejects absent or different release-build checksum pins", function()
@@ -166,7 +242,7 @@ describe("certification.verify", function()
     it("rejects artifact drift using its canonical self-checksum", function()
         local release_artifact = artifact()
         local pinned_checksum = release_artifact.checksum
-        release_artifact.slots[1].evidence.Mac.ui_access = false
+        release_artifact.slots[1].evidence[3].vanilla_connect = false
 
         expect_error("CGCE-CERT-CHECKSUM", "checksum", function()
             certification.verify(release_artifact, pinned_checksum, REVISION, PROFILE)
