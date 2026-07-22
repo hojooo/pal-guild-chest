@@ -205,6 +205,37 @@ Exit status: `0`
 
 Result: `16` audit tests passed. `audit.capture` now returns a unique function token, while `audit.to_table`, `audit.canonical_json`, and `audit.checksum` read only trusted captured storage. Direct field access, `rawset`, detached-copy mutation, forged handles, and `nil` handles cannot alter or impersonate an audit. Revision must be at least `1`; string unknown keys are sorted and non-string table/function/userdata keys use fixed field `context` without address leakage.
 
+### Second re-review — Public accessor shadow split-brain RED
+
+Command:
+
+```sh
+./scripts/run-tests.sh tests/integration/audit_spec.lua
+```
+
+Exit status: `1`
+
+Observed failure:
+
+```text
+FAIL keeps saved accessors bound to trusted storage when public slots are shadowed
+tests/integration/audit_spec.lua:544: expected "world/test", got "world/forged"
+```
+
+The saved original `audit.to_table` still dynamically called mutable public slot `audit.canonical_json`. Shadowing that slot made a real handle decode forged data and let a forged handle bypass the original `to_table` validation, while the saved original checksum accessor still returned trusted data.
+
+### Second re-review — Public accessor shadow split-brain GREEN
+
+Command:
+
+```sh
+./scripts/run-tests.sh tests/integration/audit_spec.lua
+```
+
+Exit status: `0`
+
+Result: `17` audit tests passed. A private local `require_captured(handle)` now performs the only trusted lookup, and each exported accessor calls it directly. The regression shadows all three public module slots, invokes saved originals, restores every slot before assertions, and proves real data remains coherent while forged handles still raise `CGCE-AUD-CHECKSUM`.
+
 ## Final verification
 
 Focused Task 5 unit test:
@@ -221,7 +252,7 @@ Focused Task 5 integration tests:
 ./scripts/run-tests.sh tests/integration/audit_spec.lua tests/integration/discovery_surface_spec.lua
 ```
 
-Exit status: `0`; `21` tests passed.
+Exit status: `0`; `22` tests passed.
 
 Repository default full suite:
 
@@ -229,7 +260,7 @@ Repository default full suite:
 ./scripts/run-tests.sh
 ```
 
-Exit status: `0`; `115` unit and integration tests passed with `0` failures. The repository runner now includes both `tests/unit/*.lua` and `tests/integration/*.lua` by default.
+Exit status: `0`; `141` current unit and integration tests passed with `0` failures. This run included the Task 7 files concurrently present in the workspace; the immutable Task 5 focused evidence is `14` state-machine, `17` audit, and `5` discovery-surface tests.
 
 Staged whitespace review before the implementation commit:
 
@@ -250,6 +281,7 @@ Exit status: `0`.
 - Missing configured IDs do not call either downstream port and remain non-blocking `not_initialized` records.
 - The resolver is called only with a configured guild chest ID. There is no API for enumerating general containers, and the general-container fixture remains untouched.
 - Checksum input is canonical unsigned JSON with no timestamp; the signed canonical JSON and checksum are cached in trusted storage before returning the opaque handle. `to_table` decodes a fresh detached copy, while `checksum` never trusts a caller-owned table field.
+- `canonical_json`, `checksum`, and `to_table` independently call private `require_captured`; no authority-bearing accessor dispatches through another mutable public module slot.
 - Invalid context reporting is deterministic: sorted string unknowns identify the first stable field, while any non-string key reports fixed field `context` and never stringifies an address-bearing value.
 - Underlying port exceptions and unknown context values are never copied into structured errors, reports, or canonical JSON.
 - No implementation line guesses a Palworld class, property, function, or revision-specific symbol.
@@ -258,6 +290,7 @@ Exit status: `0`.
 
 - `4708257` — `feat: add read-only discovery audit`
 - `657a035` — `fix: make discovery handles opaque`
+- `59fc33d` — `fix: bind audit accessors to trusted storage`
 
 ## Concerns and deferred evidence
 
