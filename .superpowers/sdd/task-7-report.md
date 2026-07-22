@@ -151,7 +151,7 @@ Command:
 ./scripts/run-tests.sh tests/unit/scheduler_spec.lua
 ```
 
-The regression first observed `expected "FAILED", got "CANCELLED"` when the cancel adapter returned an error rather than throwing. Both thrown and returned callback errors now fail closed with sanitized `SCHEDULER_CALLBACK_FAILED` status.
+The regression first observed `expected "FAILED", got "CANCELLED"` when the cancel adapter returned an error rather than throwing. Both thrown and returned callback errors now fail closed with sanitized `CGCE-SCHED-CALLBACK-FAILED` status.
 
 ### Deferred terminal delivery RED → GREEN
 
@@ -165,6 +165,34 @@ The cleanup-failure regression first observed `expected "FAILED", got "CANCELLED
 
 An independent read-only re-review reran the prior reproductions and found the final scheduler clean: deferral depth is balanced on every exit, final status and callback state agree, and no timer survives a terminal outcome.
 
+## Root review follow-up hardening
+
+### Public contract gaps RED
+
+Focused regressions were added before the follow-up implementation:
+
+```sh
+./scripts/run-tests.sh tests/unit/command_router_spec.lua
+./scripts/run-tests.sh tests/unit/scheduler_spec.lua
+./scripts/run-tests.sh tests/unit/platform_preflight_spec.lua
+```
+
+The command-router regressions first showed that `status` copied the full port-owned table, including an approval token, and still emitted pre-namespace error codes. A second regression supplied a cyclic extra status field; it failed because the router traversed data outside the four-field public contract.
+
+The scheduler regressions first failed because `scheduler.status` did not exist, `retry` returned a mutable table handle, cache input still used the old permissive schema, and scheduler errors were not namespaced.
+
+The preflight regressions first observed `expected "[]", got "{}"` for successful empty findings and found pre-namespace diagnostic codes.
+
+### Public contract gaps GREEN
+
+- `status` now reads only `revision`, `mode`, `target`, and `state` with `rawget`, then detaches those four values. Extra, secret, cyclic, function-valued, or otherwise invalid port fields are neither traversed nor returned.
+- `scheduler.retry` now returns an opaque function handle backed by a weak-key private operation map. Trusted module-level `scheduler.status(handle)` and `scheduler.cancel(handle)` reject nil, forged, and rawset-shadowing attempts.
+- Cache/live records now reject metatables, unknown fields, non-string keys, malformed scalar values, and fingerprints other than exactly 64 lowercase hexadecimal SHA-256 characters. The exact cache fields are `status`, `game_revision`, `target_slots`, `item_fingerprint`, and `owner_guild_id`.
+- Empty cache reasons and preflight findings are explicit canonical JSON arrays.
+- Structured codes use the `CGCE-CMD-*`, `CGCE-SCHED-*`, and `CGCE-PF-*` namespaces. The required literal `MUTATION_BUILD_UNAVAILABLE` remains unchanged.
+
+The independent follow-up reviewer reran all three focused suites and manually exercised cyclic/function-valued status extras, forged scheduler handles, exact and unknown cache records, JSON-array preservation, and namespace consistency. The result was CLEAN with no security regression or contract gap found in scope.
+
 ## Final verification
 
 Focused Task 7 suite:
@@ -173,7 +201,7 @@ Focused Task 7 suite:
 ./scripts/run-tests.sh tests/unit/command_router_spec.lua tests/unit/scheduler_spec.lua tests/unit/platform_preflight_spec.lua
 ```
 
-Exit status: `0`; `33` tests passed with `0` failures.
+Exit status: `0`; `34` tests passed with `0` failures.
 
 Repository default full suite:
 
@@ -181,7 +209,7 @@ Repository default full suite:
 ./scripts/run-tests.sh
 ```
 
-Exit status: `0`; `161` current unit and integration tests passed with `0` failures. This run included concurrent Task 6 approval/logger files present in the shared workspace; the immutable Task 7 focused evidence is the `33` tests above. An earlier pre-concurrency full run also passed all then-present `148` tests.
+Exit status: `0`; `163` current unit and integration tests passed with `0` failures. This run included concurrent Task 6 approval/logger files present in the shared workspace; the immutable Task 7 focused evidence is the `34` tests above. An earlier pre-concurrency full run also passed all then-present `148` tests.
 
 Lua 5.4 syntax verification:
 
@@ -204,12 +232,13 @@ Manual merge smoke verification exercised empty tuples, surrounding spaces, nest
 ## Self-review
 
 - Re-read Task 7, PRD §§3.1, 10.2, 10.10, 13.5, 14, and 17.5 against all six changed implementation/test files.
-- `command_router.new` copies exactly five named functions into private storage. Unknown/malformed/apply inputs call no port; `apply` never consults status, mode, token, target, or state.
+- `command_router.new` copies exactly five named functions into private storage. Unknown/malformed/apply inputs call no port; `apply` never consults status, mode, token, target, or state. Successful status envelopes read and expose exactly `revision`, `mode`, `target`, and `state`, ignoring every extra field.
 - Command parsing uses exact string matching only. It does not trim, split a shell line, interpret quoting, expand variables, or execute external input.
 - Successful command payloads round-trip through the deterministic JSON module, detach from port-owned state, preserve empty arrays, reject cycles/non-finite/invalid values, and never expose port exceptions.
 - The scheduler copies injected callbacks before starting, probes immediately, permits at most one timer, guards each callback generation, and invalidates late callbacks. A synchronous fake cannot recur past the bound.
 - Terminal delivery is delayed across nested injected operations so cleanup determines the final state before the single `on_terminal` call. Callback details are never copied into errors.
-- Cache fallback returns `SKIP` only for a completed cache whose revision, target, fingerprint, and owner exactly match. Startup always returns `INSPECT`, even for that exact cache.
+- Scheduler handles are opaque functions resolved through a weak-key private map. Status and cancellation are trusted module operations; forged and nil handles fail closed.
+- Cache fallback returns `SKIP` only for a completed cache whose exact `game_revision`, `target_slots`, `item_fingerprint`, and `owner_guild_id` fields match the exact live record. Unknown fields, metatables, and malformed values fail closed. Startup always returns `INSPECT`, even for an exact cache.
 - The preflight parser tracks quote, escape, and parenthesis state. Only top-level commas and equals signs delimit entries; duplicate CLI/INI keys and malformed values fail closed.
 - Reports contain normalized booleans, validated port numbers, known platform evidence, and fixed diagnostics only. Raw argv, full `OptionSettings`, passwords, public IP strings, malformed values, and callback errors are never copied into diagnostics.
 - `CrossplayPlatforms` recognizes only `Steam`, `Xbox`, `PS5`, and `Mac`; required release evidence is Steam/PS5/Mac, while Xbox remains optional.
@@ -221,6 +250,7 @@ Manual merge smoke verification exercised empty tuples, surrounding spaces, nest
 ## Commit
 
 - `cd6827b` — `feat: add discovery commands and preflight`
+- `28c520b` — `fix: harden Task 7 public contracts`
 
 ## Concerns and deferred evidence
 
