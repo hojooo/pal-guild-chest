@@ -1,0 +1,576 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cgce.invalid/schemas/release-report.schema.json",
+  "title": "CGCE Public Release Report",
+  "description": "Strict non-identifying public release evidence. The separate release certification artifact references this report checksum; this report never references a certification checksum.",
+  "type": "object",
+  "additionalProperties": false,
+  "x-cgce-self-checksum": {
+    "algorithm": "SHA-256",
+    "encoding": "lowercase-hex",
+    "canonical_json": true,
+    "excluded_property": "checksum"
+  },
+  "required": [
+    "schema_version",
+    "report_kind",
+    "game_revision",
+    "deployment_profile",
+    "binding_manifest_checksum",
+    "gate_a_checksum",
+    "package_evidence",
+    "connectivity_evidence",
+    "migration_evidence",
+    "new_guild_evidence",
+    "removal_evidence",
+    "performance_evidence",
+    "required_client_evidence",
+    "optional_client_evidence",
+    "slot_evidence",
+    "release_eligible",
+    "checksum"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "report_kind": {
+      "const": "public_release"
+    },
+    "game_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "deployment_profile": {
+      "const": "windows-dedicated-ps5-macos-required"
+    },
+    "binding_manifest_checksum": {
+      "$ref": "#/$defs/sha256"
+    },
+    "gate_a_checksum": {
+      "$ref": "#/$defs/sha256"
+    },
+    "package_evidence": {
+      "$ref": "#/$defs/packageEvidence"
+    },
+    "connectivity_evidence": {
+      "$ref": "#/$defs/connectivityEvidence"
+    },
+    "migration_evidence": {
+      "$ref": "#/$defs/migrationEvidence"
+    },
+    "new_guild_evidence": {
+      "$ref": "#/$defs/newGuildEvidence"
+    },
+    "removal_evidence": {
+      "$ref": "#/$defs/removalEvidence"
+    },
+    "performance_evidence": {
+      "$ref": "#/$defs/performanceEvidence"
+    },
+    "required_client_evidence": {
+      "$ref": "#/$defs/requiredClientEvidence"
+    },
+    "optional_client_evidence": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/xboxEvidence"
+      }
+    },
+    "slot_evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/slot54Evidence"
+        },
+        {
+          "$ref": "#/$defs/slot120Evidence"
+        },
+        {
+          "$ref": "#/$defs/slot256Evidence"
+        },
+        {
+          "$ref": "#/$defs/slot358Evidence"
+        }
+      ],
+      "items": false
+    },
+    "release_eligible": {
+      "type": "boolean"
+    },
+    "checksum": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "required": ["release_eligible"],
+        "properties": {
+          "release_eligible": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "required": ["performance_evidence"],
+        "properties": {
+          "performance_evidence": {
+            "$ref": "#/$defs/releaseEligiblePerformanceEvidence"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "steamWindowsEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client", "evidence_checksum"],
+      "properties": {
+        "client": {
+          "const": "SteamWindows"
+        },
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "ps5Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client", "evidence_checksum"],
+      "properties": {
+        "client": {
+          "const": "PS5"
+        },
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "macEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client", "evidence_checksum"],
+      "properties": {
+        "client": {
+          "const": "Mac"
+        },
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "xboxEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client", "evidence_checksum"],
+      "properties": {
+        "client": {
+          "const": "Xbox"
+        },
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "requiredClientEvidence": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/steamWindowsEvidence"
+        },
+        {
+          "$ref": "#/$defs/ps5Evidence"
+        },
+        {
+          "$ref": "#/$defs/macEvidence"
+        }
+      ],
+      "items": false
+    },
+    "packageEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_checksum",
+        "server_only",
+        "is_server",
+        "client_install_rule_count",
+        "min_revision"
+      ],
+      "properties": {
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        },
+        "server_only": {
+          "const": true
+        },
+        "is_server": {
+          "const": true
+        },
+        "client_install_rule_count": {
+          "const": 0
+        },
+        "min_revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "connectivityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_checksum",
+        "public_lobby",
+        "matching_ports",
+        "required_crossplay_platforms",
+        "client_mods_disabled",
+        "json_log_format"
+      ],
+      "properties": {
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        },
+        "public_lobby": {
+          "const": true
+        },
+        "matching_ports": {
+          "const": true
+        },
+        "required_crossplay_platforms": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "const": "Steam"
+            },
+            {
+              "const": "PS5"
+            },
+            {
+              "const": "Mac"
+            }
+          ],
+          "items": false
+        },
+        "client_mods_disabled": {
+          "const": true
+        },
+        "json_log_format": {
+          "const": true
+        }
+      }
+    },
+    "migrationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_checksum",
+        "item_fingerprint_changes",
+        "second_run_mutations",
+        "after_restart_verified"
+      ],
+      "properties": {
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        },
+        "item_fingerprint_changes": {
+          "const": 0
+        },
+        "second_run_mutations": {
+          "const": 0
+        },
+        "after_restart_verified": {
+          "const": true
+        }
+      }
+    },
+    "newGuildEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_checksum",
+        "trials",
+        "first_use_failures",
+        "tick_stalls",
+        "live_state_cache_invalidation_verified"
+      ],
+      "properties": {
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        },
+        "trials": {
+          "type": "integer",
+          "minimum": 20
+        },
+        "first_use_failures": {
+          "const": 0
+        },
+        "tick_stalls": {
+          "const": 0
+        },
+        "live_state_cache_invalidation_verified": {
+          "const": true
+        }
+      }
+    },
+    "removalEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_checksum",
+        "required_client_evidence",
+        "item_guid_changes",
+        "item_quantity_changes"
+      ],
+      "properties": {
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        },
+        "required_client_evidence": {
+          "$ref": "#/$defs/requiredClientEvidence"
+        },
+        "item_guid_changes": {
+          "const": 0
+        },
+        "item_quantity_changes": {
+          "const": 0
+        }
+      }
+    },
+    "performanceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_checksum",
+        "server_environment_evidence_checksum",
+        "server_os_family",
+        "test_player_count",
+        "world_guild_count",
+        "world_container_count",
+        "steady_cpu_increase_percentage_points",
+        "memory_increase_mb",
+        "audit_100_guilds_seconds",
+        "migration_100_empty_guilds_seconds",
+        "single_54_to_358_ms",
+        "periodic_scan_interval_seconds",
+        "save_duration_increase_percent",
+        "chest_open_p95_increase_ms",
+        "reconnect_duration_increase_percent",
+        "soak_hours",
+        "critical_errors"
+      ],
+      "properties": {
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        },
+        "server_environment_evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        },
+        "server_os_family": {
+          "const": "Windows"
+        },
+        "test_player_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "world_guild_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "world_container_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "steady_cpu_increase_percentage_points": {
+          "type": "number",
+          "minimum": 0
+        },
+        "memory_increase_mb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "audit_100_guilds_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "migration_100_empty_guilds_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "single_54_to_358_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "periodic_scan_interval_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "save_duration_increase_percent": {
+          "type": "number",
+          "minimum": 0
+        },
+        "chest_open_p95_increase_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "reconnect_duration_increase_percent": {
+          "type": "number",
+          "minimum": 0
+        },
+        "soak_hours": {
+          "type": "number",
+          "minimum": 0
+        },
+        "critical_errors": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "releaseEligiblePerformanceEvidence": {
+      "type": "object",
+      "required": [
+        "test_player_count",
+        "world_guild_count",
+        "world_container_count",
+        "steady_cpu_increase_percentage_points",
+        "memory_increase_mb",
+        "audit_100_guilds_seconds",
+        "migration_100_empty_guilds_seconds",
+        "single_54_to_358_ms",
+        "periodic_scan_interval_seconds",
+        "save_duration_increase_percent",
+        "chest_open_p95_increase_ms",
+        "reconnect_duration_increase_percent",
+        "soak_hours",
+        "critical_errors"
+      ],
+      "properties": {
+        "test_player_count": {
+          "type": "integer",
+          "minimum": 32
+        },
+        "world_guild_count": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "world_container_count": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "steady_cpu_increase_percentage_points": {
+          "type": "number",
+          "maximum": 1
+        },
+        "memory_increase_mb": {
+          "type": "number",
+          "maximum": 100
+        },
+        "audit_100_guilds_seconds": {
+          "type": "number",
+          "maximum": 5
+        },
+        "migration_100_empty_guilds_seconds": {
+          "type": "number",
+          "maximum": 10
+        },
+        "single_54_to_358_ms": {
+          "type": "number",
+          "maximum": 100
+        },
+        "periodic_scan_interval_seconds": {
+          "type": "number",
+          "minimum": 60
+        },
+        "save_duration_increase_percent": {
+          "type": "number",
+          "maximum": 15
+        },
+        "chest_open_p95_increase_ms": {
+          "type": "number",
+          "maximum": 300
+        },
+        "reconnect_duration_increase_percent": {
+          "type": "number",
+          "maximum": 10
+        },
+        "soak_hours": {
+          "type": "number",
+          "minimum": 6
+        },
+        "critical_errors": {
+          "const": 0
+        }
+      }
+    },
+    "slot54Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_slots", "evidence_checksum"],
+      "properties": {
+        "target_slots": {
+          "const": 54
+        },
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "slot120Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_slots", "evidence_checksum"],
+      "properties": {
+        "target_slots": {
+          "const": 120
+        },
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "slot256Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_slots", "evidence_checksum"],
+      "properties": {
+        "target_slots": {
+          "const": 256
+        },
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "slot358Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_slots", "evidence_checksum"],
+      "properties": {
+        "target_slots": {
+          "const": 358
+        },
+        "evidence_checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}
