@@ -260,7 +260,9 @@ local function project_resolution(value, configured_id)
         or container_id ~= configured_id
         or not is_json_string(owner_guild_id, false)
         or type(is_guild_chest) ~= "boolean"
-        or (container_type ~= "table" and container_type ~= "userdata") then
+        or (container_type ~= "table"
+            and container_type ~= "userdata"
+            and container_type ~= "function") then
         return nil
     end
 
@@ -486,6 +488,7 @@ function audit.capture(context)
         else
             local resolved_ok, resolved_value = pcall(
                 input.ports.resolve_guild_chest,
+                value.guild_id,
                 value.chest_container_id
             )
             local resolved = resolved_ok

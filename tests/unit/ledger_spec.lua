@@ -66,7 +66,7 @@ local function audit_fixture(options)
             list_calls.count = list_calls.count + 1
             return guilds
         end,
-        resolve_guild_chest = function(container_id)
+        resolve_guild_chest = function(_, container_id)
             resolve_calls[#resolve_calls + 1] = container_id
             local container = containers[container_id]
             if container == nil then

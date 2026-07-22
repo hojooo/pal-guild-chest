@@ -58,7 +58,7 @@ local function captured_audit()
         list_guilds = function()
             return guilds
         end,
-        resolve_guild_chest = function(container_id)
+        resolve_guild_chest = function(_, container_id)
             local container = containers[container_id]
             return {
                 container_id = container_id,

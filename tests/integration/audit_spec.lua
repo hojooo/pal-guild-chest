@@ -48,7 +48,7 @@ local function fixture(guilds, containers)
             calls.list = calls.list + 1
             return guilds
         end,
-        resolve_guild_chest = function(container_id)
+        resolve_guild_chest = function(_, container_id)
             calls.resolve[#calls.resolve + 1] = container_id
             local value = containers[container_id]
             if value == nil then
@@ -148,6 +148,43 @@ describe("read-only discovery audit", function()
         for _, resolved_id in ipairs(calls.resolve) do
             a.equal(false, resolved_id == "container/general")
         end
+    end)
+
+    it("passes the exact guild chain and forwards an opaque resolver token only to snapshot", function()
+        local opaque_calls = 0
+        local opaque_container = function()
+            opaque_calls = opaque_calls + 1
+        end
+        local seen_guild_id
+        local seen_container_id
+        local context = fixture({
+            guild("guild/a", "A", "container/a"),
+        }, {})
+        context.resolve_guild_chest = function(guild_id, container_id)
+            seen_guild_id = guild_id
+            seen_container_id = container_id
+            return {
+                container_id = container_id,
+                owner_guild_id = guild_id,
+                is_guild_chest = true,
+                container = opaque_container,
+            }
+        end
+        context.snapshot_container = function(actual)
+            a.equal(opaque_container, actual)
+            return snapshot.capture(
+                readonly_adapter,
+                container("container/a", "guild/a", 54)
+            )
+        end
+
+        local result = capture_table(context)
+
+        a.equal("guild/a", seen_guild_id)
+        a.equal("container/a", seen_container_id)
+        a.equal("eligible_expand", result.guilds[1].status)
+        a.deep_equal({}, result.blocking_errors)
+        a.equal(0, opaque_calls)
     end)
 
     it("sorts filters and keeps valid non-selected guilds visible", function()
@@ -250,7 +287,7 @@ describe("read-only discovery audit", function()
             ["container/good"] = container("container/good", "guild/good", 54),
         })
         context.include_guild_ids = { "guild/good" }
-        context.resolve_guild_chest = function(container_id)
+        context.resolve_guild_chest = function(_, container_id)
             if container_id == "container/missing" then
                 return nil
             end
