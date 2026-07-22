@@ -2,7 +2,18 @@ local json = {}
 
 json.null = {}
 
-local decoded_empty_arrays = setmetatable({}, { __mode = "k" })
+local explicit_arrays = setmetatable({}, { __mode = "k" })
+
+function json.array(values)
+    if values == nil then
+        values = {}
+    elseif type(values) ~= "table" then
+        error("JSON array values must be a table", 2)
+    end
+
+    explicit_arrays[values] = true
+    return values
+end
 
 local function is_finite(number)
     return number == number and number ~= math.huge and number ~= -math.huge
@@ -239,7 +250,7 @@ function json.decode(text)
         local array = {}
         if text:sub(index, index) == "]" then
             index = index + 1
-            decoded_empty_arrays[array] = true
+            explicit_arrays[array] = true
             return array
         end
 
@@ -369,7 +380,7 @@ local function encode_string(value)
 end
 
 local function table_kind(value)
-    if decoded_empty_arrays[value] and next(value) == nil then
+    if explicit_arrays[value] and next(value) == nil then
         return "array", 0
     end
 
