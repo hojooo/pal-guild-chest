@@ -26,7 +26,7 @@ was used.
 
 ### GREEN implementation and pending platform gate
 
-The implementation now has 17 plain-PowerShell contract tests covering:
+The implementation now has 22 plain-PowerShell contract tests covering:
 
 - fixed identifiers and one-way phases;
 - bounded strict UTF-8/RFC 8259 parsing, root kinds, arrays, duplicate keys,
