@@ -16,6 +16,9 @@ $script:CgceInventoryEntryKeys = @(
     "sha256"
 )
 
+$script:CgceTestPublishSeam = $null
+$script:CgceTestRobocopySeam = $null
+
 function Resolve-CgceCanonicalPath([string]$Path, [bool]$MustExist) {
     if ([string]::IsNullOrWhiteSpace($Path) -or
         $Path -cnotmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {
@@ -502,6 +505,78 @@ function New-CgceRunPaths(
     }
 }
 
+function New-CgceStagingPath([string]$Destination, [string]$Kind) {
+    $parent = [System.IO.Path]::GetDirectoryName($Destination)
+    $leaf = [System.IO.Path]::GetFileName($Destination)
+    if ([string]::IsNullOrWhiteSpace($parent) -or
+        [string]::IsNullOrWhiteSpace($leaf)) {
+        throw "CGCE-OPS-PATH destination must have a parent and leaf"
+    }
+    for ($attempt = 0; $attempt -lt 16; $attempt += 1) {
+        $candidate = [System.IO.Path]::Combine(
+            $parent,
+            ".$leaf.cgce-stage-$Kind-" + [guid]::NewGuid().ToString("N")
+        )
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    throw "CGCE-OPS-COPY unique staging path unavailable"
+}
+
+function Invoke-CgceTestPublishSeam([string]$Phase, $Context) {
+    if ($null -ne $script:CgceTestPublishSeam) {
+        $null = & $script:CgceTestPublishSeam $Phase $Context
+    }
+}
+
+function Invoke-CgceRobocopy(
+    [string]$Source,
+    [string]$Staging,
+    [string[]]$Arguments
+) {
+    if ($null -ne $script:CgceTestRobocopySeam) {
+        $result = & $script:CgceTestRobocopySeam $Source $Staging $Arguments
+        return [int]$result
+    }
+    if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        throw "CGCE-OPS-COPY SystemRoot is unavailable"
+    }
+    $robocopy = [System.IO.Path]::Combine(
+        $env:SystemRoot,
+        "System32",
+        "robocopy.exe"
+    )
+    if (-not (Test-Path -LiteralPath $robocopy -PathType Leaf)) {
+        throw "CGCE-OPS-COPY robocopy is unavailable"
+    }
+    try {
+        & $robocopy $Source $Staging $Arguments | Out-Null
+        return [int]$LASTEXITCODE
+    } catch {
+        throw "CGCE-OPS-COPY robocopy invocation failed"
+    }
+}
+
+function Get-CgceVerifiedFileRecord([string]$Expected, [string]$Actual) {
+    try {
+        $expectedItem = Get-Item -LiteralPath $Expected -Force
+        $actualItem = Get-Item -LiteralPath $Actual -Force
+        $expectedChecksum = Get-CgceSha256 -Path $Expected
+        $actualChecksum = Get-CgceSha256 -Path $Actual
+    } catch {
+        throw "CGCE-OPS-COPY copied file cannot be verified"
+    }
+    if ([int64]$expectedItem.Length -ne [int64]$actualItem.Length -or
+        $expectedChecksum -cne $actualChecksum) {
+        throw "CGCE-OPS-COPY copied file differs"
+    }
+    return [pscustomobject][ordered]@{
+        length = [int64]$actualItem.Length
+        sha256 = $actualChecksum
+    }
+}
+
 function Copy-CgceFileVerified([string]$Source, [string]$Destination) {
     $canonicalSource = Resolve-CgceCanonicalPath -Path $Source -MustExist $false
     try {
@@ -526,30 +601,39 @@ function Copy-CgceFileVerified([string]$Source, [string]$Destination) {
     Assert-CgceNoReparseInPath -Path $canonicalSource
     Assert-CgceNoReparseInPath -Path $canonicalDestination
 
+    $staging = New-CgceStagingPath `
+        -Destination $canonicalDestination `
+        -Kind "file"
+    Assert-CgceNoReparseInPath -Path $staging
     try {
-        Copy-Item `
-            -LiteralPath $canonicalSource `
-            -Destination $canonicalDestination `
-            -ErrorAction Stop
+        [System.IO.File]::Copy($canonicalSource, $staging, $false)
     } catch {
-        throw "CGCE-OPS-COPY file copy failed"
+        throw "CGCE-OPS-COPY file staging failed"
     }
+    $null = Get-CgceVerifiedFileRecord `
+        -Expected $canonicalSource `
+        -Actual $staging
+    $context = [pscustomobject]@{
+        source = $canonicalSource
+        staging = $staging
+        destination = $canonicalDestination
+    }
+    Invoke-CgceTestPublishSeam -Phase "file-before-revalidate" -Context $context
+    Assert-CgceNoReparseInPath -Path $canonicalSource
+    Assert-CgceNoReparseInPath -Path $staging
+    Assert-CgceNoReparseInPath -Path $canonicalDestination
+    Invoke-CgceTestPublishSeam -Phase "file-before-publish" -Context $context
     try {
-        $sourceItem = Get-Item -LiteralPath $canonicalSource -Force
-        $destinationItem = Get-Item -LiteralPath $canonicalDestination -Force
-        $sourceChecksum = Get-CgceSha256 -Path $canonicalSource
-        $destinationChecksum = Get-CgceSha256 -Path $canonicalDestination
+        [System.IO.File]::Move($staging, $canonicalDestination)
     } catch {
-        throw "CGCE-OPS-COPY copied file cannot be verified"
+        if (Test-Path -LiteralPath $canonicalDestination) {
+            throw "CGCE-OPS-DESTINATION-EXISTS destination appeared before publication"
+        }
+        throw "CGCE-OPS-COPY file publication failed"
     }
-    if ([int64]$sourceItem.Length -ne [int64]$destinationItem.Length -or
-        $sourceChecksum -cne $destinationChecksum) {
-        throw "CGCE-OPS-COPY copied file differs"
-    }
-    return [pscustomobject][ordered]@{
-        length = [int64]$destinationItem.Length
-        sha256 = $destinationChecksum
-    }
+    return Get-CgceVerifiedFileRecord `
+        -Expected $canonicalSource `
+        -Actual $canonicalDestination
 }
 
 function Copy-CgceTreeVerified([string]$Source, [string]$Destination) {
@@ -579,40 +663,57 @@ function Copy-CgceTreeVerified([string]$Source, [string]$Destination) {
     Assert-CgceTreeHasNoReparsePoints -Root $canonicalSource
     $sourceInventory = @(Get-CgceTreeInventory -Root $canonicalSource)
 
-    if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) {
-        throw "CGCE-OPS-COPY SystemRoot is unavailable"
-    }
-    $robocopy = [System.IO.Path]::Combine(
-        $env:SystemRoot,
-        "System32",
-        "robocopy.exe"
+    $staging = New-CgceStagingPath `
+        -Destination $canonicalDestination `
+        -Kind "tree"
+    Assert-CgceDistinctRoots -Paths @(
+        $canonicalSource,
+        $canonicalDestination,
+        $staging
     )
-    if (-not (Test-Path -LiteralPath $robocopy -PathType Leaf)) {
-        throw "CGCE-OPS-COPY robocopy is unavailable"
-    }
-    try {
-        & $robocopy `
-            $canonicalSource `
-            $canonicalDestination `
-            "/E" `
-            "/COPY:DAT" `
-            "/DCOPY:DAT" `
-            "/R:1" `
-            "/W:1" `
-            "/XJ" | Out-Null
-        $robocopyExitCode = [int]$LASTEXITCODE
-    } catch {
-        throw "CGCE-OPS-COPY robocopy invocation failed"
-    }
+    Assert-CgceNoReparseInPath -Path $staging
+    $robocopyArguments = @(
+        "/E",
+        "/COPY:DAT",
+        "/DCOPY:DAT",
+        "/R:1",
+        "/W:1",
+        "/XJ"
+    )
+    $robocopyExitCode = Invoke-CgceRobocopy `
+        -Source $canonicalSource `
+        -Staging $staging `
+        -Arguments $robocopyArguments
     if ($robocopyExitCode -lt 0 -or $robocopyExitCode -gt 7) {
         throw "CGCE-OPS-COPY robocopy failed"
     }
 
-    Assert-CgceNoReparseInPath -Path $canonicalDestination
-    $destinationInventory = @(Get-CgceTreeInventory -Root $canonicalDestination)
+    $stagingInventory = @(Get-CgceTreeInventory -Root $staging)
     Compare-CgceInventory `
         -Expected $sourceInventory `
-        -Actual $destinationInventory
+        -Actual $stagingInventory
+    $context = [pscustomobject]@{
+        source = $canonicalSource
+        staging = $staging
+        destination = $canonicalDestination
+    }
+    Invoke-CgceTestPublishSeam -Phase "tree-before-revalidate" -Context $context
+    Assert-CgceNoReparseInPath -Path $canonicalSource
+    Assert-CgceTreeHasNoReparsePoints -Root $canonicalSource
+    Assert-CgceNoReparseInPath -Path $staging
+    Assert-CgceTreeHasNoReparsePoints -Root $staging
+    Assert-CgceNoReparseInPath -Path $canonicalDestination
+    Invoke-CgceTestPublishSeam -Phase "tree-before-publish" -Context $context
+    try {
+        [System.IO.Directory]::Move($staging, $canonicalDestination)
+    } catch {
+        if (Test-Path -LiteralPath $canonicalDestination) {
+            throw "CGCE-OPS-DESTINATION-EXISTS destination appeared before publication"
+        }
+        throw "CGCE-OPS-COPY tree publication failed"
+    }
+    $destinationInventory = @(Get-CgceTreeInventory -Root $canonicalDestination)
+    Compare-CgceInventory -Expected $sourceInventory -Actual $destinationInventory
     return $destinationInventory
 }
 
@@ -629,6 +730,14 @@ function Move-CgceDirectoryNoOverwrite([string]$Source, [string]$Destination) {
     $canonicalDestination = Resolve-CgceCanonicalPath `
         -Path $Destination `
         -MustExist $false
+    $sourceVolume = [System.IO.Path]::GetPathRoot($canonicalSource)
+    $destinationVolume = [System.IO.Path]::GetPathRoot($canonicalDestination)
+    if (-not $sourceVolume.Equals(
+            $destinationVolume,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "CGCE-OPS-PATH move requires equal volume roots"
+    }
     try {
         $destinationExists = Test-Path -LiteralPath $canonicalDestination
     } catch {
@@ -642,20 +751,21 @@ function Move-CgceDirectoryNoOverwrite([string]$Source, [string]$Destination) {
     Assert-CgceNoReparseInPath -Path $canonicalDestination
     Assert-CgceTreeHasNoReparsePoints -Root $canonicalSource
 
-    $sourceVolume = [System.IO.Path]::GetPathRoot($canonicalSource)
-    $destinationVolume = [System.IO.Path]::GetPathRoot($canonicalDestination)
-    if (-not $sourceVolume.Equals(
-            $destinationVolume,
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
-        throw "CGCE-OPS-PATH move requires equal volume roots"
+    $context = [pscustomobject]@{
+        source = $canonicalSource
+        destination = $canonicalDestination
     }
+    Invoke-CgceTestPublishSeam -Phase "move-before-revalidate" -Context $context
+    Assert-CgceNoReparseInPath -Path $canonicalSource
+    Assert-CgceTreeHasNoReparsePoints -Root $canonicalSource
+    Assert-CgceNoReparseInPath -Path $canonicalDestination
+    Invoke-CgceTestPublishSeam -Phase "move-before-publish" -Context $context
     try {
-        Move-Item `
-            -LiteralPath $canonicalSource `
-            -Destination $canonicalDestination `
-            -ErrorAction Stop
+        [System.IO.Directory]::Move($canonicalSource, $canonicalDestination)
     } catch {
+        if (Test-Path -LiteralPath $canonicalDestination) {
+            throw "CGCE-OPS-DESTINATION-EXISTS destination appeared before publication"
+        }
         throw "CGCE-OPS-COPY directory rename failed"
     }
 }

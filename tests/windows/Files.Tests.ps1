@@ -15,6 +15,22 @@ function Get-CgceFilesTestSha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Set-CgceFilesTestPublishSeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Files"
+    & $module {
+        param($Value)
+        $script:CgceTestPublishSeam = $Value
+    } $Seam
+}
+
+function Set-CgceFilesTestRobocopySeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Files"
+    & $module {
+        param($Value)
+        $script:CgceTestRobocopySeam = $Value
+    } $Seam
+}
+
 Invoke-CgceTest "canonical paths preserve Windows volume roots and normalize descendants" {
     Assert-CgceEqual "D:\" (Resolve-CgceCanonicalPath -Path "D:\" -MustExist $false)
     Assert-CgceEqual `
@@ -341,6 +357,36 @@ Invoke-CgceTest "verified file copy rejects a missing source" {
     }
 }
 
+Invoke-CgceTest "verified file copy cannot overwrite a destination created before publication" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $source = Join-Path $root "source.bin"
+        $destination = Join-Path $root "destination.bin"
+        Set-Content -LiteralPath $source -Value "source" -NoNewline
+        Set-CgceFilesTestPublishSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "file-before-publish") {
+                [System.IO.File]::WriteAllText(
+                    $Context.destination,
+                    "competitor",
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-DESTINATION-EXISTS" {
+            Copy-CgceFileVerified -Source $source -Destination $destination
+        }
+        Assert-CgceEqual "source" ([System.IO.File]::ReadAllText($source))
+        Assert-CgceEqual "competitor" ([System.IO.File]::ReadAllText($destination))
+        $staging = @(Get-ChildItem -LiteralPath $root -Filter ".destination.bin.cgce-stage-file-*")
+        Assert-CgceEqual 1 $staging.Count
+        Assert-CgceEqual "source" ([System.IO.File]::ReadAllText($staging[0].FullName))
+    } finally {
+        Set-CgceFilesTestPublishSeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
 Invoke-CgceTest "verified tree copy returns an exact inventory and never overwrites" {
     $root = New-CgceFilesTestRoot
     try {
@@ -358,6 +404,111 @@ Invoke-CgceTest "verified tree copy returns an exact inventory and never overwri
         }
         Assert-CgceEqual "keep" ([System.IO.File]::ReadAllText((Join-Path $destination "sentinel.txt")))
     } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "verified tree copy cannot merge into a destination created before publication" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $source = Join-Path $root "source"
+        $destination = Join-Path $root "destination"
+        New-Item -ItemType Directory -Path $source | Out-Null
+        Set-Content -LiteralPath (Join-Path $source "source.txt") -Value "source" -NoNewline
+        Set-CgceFilesTestPublishSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "tree-before-publish") {
+                [System.IO.Directory]::CreateDirectory($Context.destination) | Out-Null
+                [System.IO.File]::WriteAllText(
+                    (Join-Path $Context.destination "competitor.txt"),
+                    "competitor",
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-DESTINATION-EXISTS" {
+            Copy-CgceTreeVerified -Source $source -Destination $destination
+        }
+        Assert-CgceEqual $true (Test-Path -LiteralPath (Join-Path $source "source.txt"))
+        Assert-CgceEqual $false (Test-Path -LiteralPath (Join-Path $destination "source.txt"))
+        Assert-CgceEqual `
+            "competitor" `
+            ([System.IO.File]::ReadAllText((Join-Path $destination "competitor.txt")))
+        $staging = @(Get-ChildItem -LiteralPath $root -Directory -Filter ".destination.cgce-stage-tree-*")
+        Assert-CgceEqual 1 $staging.Count
+        Assert-CgceEqual $true (Test-Path -LiteralPath (Join-Path $staging[0].FullName "source.txt"))
+    } finally {
+        Set-CgceFilesTestPublishSeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "verified tree copy preserves staging when robocopy fails" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $source = Join-Path $root "source"
+        $destination = Join-Path $root "destination"
+        New-Item -ItemType Directory -Path $source | Out-Null
+        Set-Content -LiteralPath (Join-Path $source "source.txt") -Value "source" -NoNewline
+        Set-CgceFilesTestRobocopySeam {
+            param($Source, $Staging, $Arguments)
+            if ([string]::Join(" ", $Arguments) -cne
+                "/E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /XJ") {
+                throw "unexpected robocopy arguments"
+            }
+            [System.IO.Directory]::CreateDirectory($Staging) | Out-Null
+            [System.IO.File]::WriteAllText(
+                (Join-Path $Staging "partial.txt"),
+                "partial",
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            return 8
+        }
+        Assert-CgceThrows "CGCE-OPS-COPY" {
+            Copy-CgceTreeVerified -Source $source -Destination $destination
+        }
+        Assert-CgceEqual $false (Test-Path -LiteralPath $destination)
+        Assert-CgceEqual $true (Test-Path -LiteralPath (Join-Path $source "source.txt"))
+        $staging = @(Get-ChildItem -LiteralPath $root -Directory -Filter ".destination.cgce-stage-tree-*")
+        Assert-CgceEqual 1 $staging.Count
+        Assert-CgceEqual $true (Test-Path -LiteralPath (Join-Path $staging[0].FullName "partial.txt"))
+    } finally {
+        Set-CgceFilesTestRobocopySeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "verified tree copy rejects a final-path junction before publication" {
+    $root = New-CgceFilesTestRoot
+    $destination = Join-Path $root "destination"
+    try {
+        $source = Join-Path $root "source"
+        $outside = Join-Path $root "outside"
+        New-Item -ItemType Directory -Path $source | Out-Null
+        New-Item -ItemType Directory -Path $outside | Out-Null
+        Set-Content -LiteralPath (Join-Path $source "source.txt") -Value "source" -NoNewline
+        $seam = {
+            param($Phase, $Context)
+            if ($Phase -ceq "tree-before-revalidate") {
+                New-Item `
+                    -ItemType Junction `
+                    -Path $Context.destination `
+                    -Target $outside | Out-Null
+            }
+        }.GetNewClosure()
+        Set-CgceFilesTestPublishSeam $seam
+        Assert-CgceThrows "CGCE-OPS-REPARSE" {
+            Copy-CgceTreeVerified -Source $source -Destination $destination
+        }
+        Assert-CgceEqual $false (Test-Path -LiteralPath (Join-Path $outside "source.txt"))
+        Assert-CgceEqual $true (Test-Path -LiteralPath (Join-Path $source "source.txt"))
+        $staging = @(Get-ChildItem -LiteralPath $root -Directory -Filter ".destination.cgce-stage-tree-*")
+        Assert-CgceEqual 1 $staging.Count
+    } finally {
+        Set-CgceFilesTestPublishSeam $null
+        if (Test-Path -LiteralPath $destination) {
+            [System.IO.Directory]::Delete($destination)
+        }
         Remove-Item -LiteralPath $root -Recurse -Force
     }
 }
@@ -395,6 +546,64 @@ Invoke-CgceTest "directory move is same-volume no-overwrite rename" {
         }
         Assert-CgceEqual $true (Test-Path -LiteralPath $nextSource -PathType Container)
         Assert-CgceEqual "original" ([System.IO.File]::ReadAllText((Join-Path $destination "original.txt")))
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "directory move cannot nest beneath a destination created before publication" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $source = Join-Path $root "source"
+        $destination = Join-Path $root "destination"
+        New-Item -ItemType Directory -Path $source | Out-Null
+        Set-Content -LiteralPath (Join-Path $source "source.txt") -Value "source" -NoNewline
+        Set-CgceFilesTestPublishSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "move-before-publish") {
+                [System.IO.Directory]::CreateDirectory($Context.destination) | Out-Null
+                [System.IO.File]::WriteAllText(
+                    (Join-Path $Context.destination "competitor.txt"),
+                    "competitor",
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-DESTINATION-EXISTS" {
+            Move-CgceDirectoryNoOverwrite -Source $source -Destination $destination
+        }
+        Assert-CgceEqual $true (Test-Path -LiteralPath (Join-Path $source "source.txt"))
+        Assert-CgceEqual $false (Test-Path -LiteralPath (Join-Path $destination "source"))
+        Assert-CgceEqual $false (Test-Path -LiteralPath (Join-Path $destination "source.txt"))
+        Assert-CgceEqual `
+            "competitor" `
+            ([System.IO.File]::ReadAllText((Join-Path $destination "competitor.txt")))
+    } finally {
+        Set-CgceFilesTestPublishSeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "directory move rejects a different volume before touching source" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $source = Join-Path $root "source"
+        New-Item -ItemType Directory -Path $source | Out-Null
+        Set-Content -LiteralPath (Join-Path $source "source.txt") -Value "source" -NoNewline
+        $sourceVolume = [System.IO.Path]::GetPathRoot($source)
+        $otherVolume = if ($sourceVolume.StartsWith("C:", [StringComparison]::OrdinalIgnoreCase)) {
+            "D:\"
+        } else {
+            "C:\"
+        }
+        $destination = [System.IO.Path]::Combine(
+            $otherVolume,
+            "cgce-cross-volume-" + [guid]::NewGuid().ToString("N")
+        )
+        Assert-CgceThrows "CGCE-OPS-PATH" {
+            Move-CgceDirectoryNoOverwrite -Source $source -Destination $destination
+        }
+        Assert-CgceEqual $true (Test-Path -LiteralPath (Join-Path $source "source.txt"))
     } finally {
         Remove-Item -LiteralPath $root -Recurse -Force
     }
