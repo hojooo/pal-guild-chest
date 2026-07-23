@@ -8,6 +8,7 @@ Import-Module $filesModule | Out-Null
 
 $script:CgceTestProbeCrashSeam = $null
 $script:CgceTestActivitySnapshotSeam = $null
+$script:CgceTestRootProcessRecordSeam = $null
 $script:CgceFreshModsText = "CGCEDiscoveryInventory : 1`r`n"
 $script:CgceSnapshotNames = @(
     "MODS_TXT",
@@ -45,6 +46,42 @@ function Assert-CgceRuntimeExactKeys(
 
 function Test-CgceRuntimeChecksum($Value) {
     return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}$'
+}
+
+function Test-CgceRuntimeInteger(
+    $Value,
+    [int64]$Minimum,
+    [int64]$Maximum
+) {
+    if ($Value -isnot [sbyte] -and
+        $Value -isnot [byte] -and
+        $Value -isnot [int16] -and
+        $Value -isnot [uint16] -and
+        $Value -isnot [int32] -and
+        $Value -isnot [uint32] -and
+        $Value -isnot [int64] -and
+        $Value -isnot [uint64]) {
+        return $false
+    }
+    try {
+        $number = [int64]$Value
+        return $number -ge $Minimum -and $number -le $Maximum
+    } catch {
+        return $false
+    }
+}
+
+function Test-CgceRuntimeUtcTimestamp($Value) {
+    if ($Value -isnot [string]) { return $false }
+    $parsed = [DateTime]::MinValue
+    return [DateTime]::TryParseExact(
+        $Value,
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal -bor
+            [Globalization.DateTimeStyles]::AdjustToUniversal,
+        [ref]$parsed
+    )
 }
 
 function ConvertTo-CgceCanonicalRuntimePath([string]$Path, [string]$Code) {
@@ -312,12 +349,26 @@ function Read-CgceLaunchReceipt([string]$Path, [string]$RunId) {
     ) "CGCE-OPS-PROCESS-RECEIPT"
     if ($value.schema_version -cne "1.0" -or
         $value.kind -cne "cgce_windows_discovery_process_launch" -or
-        $value.run_id -cne $RunId -or [int]$value.sequence -ne 0 -or
+        $value.run_id -cne $RunId -or
+        -not (Test-CgceRuntimeInteger $value.sequence 0 0) -or
+        -not (Test-CgceRuntimeUtcTimestamp $value.created_at_utc) -or
         $null -ne $value.previous_receipt_sha256 -or
         -not (Test-CgceRuntimeChecksum $value.executable_sha256) -or
         -not (Test-CgceRuntimeChecksum $value.allowed_executable_paths_sha256) -or
-        -not (Test-CgceRuntimeChecksum $value.arguments_sha256)) {
+        -not (Test-CgceRuntimeChecksum $value.arguments_sha256) -or
+        -not (Test-CgceRuntimeInteger `
+            $value.allowed_executable_path_count 1 4096) -or
+        -not (Test-CgceRuntimeInteger $value.argument_count 0 4096) -or
+        -not (Test-CgceRuntimeInteger $value.timeout_seconds 1 86400)) {
         throw "CGCE-OPS-PROCESS-RECEIPT invalid launch receipt fields"
+    }
+    $executable = ConvertTo-CgceCanonicalRuntimePath `
+        $value.executable_path "CGCE-OPS-PROCESS-RECEIPT"
+    $working = ConvertTo-CgceCanonicalRuntimePath `
+        $value.working_directory "CGCE-OPS-PROCESS-RECEIPT"
+    if (-not (Test-CgceRuntimePathEqual `
+            (Split-Path -Parent $executable) $working)) {
+        throw "CGCE-OPS-PROCESS-RECEIPT launch working directory drift"
     }
     return $value
 }
@@ -340,11 +391,133 @@ function Read-CgcePidReceipt(
     if ($value.schema_version -cne "1.0" -or
         $value.kind -cne "cgce_windows_discovery_process_pid" -or
         $value.run_id -cne $RunId -or
-        [int]$value.sequence -ne $ExpectedSequence -or
+        -not (Test-CgceRuntimeInteger `
+            $value.sequence $ExpectedSequence $ExpectedSequence) -or
+        -not (Test-CgceRuntimeInteger $value.pid 1 ([uint32]::MaxValue)) -or
+        -not (Test-CgceRuntimeInteger `
+            $value.parent_pid 0 ([uint32]::MaxValue)) -or
+        -not (Test-CgceRuntimeInteger `
+            $value.creation_time_filetime_utc 1 ([int64]::MaxValue)) -or
+        -not (Test-CgceRuntimeUtcTimestamp $value.creation_time_utc) -or
+        -not (Test-CgceRuntimeUtcTimestamp $value.observed_at_utc) -or
         $value.previous_receipt_sha256 -cne $PreviousChecksum) {
         throw "CGCE-OPS-PROCESS-RECEIPT invalid PID receipt chain"
     }
+    $canonical = ConvertTo-CgceCanonicalRuntimePath `
+        $value.executable_path "CGCE-OPS-PROCESS-RECEIPT"
+    $expectedCreation = [DateTime]::FromFileTimeUtc(
+        [int64]$value.creation_time_filetime_utc
+    ).ToString(
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    if ($value.creation_time_utc -cne $expectedCreation -or
+        [DateTime]::Parse($value.observed_at_utc).ToUniversalTime() -lt
+            [DateTime]::Parse($value.creation_time_utc).ToUniversalTime()) {
+        throw "CGCE-OPS-PROCESS-RECEIPT invalid PID timestamps"
+    }
     return $value
+}
+
+function Assert-CgceProcessResult(
+    [string]$Path,
+    [string]$RunId,
+    $Launch,
+    [string]$LaunchChecksum,
+    [object[]]$PidReceipts,
+    [string]$PreviousChecksum,
+    [string[]]$CanonicalPaths
+) {
+    $receiptRoot = Split-Path -Parent $Path
+    try { $value = Read-CgceJsonObject -Path $Path } catch {
+        throw "CGCE-OPS-PROCESS-RECEIPT invalid process result"
+    }
+    Assert-CgceRuntimeExactKeys $value @(
+        "schema_version", "kind", "run_id", "sequence",
+        "launch_receipt_sha256", "previous_receipt_sha256",
+        "started_at_utc", "exit_at_utc", "exit_code",
+        "observed_processes", "pid_receipts"
+    ) "CGCE-OPS-PROCESS-RECEIPT"
+    if ($value.schema_version -cne "1.0" -or
+        $value.kind -cne "cgce_windows_discovery_process_result" -or
+        $value.run_id -cne $RunId -or
+        -not (Test-CgceRuntimeInteger $value.sequence 999 999) -or
+        $value.launch_receipt_sha256 -cne $LaunchChecksum -or
+        $value.previous_receipt_sha256 -cne $PreviousChecksum -or
+        -not (Test-CgceRuntimeUtcTimestamp $value.started_at_utc) -or
+        -not (Test-CgceRuntimeUtcTimestamp $value.exit_at_utc) -or
+        -not (Test-CgceRuntimeInteger `
+            $value.exit_code ([int32]::MinValue) ([int32]::MaxValue)) -or
+        $value.observed_processes -isnot [System.Array] -or
+        $value.pid_receipts -isnot [System.Array] -or
+        @($value.observed_processes).Count -ne $PidReceipts.Count -or
+        @($value.pid_receipts).Count -ne $PidReceipts.Count) {
+        throw "CGCE-OPS-PROCESS-RECEIPT invalid process result fields"
+    }
+    if ([DateTime]::Parse($value.started_at_utc).ToUniversalTime() -lt
+            [DateTime]::Parse($Launch.created_at_utc).ToUniversalTime() -or
+        [DateTime]::Parse($value.exit_at_utc).ToUniversalTime() -lt
+            [DateTime]::Parse($value.started_at_utc).ToUniversalTime()) {
+        throw "CGCE-OPS-PROCESS-RECEIPT invalid process result timestamps"
+    }
+    for ($index = 0; $index -lt $PidReceipts.Count; $index += 1) {
+        $expected = $PidReceipts[$index]
+        $sequence = $index + 1
+        $binding = @($value.pid_receipts)[$index]
+        Assert-CgceRuntimeExactKeys $binding @(
+            "sequence", "path", "sha256"
+        ) "CGCE-OPS-PROCESS-RECEIPT"
+        $expectedPath = Join-Path $receiptRoot (
+            $sequence.ToString("000") + "-pid.json"
+        )
+        if (-not (Test-CgceRuntimeInteger `
+                $binding.sequence $sequence $sequence) -or
+            -not (Test-CgceRuntimePathEqual `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $binding.path "CGCE-OPS-PROCESS-RECEIPT") `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $expectedPath "CGCE-OPS-PROCESS-RECEIPT")) -or
+            -not (Test-CgceRuntimeChecksum $binding.sha256) -or
+            $binding.sha256 -cne (Get-CgceSha256 $expectedPath)) {
+            throw "CGCE-OPS-PROCESS-RECEIPT process result PID binding drift"
+        }
+        $observed = @($value.observed_processes)[$index]
+        Assert-CgceRuntimeExactKeys $observed @(
+            "sequence", "pid", "parent_pid", "executable_path",
+            "creation_time_utc", "creation_time_filetime_utc"
+        ) "CGCE-OPS-PROCESS-RECEIPT"
+        if (-not (Test-CgceRuntimeInteger `
+                $observed.sequence $sequence $sequence) -or
+            -not (Test-CgceRuntimeInteger `
+                $observed.pid 1 ([uint32]::MaxValue)) -or
+            -not (Test-CgceRuntimeInteger `
+                $observed.parent_pid 0 ([uint32]::MaxValue)) -or
+            -not (Test-CgceRuntimeInteger `
+                $observed.creation_time_filetime_utc 1 ([int64]::MaxValue)) -or
+            -not (Test-CgceRuntimeUtcTimestamp `
+                $observed.creation_time_utc) -or
+            [int64]$observed.pid -ne [int64]$expected.pid -or
+            [int64]$observed.parent_pid -ne [int64]$expected.parent_pid -or
+            -not (Test-CgceRuntimePathEqual `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $observed.executable_path "CGCE-OPS-PROCESS-RECEIPT") `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $expected.executable_path "CGCE-OPS-PROCESS-RECEIPT")) -or
+            $observed.creation_time_utc -cne $expected.creation_time_utc -or
+            [int64]$observed.creation_time_filetime_utc -ne
+                [int64]$expected.creation_time_filetime_utc) {
+            throw "CGCE-OPS-PROCESS-RECEIPT observed process binding drift"
+        }
+        if (@($CanonicalPaths | Where-Object {
+                    Test-CgceRuntimePathEqual $_ (
+                        ConvertTo-CgceCanonicalRuntimePath `
+                            $observed.executable_path `
+                            "CGCE-OPS-PROCESS-RECEIPT"
+                    )
+                }).Count -ne 1) {
+            throw "CGCE-OPS-PROCESS-RECEIPT observed executable not allowed"
+        }
+    }
 }
 
 function Read-CgceProcessReceiptChain(
@@ -365,6 +538,13 @@ function Read-CgceProcessReceiptChain(
         $launch.allowed_executable_paths_sha256 -cne $pathsDigest) {
         throw "CGCE-OPS-PROCESS-RECEIPT executable allowlist binding mismatch"
     }
+    $launchExecutable = ConvertTo-CgceCanonicalRuntimePath `
+        $launch.executable_path "CGCE-OPS-PROCESS-RECEIPT"
+    if (@($CanonicalPaths | Where-Object {
+                Test-CgceRuntimePathEqual $_ $launchExecutable
+            }).Count -ne 1) {
+        throw "CGCE-OPS-PROCESS-RECEIPT launch executable binding mismatch"
+    }
     $previous = Get-CgceSha256 -Path $launchPath
     $pidReceipts = New-Object 'Collections.Generic.List[object]'
     for ($sequence = 1; $sequence -le 998; $sequence += 1) {
@@ -379,12 +559,30 @@ function Read-CgceProcessReceiptChain(
             -RunId $runId `
             -ExpectedSequence $sequence `
             -PreviousChecksum $previous
+        $receiptExecutable = ConvertTo-CgceCanonicalRuntimePath `
+            $receipt.executable_path "CGCE-OPS-PROCESS-RECEIPT"
+        if (@($CanonicalPaths | Where-Object {
+                    Test-CgceRuntimePathEqual $_ $receiptExecutable
+                }).Count -ne 1) {
+            throw "CGCE-OPS-PROCESS-RECEIPT PID executable not allowed"
+        }
         $null = $pidReceipts.Add($receipt)
         $previous = Get-CgceSha256 -Path $path
     }
     $pidFiles = @(Get-ChildItem -LiteralPath $ReceiptRoot -Filter "*-pid.json")
     if ($pidFiles.Count -ne $pidReceipts.Count) {
         throw "CGCE-OPS-PROCESS-RECEIPT PID receipt sequence gap"
+    }
+    $resultPath = Join-Path $ReceiptRoot "999-result.json"
+    if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+        Assert-CgceProcessResult `
+            -Path $resultPath `
+            -RunId $runId `
+            -Launch $launch `
+            -LaunchChecksum (Get-CgceSha256 -Path $launchPath) `
+            -PidReceipts ([object[]]$pidReceipts.ToArray()) `
+            -PreviousChecksum $previous `
+            -CanonicalPaths $CanonicalPaths
     }
     return [pscustomobject]@{
         run_id = $runId
@@ -404,9 +602,12 @@ function Assert-CgceNoServerActivity(
     $validatedPorts = @(ConvertTo-CgceRuntimePorts $Ports)
     $chain = $null
     if (-not [string]::IsNullOrWhiteSpace($ReceiptRoot)) {
-        $chain = Read-CgceProcessReceiptChain `
-            -ReceiptRoot $ReceiptRoot `
-            -CanonicalPaths $paths
+        Assert-CgceProcessReceiptDirectory -ReceiptRoot $ReceiptRoot
+        if (@(Get-ChildItem -LiteralPath $ReceiptRoot -Force).Count -gt 0) {
+            $chain = Read-CgceProcessReceiptChain `
+                -ReceiptRoot $ReceiptRoot `
+                -CanonicalPaths $paths
+        }
     }
     $snapshot = Get-CgceRuntimeActivitySnapshot
     if ($null -eq $snapshot -or $snapshot.cim_available -ne $true -or
@@ -991,9 +1192,71 @@ function Enable-CgceInventoryProbe(
     }
 }
 
-function Read-CgceProbeSnapshotMap($Intent) {
+function Assert-CgceArtifactStateSchema(
+    $State,
+    [string]$ExpectedType,
+    [string]$Code
+) {
+    Assert-CgceRuntimeExactKeys $State @(
+        "artifact_type", "present", "length", "sha256", "tree_sha256"
+    ) $Code
+    if ($State.artifact_type -cne $ExpectedType -or
+        $State.present -isnot [bool]) {
+        throw "$Code invalid artifact state identity"
+    }
+    if (-not $State.present) {
+        if ($null -ne $State.length -or $null -ne $State.sha256 -or
+            $null -ne $State.tree_sha256) {
+            throw "$Code absent artifact state carries data"
+        }
+    } elseif ($ExpectedType -ceq "FILE") {
+        if (-not (Test-CgceRuntimeInteger `
+                $State.length 0 ([int64]::MaxValue)) -or
+            -not (Test-CgceRuntimeChecksum $State.sha256) -or
+            $null -ne $State.tree_sha256) {
+            throw "$Code invalid file artifact state"
+        }
+    } elseif ($ExpectedType -ceq "DIRECTORY") {
+        if ($null -ne $State.length -or $null -ne $State.sha256 -or
+            -not (Test-CgceRuntimeChecksum $State.tree_sha256)) {
+            throw "$Code invalid directory artifact state"
+        }
+    } else {
+        throw "$Code invalid artifact type"
+    }
+}
+
+function Read-CgceProbeSnapshotMap($Intent, $Paths) {
+    $expected = @(
+        @("MODS_TXT", "010-mods-txt.json", "FILE", $Paths.mods_txt),
+        @("OBJECT_DUMP", "020-object-dump.json", "FILE", $Paths.object_dump),
+        @("CXX_HEADER_DUMP", "030-cxx-header-dump.json", "DIRECTORY",
+            $Paths.cxx_header_dump),
+        @("UE4SS_LOG", "040-ue4ss-log.json", "FILE", $Paths.ue4ss_log),
+        @("PROBE_SOURCE", "050-probe-source.json", "DIRECTORY",
+            $Intent.paths.probe_source)
+    )
+    if ($Intent.snapshots -isnot [System.Array] -or
+        @($Intent.snapshots).Count -ne $expected.Count) {
+        throw "CGCE-OPS-PROBE-RECEIPT snapshot binding count drift"
+    }
     $map = @{}
-    foreach ($binding in @($Intent.snapshots)) {
+    for ($index = 0; $index -lt $expected.Count; $index += 1) {
+        $spec = $expected[$index]
+        $binding = @($Intent.snapshots)[$index]
+        Assert-CgceRuntimeExactKeys $binding @(
+            "artifact_name", "snapshot_path", "snapshot_sha256"
+        ) "CGCE-OPS-PROBE-RECEIPT"
+        $expectedSnapshotPath = Join-Path `
+            $Intent.paths.before_directory $spec[1]
+        if ($binding.artifact_name -cne $spec[0] -or
+            -not (Test-CgceRuntimePathEqual `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $binding.snapshot_path "CGCE-OPS-PROBE-RECEIPT") `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $expectedSnapshotPath "CGCE-OPS-PROBE-RECEIPT"))) {
+            throw "CGCE-OPS-PROBE-RECEIPT snapshot binding drift"
+        }
         if (-not (Test-CgceRuntimeChecksum $binding.snapshot_sha256) -or
             (Get-CgceSha256 $binding.snapshot_path) -cne $binding.snapshot_sha256) {
             throw "CGCE-OPS-MANUAL-RECOVERY snapshot checksum drift"
@@ -1008,14 +1271,63 @@ function Read-CgceProbeSnapshotMap($Intent) {
         if ($snapshot.schema_version -cne "1.0" -or
             $snapshot.kind -cne "cgce_windows_discovery_artifact_snapshot" -or
             $snapshot.run_id -cne $Intent.run_id -or
-            $snapshot.artifact_name -cne $binding.artifact_name) {
+            $snapshot.artifact_name -cne $binding.artifact_name -or
+            $snapshot.artifact_type -cne $spec[2] -or
+            -not (Test-CgceRuntimePathEqual `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $snapshot.path "CGCE-OPS-PROBE-RECEIPT") `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $spec[3] "CGCE-OPS-PROBE-RECEIPT")) -or
+            $snapshot.present -isnot [bool]) {
             throw "CGCE-OPS-PROBE-RECEIPT snapshot identity drift"
+        }
+        if (-not $snapshot.present) {
+            if ($null -ne $snapshot.length -or $null -ne $snapshot.sha256 -or
+                $null -ne $snapshot.entries) {
+                throw "CGCE-OPS-PROBE-RECEIPT absent snapshot carries data"
+            }
+        } elseif ($snapshot.artifact_type -ceq "FILE") {
+            if (-not (Test-CgceRuntimeInteger `
+                    $snapshot.length 0 ([int64]::MaxValue)) -or
+                -not (Test-CgceRuntimeChecksum $snapshot.sha256) -or
+                $null -ne $snapshot.entries) {
+                throw "CGCE-OPS-PROBE-RECEIPT invalid file snapshot"
+            }
+        } else {
+            if ($null -ne $snapshot.length -or $null -ne $snapshot.sha256 -or
+                $snapshot.entries -isnot [System.Array]) {
+                throw "CGCE-OPS-PROBE-RECEIPT invalid directory snapshot"
+            }
+            $previousPath = $null
+            foreach ($entry in @($snapshot.entries)) {
+                Assert-CgceRuntimeExactKeys $entry @(
+                    "relative_path", "length", "sha256"
+                ) "CGCE-OPS-PROBE-RECEIPT"
+                if ($entry.relative_path -isnot [string] -or
+                    [string]::IsNullOrWhiteSpace($entry.relative_path) -or
+                    $entry.relative_path.Contains("\") -or
+                    $entry.relative_path.StartsWith("/") -or
+                    $entry.relative_path.Contains("../") -or
+                    -not (Test-CgceRuntimeInteger `
+                        $entry.length 0 ([int64]::MaxValue)) -or
+                    -not (Test-CgceRuntimeChecksum $entry.sha256) -or
+                    ($null -ne $previousPath -and
+                        [StringComparer]::Ordinal.Compare(
+                            $previousPath, $entry.relative_path
+                        ) -ge 0)) {
+                    throw "CGCE-OPS-PROBE-RECEIPT invalid snapshot inventory"
+                }
+                $previousPath = $entry.relative_path
+            }
         }
         $map[$binding.artifact_name] = $snapshot
     }
     if ([string]::Join(",", @($map.Keys | Sort-Object)) -cne
         "CXX_HEADER_DUMP,MODS_TXT,OBJECT_DUMP,PROBE_SOURCE,UE4SS_LOG") {
         throw "CGCE-OPS-PROBE-RECEIPT snapshot set drift"
+    }
+    if (-not $map.MODS_TXT.present -or -not $map.PROBE_SOURCE.present) {
+        throw "CGCE-OPS-PROBE-RECEIPT required snapshot unexpectedly absent"
     }
     return $map
 }
@@ -1031,20 +1343,103 @@ function Assert-CgceOperationPairState($Pair, [string]$Code) {
     }
 }
 
-function Read-CgceProbeStageAuthority($Paths, [string]$RunId) {
-    $specs = @(
-        @(10, "010-preserve-mods.json", "PRESERVE_MODS"),
-        @(20, "020-create-test-mods.json", "CREATE_TEST_MODS"),
-        @(30, "030-preserve-object-dump.json", "PRESERVE_OBJECT_DUMP"),
-        @(40, "040-preserve-cxx-header-dump.json", "PRESERVE_CXX_HEADER_DUMP"),
-        @(50, "050-preserve-ue4ss-log.json", "PRESERVE_UE4SS_LOG"),
-        @(60, "060-stage-probe.json", "STAGE_PROBE")
+function New-CgceExpectedStageDefinitions($Paths, $Snapshots) {
+    $freshBytes = (New-Object Text.UTF8Encoding($false)).GetBytes(
+        $script:CgceFreshModsText
     )
+    $freshMods = [pscustomobject][ordered]@{
+        artifact_type = "FILE"; present = $true
+        length = [int64]$freshBytes.Length
+        sha256 = (Get-CgceBytesSha256 $freshBytes)
+        tree_sha256 = $null
+    }
+    $absentFile = New-CgceAbsentArtifactState "FILE"
+    $absentDirectory = New-CgceAbsentArtifactState "DIRECTORY"
+    $modsBefore = Get-CgceSnapshotState $Snapshots.MODS_TXT
+    $objectBefore = Get-CgceSnapshotState $Snapshots.OBJECT_DUMP
+    $headerBefore = Get-CgceSnapshotState $Snapshots.CXX_HEADER_DUMP
+    $logBefore = Get-CgceSnapshotState $Snapshots.UE4SS_LOG
+    $probeBefore = Get-CgceSnapshotState $Snapshots.PROBE_SOURCE
+    return @(
+        [pscustomobject]@{
+            sequence = 10; file_name = "010-preserve-mods.json"
+            step = "PRESERVE_MODS"; operation = "MOVE_FILE"
+            source = $Paths.mods_txt; destination = $Paths.mods_original
+            type = "FILE"
+            before = (New-CgceStatePair $modsBefore $absentFile)
+            after = (New-CgceStatePair $absentFile $modsBefore)
+        },
+        [pscustomobject]@{
+            sequence = 20; file_name = "020-create-test-mods.json"
+            step = "CREATE_TEST_MODS"; operation = "CREATE_FILE"
+            source = $null; destination = $Paths.mods_txt; type = "FILE"
+            before = (New-CgceStatePair $null $absentFile)
+            after = (New-CgceStatePair $null $freshMods)
+        },
+        [pscustomobject]@{
+            sequence = 30; file_name = "030-preserve-object-dump.json"
+            step = "PRESERVE_OBJECT_DUMP"
+            operation = $(if ($Snapshots.OBJECT_DUMP.present) {
+                "MOVE_FILE"
+            } else { "VERIFY_ABSENT" })
+            source = $Paths.object_dump
+            destination = $Paths.object_dump_original; type = "FILE"
+            before = (New-CgceStatePair $objectBefore $absentFile)
+            after = $(if ($Snapshots.OBJECT_DUMP.present) {
+                New-CgceStatePair $absentFile $objectBefore
+            } else { New-CgceStatePair $absentFile $absentFile })
+        },
+        [pscustomobject]@{
+            sequence = 40; file_name = "040-preserve-cxx-header-dump.json"
+            step = "PRESERVE_CXX_HEADER_DUMP"
+            operation = $(if ($Snapshots.CXX_HEADER_DUMP.present) {
+                "MOVE_DIRECTORY"
+            } else { "VERIFY_ABSENT" })
+            source = $Paths.cxx_header_dump
+            destination = $Paths.cxx_header_dump_original; type = "DIRECTORY"
+            before = (New-CgceStatePair $headerBefore $absentDirectory)
+            after = $(if ($Snapshots.CXX_HEADER_DUMP.present) {
+                New-CgceStatePair $absentDirectory $headerBefore
+            } else {
+                New-CgceStatePair $absentDirectory $absentDirectory
+            })
+        },
+        [pscustomobject]@{
+            sequence = 50; file_name = "050-preserve-ue4ss-log.json"
+            step = "PRESERVE_UE4SS_LOG"
+            operation = $(if ($Snapshots.UE4SS_LOG.present) {
+                "MOVE_FILE"
+            } else { "VERIFY_ABSENT" })
+            source = $Paths.ue4ss_log
+            destination = $Paths.ue4ss_log_original; type = "FILE"
+            before = (New-CgceStatePair $logBefore $absentFile)
+            after = $(if ($Snapshots.UE4SS_LOG.present) {
+                New-CgceStatePair $absentFile $logBefore
+            } else { New-CgceStatePair $absentFile $absentFile })
+        },
+        [pscustomobject]@{
+            sequence = 60; file_name = "060-stage-probe.json"
+            step = "STAGE_PROBE"; operation = "COPY_DIRECTORY"
+            source = $Snapshots.PROBE_SOURCE.path
+            destination = $Paths.probe_staged; type = "DIRECTORY"
+            before = (New-CgceStatePair $probeBefore $absentDirectory)
+            after = (New-CgceStatePair $probeBefore $probeBefore)
+        }
+    )
+}
+
+function Read-CgceProbeStageAuthority(
+    $Paths,
+    [string]$RunId,
+    $Intent,
+    $Snapshots
+) {
+    $specs = @(New-CgceExpectedStageDefinitions $Paths $Snapshots)
     $allowed = @(
         "000-probe-intent.json",
         "999-probe-final.json",
         "restore"
-    ) + @($specs | ForEach-Object { $_[1] })
+    ) + @($specs | ForEach-Object { $_.file_name })
     foreach ($child in @(Get-ChildItem -LiteralPath $Paths.probe_receipts -Force)) {
         if ($allowed -cnotcontains $child.Name) {
             throw "CGCE-OPS-PROBE-RECEIPT unknown probe receipt child"
@@ -1058,7 +1453,7 @@ function Read-CgceProbeStageAuthority($Paths, [string]$RunId) {
     $lastSequence = 0
     $gap = $false
     foreach ($spec in $specs) {
-        $path = Join-Path $Paths.probe_receipts $spec[1]
+        $path = Join-Path $Paths.probe_receipts $spec.file_name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             $gap = $true
             continue
@@ -1079,13 +1474,36 @@ function Read-CgceProbeStageAuthority($Paths, [string]$RunId) {
         if ($receipt.schema_version -cne "1.0" -or
             $receipt.kind -cne "cgce_windows_discovery_probe_operation" -or
             $receipt.run_id -cne $RunId -or
-            [int]$receipt.sequence -ne [int]$spec[0] -or
-            $receipt.step -cne $spec[2] -or
+            -not (Test-CgceRuntimeInteger `
+                $receipt.sequence $spec.sequence $spec.sequence) -or
+            $receipt.step -cne $spec.step -or
+            $receipt.operation -cne $spec.operation -or
+            -not (Test-CgceRuntimeUtcTimestamp $receipt.completed_at_utc) -or
             $receipt.previous_receipt_sha256 -cne $previous) {
             throw "CGCE-OPS-PROBE-RECEIPT staging receipt chain drift"
         }
+        $sourceMatches = if ($null -eq $spec.source) {
+            $null -eq $receipt.source_path
+        } else {
+            $null -ne $receipt.source_path -and
+                (Test-CgceRuntimePathEqual `
+                    (ConvertTo-CgceCanonicalRuntimePath `
+                        $receipt.source_path "CGCE-OPS-PROBE-RECEIPT") `
+                    (ConvertTo-CgceCanonicalRuntimePath `
+                        $spec.source "CGCE-OPS-PROBE-RECEIPT"))
+        }
+        if (-not $sourceMatches -or
+            -not (Test-CgceRuntimePathEqual `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $receipt.destination_path "CGCE-OPS-PROBE-RECEIPT") `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $spec.destination "CGCE-OPS-PROBE-RECEIPT")) -or
+            -not (Test-CgceStatePairEqual $receipt.before_state $spec.before) -or
+            -not (Test-CgceStatePairEqual $receipt.after_state $spec.after)) {
+            throw "CGCE-OPS-PROBE-RECEIPT staging receipt matrix drift"
+        }
         $previous = Get-CgceSha256 $path
-        $lastSequence = [int]$spec[0]
+        $lastSequence = [int]$spec.sequence
     }
     $finalChecksum = $null
     if (Test-Path -LiteralPath $Paths.probe_receipt -PathType Leaf) {
@@ -1101,11 +1519,51 @@ function Read-CgceProbeStageAuthority($Paths, [string]$RunId) {
             "mods_after_sha256", "staged_path", "paths",
             "operation_receipts", "completed_at_utc"
         ) "CGCE-OPS-PROBE-RECEIPT"
-        if ($final.kind -cne "cgce_windows_discovery_probe_final" -or
-            $final.run_id -cne $RunId -or [int]$final.sequence -ne 999 -or
+        if ($final.schema_version -cne "1.0" -or
+            $final.kind -cne "cgce_windows_discovery_probe_final" -or
+            $final.run_id -cne $RunId -or
+            -not (Test-CgceRuntimeInteger $final.sequence 999 999) -or
             $final.intent_sha256 -cne $intentChecksum -or
-            $final.previous_receipt_sha256 -cne $previous) {
+            $final.previous_receipt_sha256 -cne $previous -or
+            $final.mods_before_sha256 -cne $Snapshots.MODS_TXT.sha256 -or
+            -not (Test-CgceRuntimeChecksum $final.mods_after_sha256) -or
+            -not (Test-CgceRuntimeUtcTimestamp $final.completed_at_utc)) {
             throw "CGCE-OPS-PROBE-RECEIPT final receipt chain drift"
+        }
+        Assert-CgceProbePathObjectsEqual $Intent.paths $final.paths
+        if ($final.operation_receipts -isnot [System.Array] -or
+            -not (Test-CgceRuntimePathEqual `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $final.staged_path "CGCE-OPS-PROBE-RECEIPT") `
+                $Paths.probe_staged) -or
+            @($final.operation_receipts).Count -ne $specs.Count) {
+            throw "CGCE-OPS-PROBE-RECEIPT final path or binding count drift"
+        }
+        for ($index = 0; $index -lt $specs.Count; $index += 1) {
+            $binding = @($final.operation_receipts)[$index]
+            $spec = $specs[$index]
+            $receiptPath = Join-Path $Paths.probe_receipts $spec.file_name
+            Assert-CgceRuntimeExactKeys $binding @(
+                "sequence", "path", "sha256"
+            ) "CGCE-OPS-PROBE-RECEIPT"
+            if (-not (Test-CgceRuntimeInteger `
+                    $binding.sequence $spec.sequence $spec.sequence) -or
+                -not (Test-CgceRuntimePathEqual `
+                    (ConvertTo-CgceCanonicalRuntimePath `
+                        $binding.path "CGCE-OPS-PROBE-RECEIPT") `
+                    (ConvertTo-CgceCanonicalRuntimePath `
+                        $receiptPath "CGCE-OPS-PROBE-RECEIPT")) -or
+                -not (Test-CgceRuntimeChecksum $binding.sha256) -or
+                $binding.sha256 -cne (Get-CgceSha256 $receiptPath)) {
+                throw "CGCE-OPS-PROBE-RECEIPT final operation binding drift"
+            }
+        }
+        $freshBytes = (New-Object Text.UTF8Encoding($false)).GetBytes(
+            $script:CgceFreshModsText
+        )
+        if ($final.mods_after_sha256 -cne
+            (Get-CgceBytesSha256 $freshBytes)) {
+            throw "CGCE-OPS-PROBE-RECEIPT final isolated mods checksum drift"
         }
         $finalChecksum = Get-CgceSha256 $Paths.probe_receipt
     }
@@ -1144,7 +1602,8 @@ function Get-CgceRestoreSelectedCase(
     $Original,
     $Quarantine,
     $Before,
-    $Test
+    $Test,
+    [bool]$AllowJournalRestored
 ) {
     $absent = [pscustomobject][ordered]@{
         artifact_type = $Active.artifact_type; present = $false
@@ -1162,7 +1621,10 @@ function Get-CgceRestoreSelectedCase(
         if ($aT -and $qN) { return "PROBE_ACTIVE" }
         if ($aN -and $qT) { return "PROBE_ALREADY_QUARANTINED" }
     } elseif ($Name -ceq "MODS_TXT") {
-        if ($aB -and $oN -and $qN) { return "ORIGINAL_UNCHANGED" }
+        if ($aB -and $oN -and ($qN -or $qT)) {
+            if ($AllowJournalRestored) { return "ORIGINAL_ALREADY_RESTORED" }
+            if ($qN) { return "ORIGINAL_UNCHANGED" }
+        }
         if ($aN -and $oB -and $qN) { return "ORIGINAL_PRESERVED_NO_TEST" }
         if ($aT -and $oB -and $qN) { return "TEST_ACTIVE_AND_ORIGINAL_PRESERVED" }
         if ($aN -and $oB -and $qT) { return "TEST_QUARANTINED_AND_ORIGINAL_PRESERVED" }
@@ -1171,7 +1633,12 @@ function Get-CgceRestoreSelectedCase(
         if ($aT -and $oN -and $qN) { return "BEFORE_ABSENT_TEST_ACTIVE" }
         if ($aN -and $oN -and $qT) { return "BEFORE_ABSENT_TEST_QUARANTINED" }
     } else {
-        if ($aB -and $oN -and $qN) { return "BEFORE_PRESENT_ALREADY_RESTORED" }
+        if ($aB -and $oN -and ($qN -or $qT)) {
+            if ($AllowJournalRestored) {
+                return "BEFORE_PRESENT_ALREADY_RESTORED"
+            }
+            if ($qN) { return "BEFORE_PRESENT_UNCHANGED" }
+        }
         if ($aN -and $oB -and $qN) { return "BEFORE_PRESENT_ORIGINAL_PRESERVED_NO_TEST" }
         if ($aT -and $oB -and $qN) { return "BEFORE_PRESENT_TEST_ACTIVE_AND_ORIGINAL_PRESERVED" }
         if ($aN -and $oB -and $qT) { return "BEFORE_PRESENT_TEST_QUARANTINED_AND_ORIGINAL_PRESERVED" }
@@ -1211,6 +1678,7 @@ function Assert-CgceRestorePlans([object[]]$Plans) {
         "BEFORE_PRESENT_ORIGINAL_PRESERVED_NO_TEST",
         "BEFORE_PRESENT_TEST_ACTIVE_AND_ORIGINAL_PRESERVED",
         "BEFORE_PRESENT_TEST_QUARANTINED_AND_ORIGINAL_PRESERVED",
+        "BEFORE_PRESENT_UNCHANGED",
         "BEFORE_PRESENT_ALREADY_RESTORED"
     )
     for ($index = 0; $index -lt $Plans.Count; $index += 1) {
@@ -1225,9 +1693,11 @@ function Assert-CgceRestorePlans([object[]]$Plans) {
         foreach ($state in @(
             $plan.active_state, $plan.original_state, $plan.quarantine_state
         )) {
-            Assert-CgceRuntimeExactKeys $state @(
-                "artifact_type", "present", "length", "sha256", "tree_sha256"
-            ) "CGCE-OPS-PROBE-RECEIPT"
+            $expectedType = if ($index -eq 0 -or $index -eq 3) {
+                "DIRECTORY"
+            } else { "FILE" }
+            Assert-CgceArtifactStateSchema `
+                $state $expectedType "CGCE-OPS-PROBE-RECEIPT"
         }
         $allowed = if ($index -eq 0) {
             $probeCases
@@ -1238,6 +1708,171 @@ function Assert-CgceRestorePlans([object[]]$Plans) {
         }
         if ($allowed -cnotcontains [string]$plan.selected_case) {
             throw "CGCE-OPS-PROBE-RECEIPT restore plan case drift"
+        }
+        if ($plan.before_present -isnot [bool]) {
+            throw "CGCE-OPS-PROBE-RECEIPT restore plan presence drift"
+        }
+    }
+}
+
+function Get-CgceRestoreTerminalMatrix([object[]]$Plans, $Paths) {
+    Assert-CgceRestorePlans $Plans
+    $matrix = New-Object 'Collections.Generic.List[object]'
+    $specs = @(
+        @("PROBE", "DIRECTORY", $Paths.probe_staged, $null,
+            $Paths.probe_quarantine),
+        @("MODS_TXT", "FILE", $Paths.mods_txt, $Paths.mods_original,
+            $Paths.mods_test),
+        @("OBJECT_DUMP", "FILE", $Paths.object_dump,
+            $Paths.object_dump_original, $Paths.object_dump_quarantine),
+        @("CXX_HEADER_DUMP", "DIRECTORY", $Paths.cxx_header_dump,
+            $Paths.cxx_header_dump_original,
+            $Paths.cxx_header_dump_quarantine),
+        @("UE4SS_LOG", "FILE", $Paths.ue4ss_log,
+            $Paths.ue4ss_log_original, $Paths.ue4ss_log_quarantine)
+    )
+    for ($index = 0; $index -lt $specs.Count; $index += 1) {
+        $plan = $Plans[$index]
+        $spec = $specs[$index]
+        $absent = New-CgceAbsentArtifactState $spec[1]
+        if ($index -eq 0) {
+            $active = $absent
+            $original = $null
+            $quarantine = if ($plan.selected_case -ceq "PROBE_ACTIVE") {
+                $plan.active_state
+            } elseif ($plan.selected_case -ceq "PROBE_ALREADY_QUARANTINED") {
+                $plan.quarantine_state
+            } else { $absent }
+        } else {
+            $active = if ($plan.before_present) {
+                if ($plan.selected_case -like "*UNCHANGED" -or
+                    $plan.selected_case -like "*ALREADY_RESTORED") {
+                    $plan.active_state
+                } else {
+                    $plan.original_state
+                }
+            } else { $absent }
+            $original = $absent
+            $quarantine = if ($plan.selected_case -like "*TEST_ACTIVE*") {
+                $plan.active_state
+            } elseif ($plan.selected_case -like "*TEST_QUARANTINED*") {
+                $plan.quarantine_state
+            } elseif ($plan.selected_case -like "*ALREADY_RESTORED") {
+                $plan.quarantine_state
+            } else { $absent }
+        }
+        $null = $matrix.Add([pscustomobject]@{
+            artifact_name = $spec[0]
+            type = $spec[1]
+            active_path = $spec[2]
+            original_path = $spec[3]
+            quarantine_path = $spec[4]
+            active_state = $active
+            original_state = $original
+            quarantine_state = $quarantine
+        })
+    }
+    return [object[]]$matrix.ToArray()
+}
+
+function Assert-CgceRestoreTerminalMatrix([object[]]$Plans, $Paths) {
+    foreach ($entry in @(Get-CgceRestoreTerminalMatrix $Plans $Paths)) {
+        $liveActive = New-CgceArtifactState $entry.active_path $entry.type
+        if (-not (Test-CgceArtifactStateEqual `
+                $liveActive $entry.active_state)) {
+            throw "CGCE-OPS-MANUAL-RECOVERY terminal active state drift"
+        }
+        if ($null -ne $entry.original_path) {
+            $liveOriginal = New-CgceArtifactState `
+                $entry.original_path $entry.type
+            if (-not (Test-CgceArtifactStateEqual `
+                    $liveOriginal $entry.original_state)) {
+                throw "CGCE-OPS-MANUAL-RECOVERY terminal original state drift"
+            }
+        }
+        $liveQuarantine = New-CgceArtifactState `
+            $entry.quarantine_path $entry.type
+        if (-not (Test-CgceArtifactStateEqual `
+                $liveQuarantine $entry.quarantine_state)) {
+            throw "CGCE-OPS-MANUAL-RECOVERY terminal quarantine state drift"
+        }
+    }
+}
+
+function Assert-CgceRestorePlansBoundToSnapshots(
+    [object[]]$Plans,
+    $Snapshots,
+    [bool]$HasJournalAuthority
+) {
+    Assert-CgceRestorePlans $Plans
+    $beforeStates = @(
+        (Get-CgceSnapshotState $Snapshots.PROBE_SOURCE),
+        (Get-CgceSnapshotState $Snapshots.MODS_TXT),
+        (Get-CgceSnapshotState $Snapshots.OBJECT_DUMP),
+        (Get-CgceSnapshotState $Snapshots.CXX_HEADER_DUMP),
+        (Get-CgceSnapshotState $Snapshots.UE4SS_LOG)
+    )
+    $freshBytes = (New-Object Text.UTF8Encoding($false)).GetBytes(
+        $script:CgceFreshModsText
+    )
+    $freshMods = [pscustomobject][ordered]@{
+        artifact_type = "FILE"; present = $true
+        length = [int64]$freshBytes.Length
+        sha256 = (Get-CgceBytesSha256 $freshBytes)
+        tree_sha256 = $null
+    }
+    for ($index = 0; $index -lt $Plans.Count; $index += 1) {
+        $plan = $Plans[$index]
+        $before = $beforeStates[$index]
+        $expectedPresence = if ($index -eq 0) {
+            $false
+        } else { [bool]$before.present }
+        if ([bool]$plan.before_present -ne $expectedPresence) {
+            throw "CGCE-OPS-PROBE-RECEIPT restore plan snapshot presence drift"
+        }
+        if ($plan.selected_case -like "*ALREADY_RESTORED") {
+            if (-not $HasJournalAuthority -or
+                -not (Test-CgceArtifactStateEqual `
+                    $plan.active_state $before) -or
+                $plan.original_state.present) {
+                throw "CGCE-OPS-PROBE-RECEIPT unauthorized restored plan"
+            }
+        }
+        if ($plan.selected_case -like "*UNCHANGED") {
+            if (-not (Test-CgceArtifactStateEqual `
+                    $plan.active_state $before) -or
+                $plan.original_state.present -or
+                $plan.quarantine_state.present) {
+                throw "CGCE-OPS-PROBE-RECEIPT unchanged plan drift"
+            }
+        }
+        if ($plan.selected_case -like "*ORIGINAL_PRESERVED*") {
+            if (-not (Test-CgceArtifactStateEqual `
+                    $plan.original_state $before)) {
+                throw "CGCE-OPS-PROBE-RECEIPT preserved original drift"
+            }
+        }
+        $testState = if ($index -eq 0) {
+            $before
+        } elseif ($index -eq 1) {
+            $freshMods
+        } elseif ($plan.selected_case -like "*TEST_ACTIVE*") {
+            $plan.active_state
+        } elseif ($plan.selected_case -like "*TEST_QUARANTINED*" -or
+            ($plan.selected_case -like "*ALREADY_RESTORED" -and
+                $plan.quarantine_state.present)) {
+            $plan.quarantine_state
+        } else {
+            New-CgceAbsentArtifactState $plan.active_state.artifact_type
+        }
+        $expectedCase = Get-CgceRestoreSelectedCase `
+            $plan.artifact_name $plan.before_present `
+            $plan.active_state $plan.original_state $plan.quarantine_state `
+            $before $testState `
+            ($HasJournalAuthority -and
+                $plan.selected_case -like "*ALREADY_RESTORED")
+        if ($expectedCase -cne $plan.selected_case) {
+            throw "CGCE-OPS-PROBE-RECEIPT restore plan semantic drift"
         }
     }
 }
@@ -1337,10 +1972,14 @@ function Get-CgceRestoreStepDefinitions([object[]]$Plans, $Paths) {
             $quarantineOperation $output[4] $output[6] $output[7] `
             (New-CgceStatePair $plan.active_state $plan.quarantine_state)
         $null = $definitions.Add($quarantineStep)
-        $restoreOperation = if ($plan.selected_case -like "BEFORE_PRESENT_*" -and
-            $plan.selected_case -notlike "*ALREADY_RESTORED") {
+        $restoreOperation = if ($plan.selected_case -in @(
+                "BEFORE_PRESENT_ORIGINAL_PRESERVED_NO_TEST",
+                "BEFORE_PRESENT_TEST_ACTIVE_AND_ORIGINAL_PRESERVED",
+                "BEFORE_PRESENT_TEST_QUARANTINED_AND_ORIGINAL_PRESERVED"
+            )) {
             if ($output[7] -ceq "FILE") { "MOVE_FILE" } else { "MOVE_DIRECTORY" }
-        } elseif ($plan.selected_case -like "*ALREADY_RESTORED") {
+        } elseif ($plan.selected_case -like "*ALREADY_RESTORED" -or
+            $plan.selected_case -like "*UNCHANGED") {
             "VERIFY_RESTORED"
         } else { "VERIFY_ABSENT" }
         $restoreBefore = New-CgceStatePair `
@@ -1420,7 +2059,8 @@ function Invoke-CgceRestoreStep(
 function Read-CgceProbeRestorePrefix(
     [string]$RestoreRoot,
     [string]$RunId,
-    $Paths
+    $Paths,
+    $ExpectedPathObject
 ) {
     $intentPath = Join-Path $RestoreRoot "000-probe-restore-intent.json"
     if (-not (Test-Path -LiteralPath $intentPath -PathType Leaf)) {
@@ -1434,9 +2074,22 @@ function Read-CgceProbeRestorePrefix(
         "stage_intent_sha256", "stage_final_sha256",
         "stage_chain_last_sequence", "stage_chain_last_sha256", "paths", "plans"
     ) "CGCE-OPS-PROBE-RECEIPT"
-    if ($intent.kind -cne "cgce_windows_discovery_probe_restore_intent" -or
-        $intent.run_id -cne $RunId -or [int]$intent.sequence -ne 0) {
+    if ($intent.schema_version -cne "1.0" -or
+        $intent.kind -cne "cgce_windows_discovery_probe_restore_intent" -or
+        $intent.run_id -cne $RunId -or
+        -not (Test-CgceRuntimeInteger $intent.sequence 0 0) -or
+        -not (Test-CgceRuntimeUtcTimestamp $intent.created_at_utc) -or
+        -not (Test-CgceRuntimeChecksum $intent.stage_intent_sha256) -or
+        ($null -ne $intent.stage_final_sha256 -and
+            -not (Test-CgceRuntimeChecksum $intent.stage_final_sha256)) -or
+        -not (Test-CgceRuntimeInteger `
+            $intent.stage_chain_last_sequence 0 60) -or
+        -not (Test-CgceRuntimeChecksum $intent.stage_chain_last_sha256)) {
         throw "CGCE-OPS-PROBE-RECEIPT restore intent identity drift"
+    }
+    Assert-CgceProbePathObjectsEqual $ExpectedPathObject $intent.paths
+    if ($intent.plans -isnot [System.Array]) {
+        throw "CGCE-OPS-PROBE-RECEIPT restore plans array required"
     }
     $plans = [object[]]@($intent.plans)
     $definitions = @(Get-CgceRestoreStepDefinitions $plans $Paths)
@@ -1471,11 +2124,14 @@ function Read-CgceProbeRestorePrefix(
         ) "CGCE-OPS-PROBE-RECEIPT"
         Assert-CgceOperationPairState $receipt.before_state "CGCE-OPS-PROBE-RECEIPT"
         Assert-CgceOperationPairState $receipt.after_state "CGCE-OPS-PROBE-RECEIPT"
-        if ($receipt.kind -cne "cgce_windows_discovery_probe_restore_operation" -or
+        if ($receipt.schema_version -cne "1.0" -or
+            $receipt.kind -cne "cgce_windows_discovery_probe_restore_operation" -or
             $receipt.run_id -cne $RunId -or
-            [int]$receipt.sequence -ne [int]$definition.sequence -or
+            -not (Test-CgceRuntimeInteger `
+                $receipt.sequence $definition.sequence $definition.sequence) -or
             $receipt.step -cne $definition.step -or
             $receipt.operation -cne $definition.operation -or
+            -not (Test-CgceRuntimeUtcTimestamp $receipt.completed_at_utc) -or
             $receipt.previous_receipt_sha256 -cne $previous) {
             throw "CGCE-OPS-PROBE-RECEIPT restore receipt chain drift"
         }
@@ -1514,11 +2170,53 @@ function Read-CgceProbeRestorePrefix(
             "restore_intent_sha256", "previous_receipt_sha256", "paths",
             "operation_receipts", "restored_states", "completed_at_utc"
         ) "CGCE-OPS-PROBE-RECEIPT"
-        if ($final.kind -cne "cgce_windows_discovery_probe_restore_final" -or
-            $final.run_id -cne $RunId -or [int]$final.sequence -ne 999 -or
+        if ($final.schema_version -cne "1.0" -or
+            $final.kind -cne "cgce_windows_discovery_probe_restore_final" -or
+            $final.run_id -cne $RunId -or
+            -not (Test-CgceRuntimeInteger $final.sequence 999 999) -or
             $final.restore_intent_sha256 -cne (Get-CgceSha256 $intentPath) -or
-            $final.previous_receipt_sha256 -cne $previous) {
+            $final.previous_receipt_sha256 -cne $previous -or
+            -not (Test-CgceRuntimeUtcTimestamp $final.completed_at_utc)) {
             throw "CGCE-OPS-PROBE-RECEIPT restore final chain drift"
+        }
+        Assert-CgceProbePathObjectsEqual $ExpectedPathObject $final.paths
+        if ($final.operation_receipts -isnot [System.Array] -or
+            @($final.operation_receipts).Count -ne $bindings.Count -or
+            $final.restored_states -isnot [System.Array] -or
+            @($final.restored_states).Count -ne 5) {
+            throw "CGCE-OPS-PROBE-RECEIPT restore final count drift"
+        }
+        for ($index = 0; $index -lt $bindings.Count; $index += 1) {
+            $actual = @($final.operation_receipts)[$index]
+            $expected = $bindings[$index]
+            Assert-CgceRuntimeExactKeys $actual @(
+                "sequence", "path", "sha256"
+            ) "CGCE-OPS-PROBE-RECEIPT"
+            if (-not (Test-CgceRuntimeInteger `
+                    $actual.sequence $expected.sequence $expected.sequence) -or
+                -not (Test-CgceRuntimePathEqual `
+                    (ConvertTo-CgceCanonicalRuntimePath `
+                        $actual.path "CGCE-OPS-PROBE-RECEIPT") `
+                    (ConvertTo-CgceCanonicalRuntimePath `
+                        $expected.path "CGCE-OPS-PROBE-RECEIPT")) -or
+                $actual.sha256 -cne $expected.sha256) {
+                throw "CGCE-OPS-PROBE-RECEIPT restore final binding drift"
+            }
+        }
+        $terminal = @(Get-CgceRestoreTerminalMatrix $plans $Paths)
+        for ($index = 0; $index -lt $terminal.Count; $index += 1) {
+            $actual = @($final.restored_states)[$index]
+            Assert-CgceRuntimeExactKeys $actual @(
+                "artifact_name", "state"
+            ) "CGCE-OPS-PROBE-RECEIPT"
+            Assert-CgceArtifactStateSchema `
+                $actual.state $terminal[$index].type `
+                "CGCE-OPS-PROBE-RECEIPT"
+            if ($actual.artifact_name -cne $terminal[$index].artifact_name -or
+                -not (Test-CgceArtifactStateEqual `
+                    $actual.state $terminal[$index].active_state)) {
+                throw "CGCE-OPS-PROBE-RECEIPT restore final state drift"
+            }
         }
     }
     return [pscustomobject]@{
@@ -1528,6 +2226,84 @@ function Read-CgceProbeRestorePrefix(
         bindings = [object[]]$bindings.ToArray()
         definitions = [object[]]$definitions
         complete = $complete
+        final = $(if ($complete) { $final } else { $null })
+    }
+}
+
+function Assert-CgceNoProbeResidueWithoutIntent($Paths) {
+    $artifactPaths = @(
+        $Paths.probe_staged,
+        $Paths.probe_quarantine,
+        $Paths.mods_original,
+        $Paths.mods_test,
+        $Paths.object_dump_original,
+        $Paths.object_dump_quarantine,
+        $Paths.cxx_header_dump_original,
+        $Paths.cxx_header_dump_quarantine,
+        $Paths.ue4ss_log_original,
+        $Paths.ue4ss_log_quarantine
+    )
+    foreach ($path in $artifactPaths) {
+        if (Test-Path -LiteralPath $path) {
+            throw "CGCE-OPS-MANUAL-RECOVERY probe residue without intent"
+        }
+    }
+    if (Test-Path -LiteralPath $Paths.probe_receipts -PathType Container) {
+        if (@(Get-ChildItem -LiteralPath $Paths.probe_receipts -Force).Count -gt 0) {
+            throw "CGCE-OPS-MANUAL-RECOVERY probe journal without intent"
+        }
+    }
+    $before = Join-Path $Paths.run_directory "before"
+    if (Test-Path -LiteralPath $before -PathType Container) {
+        if (@(Get-ChildItem -LiteralPath $before -Force).Count -gt 0) {
+            throw "CGCE-OPS-MANUAL-RECOVERY probe snapshots without intent"
+        }
+    }
+    if (Test-Path -LiteralPath $Paths.mods_txt -PathType Leaf) {
+        foreach ($line in [IO.File]::ReadAllLines($Paths.mods_txt)) {
+            if ($line -match
+                '^\s*CGCEDiscoveryInventory\s*:\s*1(?:\s*(?:;.*)?)?$') {
+                throw "CGCE-OPS-MANUAL-RECOVERY probe enablement without intent"
+            }
+        }
+    }
+}
+
+function Read-CgceProbeIntentAuthority(
+    $Paths,
+    [string]$RunDirectory,
+    [string]$RunId
+) {
+    try { $intent = Read-CgceJsonObject $Paths.probe_intent } catch {
+        throw "CGCE-OPS-PROBE-RECEIPT invalid probe intent"
+    }
+    Assert-CgceRuntimeExactKeys $intent @(
+        "schema_version", "kind", "run_id", "created_at_utc",
+        "run_directory", "ue4ss_root", "paths", "snapshots"
+    ) "CGCE-OPS-PROBE-RECEIPT"
+    if ($intent.schema_version -cne "1.0" -or
+        $intent.kind -cne "cgce_windows_discovery_probe_intent" -or
+        $intent.run_id -cne $RunId -or
+        -not (Test-CgceRuntimeUtcTimestamp $intent.created_at_utc) -or
+        -not (Test-CgceRuntimePathEqual `
+            (ConvertTo-CgceCanonicalRuntimePath `
+                $intent.run_directory "CGCE-OPS-PROBE-RECEIPT") `
+            $Paths.run_directory) -or
+        -not (Test-CgceRuntimePathEqual `
+            (ConvertTo-CgceCanonicalRuntimePath `
+                $intent.ue4ss_root "CGCE-OPS-PROBE-RECEIPT") `
+            $Paths.ue4ss_root)) {
+        throw "CGCE-OPS-PROBE-RECEIPT probe intent identity drift"
+    }
+    $expectedPaths = Get-CgceProbeDerivedPaths $Paths $RunDirectory
+    $expectedPaths.probe_source = ConvertTo-CgceCanonicalRuntimePath `
+        $intent.paths.probe_source "CGCE-OPS-PROBE-RECEIPT"
+    Assert-CgceProbePathObjectsEqual $expectedPaths $intent.paths
+    $snapshots = Read-CgceProbeSnapshotMap $intent $Paths
+    return [pscustomobject]@{
+        intent = $intent
+        checksum = (Get-CgceSha256 $Paths.probe_intent)
+        snapshots = $snapshots
     }
 }
 
@@ -1539,30 +2315,29 @@ function Restore-CgceInventoryProbe(
 ) {
     Assert-CgceRuntimePaths $Paths $RunDirectory $RunId
     if (-not (Test-Path -LiteralPath $Paths.probe_intent -PathType Leaf)) {
+        Assert-CgceNoProbeResidueWithoutIntent $Paths
         return
     }
-    try { $intent = Read-CgceJsonObject $Paths.probe_intent } catch {
-        throw "CGCE-OPS-PROBE-RECEIPT invalid probe intent"
-    }
-    if ($intent.run_id -cne $RunId -or
-        $intent.kind -cne "cgce_windows_discovery_probe_intent") {
-        throw "CGCE-OPS-PROBE-RECEIPT probe intent identity drift"
-    }
-    $intentChecksum = Get-CgceSha256 $Paths.probe_intent
-    $authority = Read-CgceProbeStageAuthority $Paths $RunId
+    $intentAuthority = Read-CgceProbeIntentAuthority `
+        $Paths $RunDirectory $RunId
+    $intent = $intentAuthority.intent
+    $intentChecksum = $intentAuthority.checksum
+    $snapshots = $intentAuthority.snapshots
+    $authority = Read-CgceProbeStageAuthority `
+        $Paths $RunId $intent $snapshots
     $finalChecksum = $authority.final_checksum
     if (-not [string]::IsNullOrEmpty($ExpectedFinalReceiptChecksum) -and
         ($null -eq $finalChecksum -or
             $finalChecksum -cne $ExpectedFinalReceiptChecksum)) {
         throw "CGCE-OPS-PROBE-RECEIPT expected final receipt mismatch"
     }
-    $snapshots = Read-CgceProbeSnapshotMap $intent
     $restoreRoot = $intent.paths.probe_restore_receipts
     $resumePrefix = $null
     if (-not (Test-Path -LiteralPath $restoreRoot)) {
         [IO.Directory]::CreateDirectory($restoreRoot) | Out-Null
     } elseif (@(Get-ChildItem -LiteralPath $restoreRoot -Force).Count -gt 0) {
-        $resumePrefix = Read-CgceProbeRestorePrefix $restoreRoot $RunId $Paths
+        $resumePrefix = Read-CgceProbeRestorePrefix `
+            $restoreRoot $RunId $Paths $intent.paths
         Assert-CgceProbePathObjectsEqual `
             $intent.paths $resumePrefix.intent.paths
         if ($resumePrefix.intent.stage_intent_sha256 -cne $intentChecksum -or
@@ -1584,7 +2359,10 @@ function Restore-CgceInventoryProbe(
                 [bool]$snapshots.UE4SS_LOG.present) {
             throw "CGCE-OPS-PROBE-RECEIPT restore intent snapshot binding drift"
         }
+        Assert-CgceRestorePlansBoundToSnapshots `
+            $resumePlans $snapshots $true
         if ($resumePrefix.complete) {
+            Assert-CgceRestoreTerminalMatrix $resumePlans $Paths
             return
         }
     }
@@ -1618,7 +2396,8 @@ function Restore-CgceInventoryProbe(
             } else { New-CgceArtifactState $spec[3] $spec[7] }
             $quarantine = New-CgceArtifactState $spec[4] $spec[7]
             $selected = Get-CgceRestoreSelectedCase `
-                $spec[0] $spec[1] $active $original $quarantine $spec[5] $spec[6]
+                $spec[0] $spec[1] $active $original $quarantine `
+                $spec[5] $spec[6] $false
             $null = $plansList.Add([pscustomobject][ordered]@{
                 artifact_name = $spec[0]
                 selected_case = $selected
@@ -1629,6 +2408,7 @@ function Restore-CgceInventoryProbe(
             })
         }
         $plans = [object[]]$plansList.ToArray()
+        Assert-CgceRestorePlansBoundToSnapshots $plans $snapshots $false
     } else {
         $plans = [object[]]@($resumePrefix.intent.plans)
     }
@@ -1690,17 +2470,12 @@ function Restore-CgceInventoryProbe(
         foreach ($definition in $definitions) {
             Add-RestoreStep $definition
         }
+        Assert-CgceRestoreTerminalMatrix $plans $Paths
         $restored = New-Object 'Collections.Generic.List[object]'
-        foreach ($spec in @(
-            @("PROBE", $Paths.probe_staged, "DIRECTORY"),
-            @("MODS_TXT", $Paths.mods_txt, "FILE"),
-            @("OBJECT_DUMP", $Paths.object_dump, "FILE"),
-            @("CXX_HEADER_DUMP", $Paths.cxx_header_dump, "DIRECTORY"),
-            @("UE4SS_LOG", $Paths.ue4ss_log, "FILE")
-        )) {
+        foreach ($entry in @(Get-CgceRestoreTerminalMatrix $plans $Paths)) {
             $null = $restored.Add([pscustomobject][ordered]@{
-                artifact_name = $spec[0]
-                state = (New-CgceArtifactState $spec[1] $spec[2])
+                artifact_name = $entry.artifact_name
+                state = $entry.active_state
             })
         }
         $restoreFinal = [pscustomobject][ordered]@{
@@ -1746,6 +2521,36 @@ function Get-CgceProcessIdentityFromRecord($Record, [string]$FallbackPath) {
         creation_time_utc = $time
         creation_time_filetime_utc = [int64]$fileTime
     }
+}
+
+function Get-CgceRootProcessRecord($Process, [string]$CanonicalPath) {
+    $record = $null
+    try {
+        if ($null -ne $script:CgceTestRootProcessRecordSeam) {
+            $record = & $script:CgceTestRootProcessRecordSeam `
+                $Process $CanonicalPath
+        } else {
+            $record = Get-CimInstance -ClassName "Win32_Process" `
+                -Filter ("ProcessId=" + $Process.Id) -ErrorAction Stop
+        }
+    } catch {
+        $record = $null
+    }
+    if ($null -eq $record) {
+        try {
+            return [pscustomobject]@{
+                ProcessId = [int64]$Process.Id
+                ParentProcessId = [int64]0
+                ExecutablePath = $CanonicalPath
+                CreationTimeFileTimeUtc = [int64](
+                    $Process.StartTime.ToUniversalTime().ToFileTimeUtc()
+                )
+            }
+        } catch {
+            throw "CGCE-OPS-PROCESS-QUERY root process identity unavailable"
+        }
+    }
+    return $record
 }
 
 function Invoke-CgceChildProcess(
@@ -1810,17 +2615,9 @@ function Invoke-CgceChildProcess(
         throw "CGCE-OPS-PROCESS-QUERY child launch failed"
     }
     $startedAt = Get-CgceRuntimeUtcNow
-    try {
-        $rootRecord = Get-CimInstance -ClassName "Win32_Process" `
-            -Filter ("ProcessId=" + $process.Id) -ErrorAction Stop
-    } catch {
-        $rootRecord = [pscustomobject]@{
-            ProcessId = $process.Id
-            ParentProcessId = 0
-            ExecutablePath = $canonicalExecutable
-            CreationTimeFileTimeUtc = $process.StartTime.ToUniversalTime().ToFileTimeUtc()
-        }
-    }
+    $rootRecord = Get-CgceRootProcessRecord `
+        -Process $process `
+        -CanonicalPath $canonicalExecutable
     $rootIdentity = Get-CgceProcessIdentityFromRecord `
         $rootRecord $canonicalExecutable
     $observed = New-Object 'Collections.Generic.List[object]'

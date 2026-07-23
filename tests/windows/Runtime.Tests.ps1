@@ -52,6 +52,14 @@ function Set-CgceRuntimeTestActivitySeam($Seam) {
     } $Seam
 }
 
+function Set-CgceRuntimeTestRootProcessRecordSeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    & $module {
+        param($Value)
+        $script:CgceTestRootProcessRecordSeam = $Value
+    } $Seam
+}
+
 function New-CgceRuntimeProbeFixture {
     $base = New-CgceRuntimeTestRoot
     $serverRoot = Join-Path $base "server"
@@ -220,10 +228,10 @@ Invoke-CgceTest "server activity requires exhaustive paths and all telemetry" {
         Set-CgceRuntimeTestActivitySeam {
             New-CgceRuntimeActivitySnapshot -Processes @() -Tcp @() -Udp @()
         }
-        Assert-CgceThrows "CGCE-OPS-PROCESS-ACTIVE" {
+        Assert-CgceThrows "CGCE-OPS-PROCESS-QUERY" {
             Assert-CgceNoServerActivity -ExecutablePaths @() -Ports @(8211)
         }
-        Assert-CgceThrows "CGCE-OPS-PORT-ACTIVE" {
+        Assert-CgceThrows "CGCE-OPS-PORT-QUERY" {
             Assert-CgceNoServerActivity `
                 -ExecutablePaths @("D:\PalServer\PalServer.exe") `
                 -Ports @()
@@ -277,6 +285,34 @@ Invoke-CgceTest "server activity blocks exact process images and configured port
     }
 }
 
+Invoke-CgceTest "receipt-aware activity permits an exactly empty first-launch journal" {
+    $root = New-CgceRuntimeTestRoot
+    try {
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $root "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        Set-CgceRuntimeTestActivitySeam {
+            New-CgceRuntimeActivitySnapshot -Processes @() -Tcp @() -Udp @()
+        }
+        Assert-CgceNoServerActivity `
+            -ExecutablePaths @("D:\PalServer\PalServer.exe") `
+            -Ports @(8211) `
+            -ReceiptRoot $receiptRoot
+
+        New-Item -ItemType Directory -Path (Join-Path $receiptRoot "foreign") |
+            Out-Null
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths @("D:\PalServer\PalServer.exe") `
+                -Ports @(8211) `
+                -ReceiptRoot $receiptRoot
+        }
+    } finally {
+        Set-CgceRuntimeTestActivitySeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
 Invoke-CgceTest "receipt-aware activity validates allowlist digest and PID identity" {
     $root = New-CgceRuntimeTestRoot
     try {
@@ -312,7 +348,7 @@ Invoke-CgceTest "receipt-aware activity validates allowlist digest and PID ident
             parent_pid = 1
             executable_path = "D:\PalServer\PalServer.exe"
             creation_time_utc = "2026-07-23T01:01:01Z"
-            creation_time_filetime_utc = [int64]133976484610000000
+            creation_time_filetime_utc = [int64]134292420610000000
             observed_at_utc = "2026-07-23T01:01:02Z"
             previous_receipt_sha256 = (Get-CgceRuntimeTestSha256 $launchPath)
         }
@@ -342,6 +378,104 @@ Invoke-CgceTest "receipt-aware activity validates allowlist digest and PID ident
                 ) `
                 -Ports @(8211) `
                 -ReceiptRoot $receiptRoot
+        }
+    } finally {
+        Set-CgceRuntimeTestActivitySeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "completed process result binds the exact immutable PID journal" {
+    $root = New-CgceRuntimeTestRoot
+    try {
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $root "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $allowed = @("D:\PalServer\PalServer.exe")
+        $launch = [pscustomobject][ordered]@{
+            schema_version = "1.0"
+            kind = "cgce_windows_discovery_process_launch"
+            run_id = $runId
+            sequence = 0
+            created_at_utc = "2026-07-23T01:00:00Z"
+            executable_path = $allowed[0]
+            executable_sha256 = ("a" * 64)
+            working_directory = "D:\PalServer"
+            allowed_executable_path_count = 1
+            allowed_executable_paths_sha256 = (Get-CgceRuntimeTestFramedDigest `
+                -Domain "CGCE-PATHS-1" -Values $allowed)
+            argument_count = 1
+            arguments_sha256 = ("b" * 64)
+            timeout_seconds = 30
+            previous_receipt_sha256 = $null
+        }
+        $launchPath = Join-Path $receiptRoot "000-launch.json"
+        Write-CgceJsonAtomic -Value $launch -Path $launchPath
+        $pid = [pscustomobject][ordered]@{
+            schema_version = "1.0"
+            kind = "cgce_windows_discovery_process_pid"
+            run_id = $runId
+            sequence = 1
+            pid = 42
+            parent_pid = 1
+            executable_path = $allowed[0]
+            creation_time_utc = "2026-07-23T01:01:01Z"
+            creation_time_filetime_utc = [int64]134292420610000000
+            observed_at_utc = "2026-07-23T01:01:02Z"
+            previous_receipt_sha256 = (Get-CgceRuntimeTestSha256 $launchPath)
+        }
+        $pidPath = Join-Path $receiptRoot "001-pid.json"
+        Write-CgceJsonAtomic -Value $pid -Path $pidPath
+        $result = [pscustomobject][ordered]@{
+            schema_version = "1.0"
+            kind = "cgce_windows_discovery_process_result"
+            run_id = $runId
+            sequence = 999
+            launch_receipt_sha256 = (Get-CgceRuntimeTestSha256 $launchPath)
+            previous_receipt_sha256 = (Get-CgceRuntimeTestSha256 $pidPath)
+            started_at_utc = "2026-07-23T01:01:00Z"
+            exit_at_utc = "2026-07-23T01:01:03Z"
+            exit_code = 0
+            observed_processes = @([pscustomobject][ordered]@{
+                sequence = 1
+                pid = 42
+                parent_pid = 1
+                executable_path = $allowed[0]
+                creation_time_utc = "2026-07-23T01:01:01Z"
+                creation_time_filetime_utc = [int64]134292420610000000
+            })
+            pid_receipts = @([pscustomobject][ordered]@{
+                sequence = 1
+                path = $pidPath
+                sha256 = (Get-CgceRuntimeTestSha256 $pidPath)
+            })
+        }
+        Write-CgceJsonAtomic `
+            -Value $result `
+            -Path (Join-Path $receiptRoot "999-result.json")
+        Set-CgceRuntimeTestActivitySeam {
+            New-CgceRuntimeActivitySnapshot -Processes @() -Tcp @() -Udp @()
+        }
+        Assert-CgceNoServerActivity `
+            -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
+
+        $resultPath = Join-Path $receiptRoot "999-result.json"
+        $tamperedResult = Read-CgceJsonObject $resultPath
+        $tamperedResult.exit_code = "0"
+        Write-CgceRuntimeTestUtf8 `
+            -Path $resultPath `
+            -Text ($tamperedResult | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
+        }
+        Write-CgceRuntimeTestUtf8 `
+            -Path $resultPath `
+            -Text ($result | ConvertTo-Json -Depth 12)
+        [System.IO.File]::Delete($pidPath)
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
         }
     } finally {
         Set-CgceRuntimeTestActivitySeam $null
@@ -559,23 +693,48 @@ Invoke-CgceTest "probe staging crash points restore exact UE4SS before images" {
                         -Paths $fixture.Paths
                 }
                 Set-CgceRuntimeTestCrashSeam $null
-                try {
-                    Restore-CgceInventoryProbe `
-                        -Paths $fixture.Paths `
-                        -RunDirectory $fixture.Paths.run_directory `
-                        -RunId $fixture.RunId
-                    Assert-CgceRuntimeBeforeImages $fixture
-                } catch {
-                    if ($_.Exception.Message -notlike "CGCE-OPS-MANUAL-RECOVERY*") {
-                        throw
-                    }
-                    Assert-CgceEqual $true `
-                        (Test-Path -LiteralPath $fixture.Paths.probe_intent)
-                }
+                Restore-CgceInventoryProbe `
+                    -Paths $fixture.Paths `
+                    -RunDirectory $fixture.Paths.run_directory `
+                    -RunId $fixture.RunId
+                Assert-CgceRuntimeBeforeImages $fixture
             } finally {
                 Set-CgceRuntimeTestCrashSeam $null
                 Remove-Item -LiteralPath $fixture.Base -Recurse -Force
             }
+        }
+    }
+}
+
+Invoke-CgceTest "probe restore rejects missing intent whenever run residue remains" {
+    foreach ($residue in @("original", "journal", "probe", "enablement")) {
+        $fixture = New-CgceRuntimeProbeFixture
+        try {
+            if ($residue -ceq "original") {
+                Write-CgceRuntimeTestUtf8 `
+                    -Path $fixture.Paths.mods_original `
+                    -Text "residual original"
+            } elseif ($residue -ceq "journal") {
+                Write-CgceRuntimeTestUtf8 `
+                    -Path (Join-Path $fixture.Paths.probe_receipts `
+                        "010-preserve-mods.json") `
+                    -Text "{}"
+            } elseif ($residue -ceq "probe") {
+                New-Item -ItemType Directory `
+                    -Path $fixture.Paths.probe_staged | Out-Null
+            } else {
+                Write-CgceRuntimeTestUtf8 `
+                    -Path $fixture.Paths.mods_txt `
+                    -Text "CGCEDiscoveryInventory : 1`r`n"
+            }
+            Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+                Restore-CgceInventoryProbe `
+                    -Paths $fixture.Paths `
+                    -RunDirectory $fixture.Paths.run_directory `
+                    -RunId $fixture.RunId
+            }
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
         }
     }
 }
@@ -725,6 +884,119 @@ Invoke-CgceTest "probe restore rejects tampered frozen plans operations paths an
     }
 }
 
+Invoke-CgceTest "completed restore revalidates final bindings and live terminal matrix" {
+    foreach ($tamper in @("final-binding", "restored-state", "live-probe")) {
+        $fixture = New-CgceRuntimeProbeFixture
+        try {
+            $receipt = Enable-CgceInventoryProbe `
+                -Ue4ssRoot $fixture.Ue4ssRoot `
+                -ProbeSource $fixture.ProbeSource `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId `
+                -Paths $fixture.Paths
+            Restore-CgceInventoryProbe `
+                -Paths $fixture.Paths `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId `
+                -ExpectedFinalReceiptChecksum $receipt.checksum
+            $restoreFinalPath = Join-Path $fixture.Paths.probe_receipts `
+                "restore\999-probe-restore-final.json"
+            if ($tamper -ceq "live-probe") {
+                Move-Item -LiteralPath $fixture.Paths.probe_quarantine `
+                    -Destination $fixture.Paths.probe_staged
+            } else {
+                $final = Read-CgceJsonObject $restoreFinalPath
+                if ($tamper -ceq "final-binding") {
+                    $final.operation_receipts[0].sha256 = ("f" * 64)
+                } else {
+                    $final.restored_states[1].state.sha256 = ("f" * 64)
+                }
+                Write-CgceRuntimeTestUtf8 `
+                    -Path $restoreFinalPath `
+                    -Text ($final | ConvertTo-Json -Depth 12)
+            }
+            Assert-CgceThrows "CGCE-OPS-" {
+                Restore-CgceInventoryProbe `
+                    -Paths $fixture.Paths `
+                    -RunDirectory $fixture.Paths.run_directory `
+                    -RunId $fixture.RunId `
+                    -ExpectedFinalReceiptChecksum $receipt.checksum
+            }
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "stage authority rejects semantically re-signed operation receipts" {
+    $fixture = New-CgceRuntimeProbeFixture
+    try {
+        $null = Enable-CgceInventoryProbe `
+            -Ue4ssRoot $fixture.Ue4ssRoot `
+            -ProbeSource $fixture.ProbeSource `
+            -RunDirectory $fixture.Paths.run_directory `
+            -RunId $fixture.RunId `
+            -Paths $fixture.Paths
+        $operationPath = Join-Path $fixture.Paths.probe_receipts `
+            "060-stage-probe.json"
+        $operation = Read-CgceJsonObject $operationPath
+        $operation.operation = "COPY_FILE"
+        Write-CgceRuntimeTestUtf8 `
+            -Path $operationPath `
+            -Text ($operation | ConvertTo-Json -Depth 12)
+        $final = Read-CgceJsonObject $fixture.Paths.probe_receipt
+        $newChecksum = Get-CgceRuntimeTestSha256 $operationPath
+        $final.previous_receipt_sha256 = $newChecksum
+        $final.operation_receipts[5].sha256 = $newChecksum
+        Write-CgceRuntimeTestUtf8 `
+            -Path $fixture.Paths.probe_receipt `
+            -Text ($final | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-PROBE-RECEIPT" {
+            Restore-CgceInventoryProbe `
+                -Paths $fixture.Paths `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId
+        }
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "restore case authority distinguishes untouched from journal-restored states" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    & $module {
+        $before = [pscustomobject][ordered]@{
+            artifact_type = "FILE"; present = $true; length = 3
+            sha256 = ("a" * 64); tree_sha256 = $null
+        }
+        $absent = New-CgceAbsentArtifactState "FILE"
+        $test = [pscustomobject][ordered]@{
+            artifact_type = "FILE"; present = $true; length = 4
+            sha256 = ("b" * 64); tree_sha256 = $null
+        }
+        Assert-CgceEqual "ORIGINAL_UNCHANGED" (
+            Get-CgceRestoreSelectedCase `
+                "MODS_TXT" $true $before $absent $absent $before $test $false
+        )
+        Assert-CgceEqual "ORIGINAL_ALREADY_RESTORED" (
+            Get-CgceRestoreSelectedCase `
+                "MODS_TXT" $true $before $absent $test $before $test $true
+        )
+        Assert-CgceEqual "ORIGINAL_ALREADY_RESTORED" (
+            Get-CgceRestoreSelectedCase `
+                "MODS_TXT" $true $before $absent $absent $before $test $true
+        )
+        Assert-CgceEqual "BEFORE_PRESENT_UNCHANGED" (
+            Get-CgceRestoreSelectedCase `
+                "OBJECT_DUMP" $true $before $absent $absent $before $test $false
+        )
+        Assert-CgceEqual "BEFORE_PRESENT_ALREADY_RESTORED" (
+            Get-CgceRestoreSelectedCase `
+                "OBJECT_DUMP" $true $before $absent $test $before $test $true
+        )
+    }
+}
+
 Invoke-CgceTest "foreign artifact preflight blocks active originals probe and mods enablement" {
     $fixture = New-CgceRuntimeProbeFixture
     try {
@@ -871,6 +1143,28 @@ Invoke-CgceTest "child process writes immutable intent PID and result receipts w
         }
     } finally {
         Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "short-lived root process uses immediate Process identity when CIM returns null" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    try {
+        Set-CgceRuntimeTestRootProcessRecordSeam { return $null }
+        $start = [DateTime]::SpecifyKind(
+            [DateTime]::Parse("2026-07-23T01:02:03Z"),
+            [DateTimeKind]::Utc
+        )
+        $process = [pscustomobject]@{ Id = 73; StartTime = $start }
+        $record = & $module {
+            param($Value, $Path)
+            Get-CgceRootProcessRecord -Process $Value -CanonicalPath $Path
+        } $process "D:\PalServer\PalServer.exe"
+        Assert-CgceEqual 73 $record.ProcessId
+        Assert-CgceEqual "D:\PalServer\PalServer.exe" $record.ExecutablePath
+        Assert-CgceEqual $start.ToFileTimeUtc() `
+            $record.CreationTimeFileTimeUtc
+    } finally {
+        Set-CgceRuntimeTestRootProcessRecordSeam $null
     }
 }
 

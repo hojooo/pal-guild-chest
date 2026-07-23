@@ -77,9 +77,50 @@ zsh:1: command not found: powershell.exe
 exit 127
 ```
 
-The suite contains 64 plain-PowerShell tests: Contract 22, Files 27, and
-Runtime 15. No claim is made that they pass until the unchanged suite runs
+The suite contains 71 plain-PowerShell tests: Contract 22, Files 27, and
+Runtime 22. No claim is made that they pass until the suite runs
 under elevated Windows PowerShell 5.1.
+
+### Failed-review correction wave
+
+The review regressions were added before their production fixes. The RED
+attempt was:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/Run-CgceDiscoveryTests.ps1
+zsh: command not found: powershell.exe
+exit 127
+```
+
+The corrected implementation addresses every review finding:
+
+1. An exactly empty validated process receipt directory is now the only
+   receipt-aware first-launch exception; any child requires the full strict
+   chain.
+2. Missing probe intent returns only when all Task 3 run residue is absent.
+   Completed restore journals are strictly parsed and rebound, and both
+   pre-final and repeat-call paths revalidate the complete live
+   active/original/quarantine terminal matrix.
+3. `999-result.json`, when present, now binds the exact launch checksum,
+   terminal PID checksum, ordered PID receipt array, and ordered observed
+   process array. Launch, PID, and result scalar types, ranges, timestamps,
+   canonical paths, counts, checksums, and timeout are fail-closed.
+4. Probe intent, fixed path object, ordered snapshot bindings, snapshot
+   schemas/inventories, every staging operation transition, and the final
+   receipt bindings/checksums are validated against reconstructed normative
+   authority rather than only their checksum chain.
+5. Untouched layouts use `ORIGINAL_UNCHANGED` or
+   `BEFORE_PRESENT_UNCHANGED`. The two `*_ALREADY_RESTORED` alternatives are
+   accepted only from a validated restore journal and preserve its exact
+   absent-or-test quarantine state.
+6. A filtered CIM lookup that returns null now falls back to the immediately
+   constructed `System.Diagnostics.Process` identity. A deterministic private
+   seam covers the no-record path.
+7. Empty executable and port validation tests now expect
+   `CGCE-OPS-PROCESS-QUERY` and `CGCE-OPS-PORT-QUERY`, respectively.
+8. Every injected staging operation, receipt, and final boundary after intent
+   must restore exactly; the test no longer accepts manual recovery and its
+   before-image assertions prove no overwrite.
 
 ## Runtime coverage
 
@@ -96,6 +137,13 @@ The Task 3 runtime tests cover:
 - crashes around each restore operation/receipt/final boundary followed by
   prefix validation and idempotent resume;
 - tampered frozen plan, operation, source path, and before-state rejection;
+- empty first-launch journals, strict completed process-result bindings,
+  deleted PID receipts, and scalar type tampering;
+- missing-intent residue, semantically re-signed stage receipts, tampered
+  restore finals, and post-final live-state drift;
+- untouched versus journal-authorized already-restored alternatives,
+  including exact absent and retained-test quarantine states;
+- null filtered-CIM fallback for an extremely short-lived root process;
 - ambiguous layout and unrelated quarantine preservation;
 - active/preserved foreign artifact blocking; and
 - synthetic child launch intent/root PID/result receipts, non-zero exit,
@@ -103,7 +151,9 @@ The Task 3 runtime tests cover:
 
 ## Static verification
 
-- `jq empty` on both existing Windows schemas: exit 0.
+- `python3 -m json.tool`/equivalent JSON parsing on both existing Windows
+  schemas remains covered by the prior verification; no schema changed in the
+  correction wave.
 - `git diff --check`: exit 0.
 - Runtime/test delimiter audit: parentheses, braces, and brackets balanced.
 - Runtime export audit: exact six approved functions.
@@ -122,7 +172,12 @@ The Task 3 runtime tests cover:
   are no-overwrite, same-volume, receipt-chained, and crash-injected.
 - Confirmed restore validates the longest staging and restoration prefixes,
   frozen plan shape/order/stage bindings, exact operation/path/state matrix,
-  and only continues from the exact expected before or after state.
+  and only continues from the exact expected before or after state. A complete
+  prefix cannot bypass final-receipt or live terminal-state validation.
+- Confirmed a missing stage intent cannot suppress recovery when a run journal,
+  snapshot, original, quarantine, staged probe, or probe-enable line remains.
+- Confirmed completed process results cannot survive deletion, reordering, or
+  mutation of their exact PID receipt chain.
 - Confirmed `Enable-CgceInventoryProbe` is the only probe-final writer and
   returns only its exact path/checksum.
 - Confirmed launch intent is immutable and contains only argument count/digest;
