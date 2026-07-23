@@ -3,7 +3,8 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "TestHarness.ps1")
 
 $tests = @(
-    "Contract.Tests.ps1"
+    "Contract.Tests.ps1",
+    "Files.Tests.ps1"
 )
 foreach ($test in $tests) { . (Join-Path $PSScriptRoot $test) }
 Write-Output "CGCE_WINDOWS_TESTS failures=$script:CgceFailures"
