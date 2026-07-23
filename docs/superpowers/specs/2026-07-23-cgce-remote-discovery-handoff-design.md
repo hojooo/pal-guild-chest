@@ -1,11 +1,12 @@
 # CGCE 원격 Windows Discovery handoff 설계
 
-- 상태: 설계 승인 반영, 서면 검토 대기
+- 상태: Task 11B 이후 full Gate A 설계로 보류
 - 작성일: 2026-07-23
-- 적용 범위: 구현 계획 Task 11의 실 Windows 서버 Discovery 및 Gate A 증거 수집
-- 실행 권한: 없음. 이 문서가 사용자 서면 검토를 통과하고 기존
-  `AGENTS.md`와 구현 계획이 갱신되기 전까지 현재 `1.0` 계약과 기존 Task
-  순서가 authoritative하며, 본문의 `1.1` workflow를 구현·실행하지 않는다.
+- 적용 범위: 구현 계획 Task 11B의 실 Windows 서버 Discovery 및 Gate A 증거 수집
+- 현재 구현 권한: Task 11A는
+  `2026-07-23-cgce-windows-discovery-operator-stage-design.md`만 따른다.
+  본문의 production composition, native bridge, fatal harness, Gate A `1.1`
+  workflow는 Task 11A 범위가 아니며 별도 승인 전 구현·실행하지 않는다.
 
 ## 배경
 
@@ -1150,12 +1151,9 @@ PS5, macOS가 동일 candidate slot의 공통 prefix를 모두 통과해야 하�
 - privilege 정책: 방화벽/service를 자동 변경하지 않고 control evidence를 요구
 - restore 정책: 운영 파일만 복원하고 server/startup/network는 수동 재개
 
-서면 검토에서 확인할 구현 전제는 하나다. production server에서 컴파일하지
-않고 `CGCETrustedIoBridge` Windows x64 DLL을 만들 별도 MSVC Build Tools
-runner가 필요하다. 권장안은 일회성 Windows build VM/CI에서 source와 build
-recipe로 binary를 만들고, production server에는 checksum-pinned binary만
-수동 반입하는 것이다. 이 runner를 제공할 수 없다면 구현 계획 전에 native
-bridge가 필요 없는 다른 composition boundary를 다시 설계해야 한다.
+`CGCETrustedIoBridge`와 별도 Windows build runner는 Task 11B 이후의 optional
+hardening 검토 대상이다. 현재 승인된 Task 11A PowerShell operator 도구에는
+DLL, compiler 또는 별도 build runner가 필요하지 않다.
 
 ## 근거
 

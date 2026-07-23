@@ -1,6 +1,6 @@
 # CGCE requirements traceability
 
-Snapshot date: 2026-07-22. This matrix describes repository evidence at the
+Snapshot date: 2026-07-23. This matrix describes repository evidence at the
 Discovery milestone. `VERIFIED_STATIC` means a local deterministic contract is
 covered by tests; it is not Palworld runtime or client compatibility evidence.
 Every `BLOCKED_GATE_A` or `BLOCKED_GATE_B` row requires primary private evidence
@@ -101,9 +101,10 @@ exists; no row below is a claim about a real Palworld server or client.
 
 ## PRD section 32 spike artifacts
 
-Items 1–16 belong to read-only Gate A (Task 11). Items 17–20 belong to Gate B
-and release certification. The validator's synthetic tests do not satisfy any
-real spike row.
+Items 1–16 belong to read-only Gate A (Task 11B). Task 11A's preliminary
+object/header inventory is non-authoritative and does not satisfy a spike row.
+Items 17–20 belong to Gate B and release certification. The validator's
+synthetic tests do not satisfy any real spike row.
 
 | ID | Status | Required artifact | Evidence / remaining gate |
 |---|---|---|---|

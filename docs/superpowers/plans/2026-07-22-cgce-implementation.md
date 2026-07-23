@@ -445,7 +445,32 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - [ ] **Step 4: Populate requirement traceability** mapping every `FR-*`, `AT-*`, DoD item, and §32 artifact to code/test/manual evidence, with unproven runtime/platform rows marked blocked rather than passed.
 - [ ] **Step 5: Implement the read-only Gate A evidence validator before any mutation module exists.** It accepts only a private/local evidence artifact, validates §32 items 1–16 plus the fatal no-save-or-safe-stop proof, exact report/manifest checksums, UE4SS version, world/revision, reviewer, and timestamp, and emits a checksum-bound acceptance receipt. Raw-ID operational evidence stays ignored/private and is never committed as public release metadata. Prove malformed, partial, unloaded, invoked, mismatched, or public-path evidence cannot produce acceptance and cannot make a release package load mutation code.
 
-### Task 11: Gate A real Windows server discovery
+### Task 11A: Windows Discovery Operator lifecycle
+
+**Authoritative plan:**
+- `docs/superpowers/plans/2026-07-23-cgce-windows-discovery-operator.md`
+
+**Interfaces:**
+- Consumes an owner-controlled Windows Palworld Dedicated Server maintenance
+  window with production auto-restart disabled, external access blocked, all
+  players disconnected, and a full `Saved` backup destination.
+- Produces a restore-verified, private, non-authoritative UE4SS object/header
+  inventory export. It produces no Gate A acceptance, binding manifest,
+  mutation authority, client compatibility evidence, or release authority.
+
+- [ ] **Step 1:** Implement and verify the deterministic macOS source handoff,
+  plain-PowerShell 5.1 synthetic lifecycle, server-global lock, no-overwrite
+  backup/clone/restore, and private export from the authoritative Task 11A plan.
+- [ ] **Step 2:** Run the Windows synthetic suite before touching the real
+  server. If it is unavailable or fails, Task 11A remains incomplete.
+- [ ] **Step 3:** During the approved maintenance window, run one isolated
+  inventory-only pass on the verified clone, restore the exact original and
+  UE4SS before-images, and export the private evidence ZIP.
+- [ ] **Step 4:** Review the inventory on the development host. Task 11B stays
+  blocked until the result is sufficient to design exact, non-guessed probe
+  requests.
+
+### Task 11B: Gate A exact observation and acceptance
 
 **Files:**
 - Create after capture: `CrossplayGuildChestExpander/Scripts/bindings/<revision>.json`
@@ -454,10 +479,13 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - Modify: `docs/requirements-traceability.md`
 
 **Interfaces:**
-- Consumes a user-provided Windows Palworld Dedicated Server with UE4SS and a disposable backed-up test world.
+- Consumes the reviewed Task 11A private inventory plus a user-provided Windows
+  Palworld Dedicated Server with UE4SS and a disposable backed-up test world.
 - Produces PRD §32 evidence items 1–16, a verified fatal-save suppression or immediate safe-shutdown capability, an exact checksum-bound manifest, and a reviewed Gate A acceptance record containing the report checksum, manifest checksum, world ID, game revision, UE4SS version, reviewer, and timestamp. If Palworld exposes no verified way to prevent a subsequent save or force a safe stop after invariant failure, Gate A cannot authorize mutation.
 
-- [ ] **Step 1:** Run the Discovery Build in audit-only mode on the exact target revision.
+- [ ] **Step 1:** Design and run exact-match read-only probe requests from the
+  reviewed inventory; do not guess symbols or unlock production composition
+  from raw inventory alone.
 - [ ] **Step 2:** Inspect runtime types/functions and record exact paths/signatures for all 16 evidence fields, including empty-slot type, resize/add-slot candidate, dirty/replication candidates, both hooks, and in-use detection. Additionally discover and safely prove a fatal path that suppresses later normal/autosave or immediately stops the server without saving. Reject missing, ambiguous, fuzzy, unloaded, or mismatched candidates; absence of the fatal capability blocks mutation authorization.
 - [ ] **Step 3:** Verify three-way guild/container ownership on representative guilds and prove general containers are excluded.
 - [ ] **Step 4:** Add the exact manifest, run contract tests, independently review the report, and create a checksum-bound `gate-a-acceptance.json` through Task 10's already-present read-only validator. Mutation source is not created, packaged, or loaded until this acceptance file passes automated validation.
@@ -541,7 +569,9 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 
 - Every P0/P1 functional requirement maps to Tasks 3–14.
 - Every pre-discovery synthetic/unit test category maps to Tasks 1–10.
-- Tasks 1–10 contain no production mutation surface. Task 11 is the mandatory real-server Gate A.
+- Tasks 1–10 contain no production mutation surface. Task 11A only prepares and
+  restores an isolated inventory run; Task 11B is the mandatory real-server
+  Gate A.
 - Mutation code begins only in Task 12 after a machine-validated Gate A acceptance record exists.
 - Actual save/reload, removal, performance, PS5, and macOS claims remain explicitly unproven until Task 14 produces primary evidence.
 - The apparent §32 circularity is resolved operationally as Gate A (items 1–16, read-only discovery) followed by Gate B (items 17–20, disposable test-world mutation/certification); production mutation remains disabled between them.
