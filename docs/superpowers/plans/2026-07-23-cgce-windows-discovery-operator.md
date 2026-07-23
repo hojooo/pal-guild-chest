@@ -53,7 +53,7 @@ Read-CgceJsonObject -Path <string> -> PSCustomObject
 Read-CgceJsonStringArray -Path <string> -> string[]
 Get-CgceSha256 -Path <string> -> lowercase string
 Assert-CgceControlEvidence -EvidencePath <string> -ExpectedFileChecksum <string> -ExpectedBundleChecksum <string> -NowUtc <DateTime> -> PSCustomObject
-Assert-CgceHandoffSource -HandoffRoot <string> -ManifestPath <string> -> void
+Assert-CgceHandoffSource -HandoffRoot <string> -ManifestPath <string> -ExpectedManifestChecksum <string> -> void
 New-CgceRunState -RunId <string> -MaintenanceId <string> -Paths <PSCustomObject> -> PSCustomObject
 Read-CgceRunState -RunRoot <string> -RunId <string> -> PSCustomObject
 Set-CgceRunPhase -State <PSCustomObject> -ExpectedPhase <string> -NextPhase <string> -> PSCustomObject
@@ -88,11 +88,12 @@ Assert-CgceRecoveryMatrix -State <PSCustomObject> [-Intent <PSCustomObject>] -> 
 
 Assert-CgceNoServerActivity -ExecutablePaths <string[]> -Ports <int[]> [-ReceiptRoot <string>] -> void
 Assert-CgceNoForeignRunArtifacts -ServerRoot <string> -Ue4ssRoot <string> -RunId <string> -> void
+Assert-CgceInventoryProbeStaged -Paths <PSCustomObject> -RunDirectory <string> -RunId <string> -ExpectedFinalReceiptChecksum <string> [-ExpectedLaunchReceiptChecksum <string>] -> void
 Assert-CgceRunMarker -State <PSCustomObject> [-AllowCompleted] -> void
 Assert-CgceServerArguments -Arguments <string[]> -> void
 Enable-CgceInventoryProbe -Ue4ssRoot <string> -ProbeSource <string> -RunDirectory <string> -RunId <string> -Paths <PSCustomObject> -> PSCustomObject
 Restore-CgceInventoryProbe -Paths <PSCustomObject> -RunDirectory <string> -RunId <string> [-ExpectedFinalReceiptChecksum <string>] -> void
-Invoke-CgceChildProcess -Executable <string> -ExpectedExecutableChecksum <string> -AllowedExecutablePaths <string[]> -Arguments <string[]> -ReceiptRoot <string> -TimeoutSeconds <int> -> PSCustomObject
+Invoke-CgceChildProcess -Executable <string> -ExpectedExecutableChecksum <string> -AllowedExecutablePaths <string[]> -Arguments <string[]> -ReceiptRoot <string> -TimeoutSeconds <int> -ControlValidUntilUtc <DateTime|string> -PreLaunchValidation <scriptblock> -> PSCustomObject
 ```
 
 `Write-CgceJsonAtomic` is the public create-only JSON writer; it has no replace
@@ -442,15 +443,19 @@ object level. Its exact top-level keys are:
 ```text
 schema_version,kind,revision,run_id,maintenance_id,phase,outcome,
 created_at_utc,updated_at_utc,bundle_checksum,control_evidence_checksum,
-palserver_executable,palserver_executable_checksum,ue4ss_version,
+source_manifest_checksum,palserver_executable,palserver_executable_checksum,ue4ss_version,
 server_process_paths,ue4ss_dll_checksum,listener_ports,paths,inventory_checksums,
 probe_receipt_checksum,process_launch_receipt_checksum,
 process_result_receipt_checksum,capture_inventory_checksum,
 errors
 ```
 
-All keys are always present; not-yet-produced receipt/checksum values are
-`null`. `revision` starts at `0` and increments exactly once per successful
+All keys are always present. `source_manifest_checksum` is required strict
+lowercase SHA-256 in every committed genesis/current state and is immutable;
+only the fresh in-memory object returned by `New-CgceRunState` may hold it as
+`null` before Prepare assigns the validated manifest checksum. Other
+not-yet-produced receipt/checksum values are `null`. `revision` starts at `0`
+and increments exactly once per successful
 compare-and-swap state replacement. `inventory_checksums` has exact keys
 `original,backup,clone,restored`. The `paths` object has these exact keys:
 
@@ -707,7 +712,8 @@ git commit -m "feat: verify Windows discovery filesystem copies"
   `CGCE-OPS-CAPTURE-MISSING`, `CGCE-OPS-PROCESS-QUERY`,
   `CGCE-OPS-PORT-QUERY`, `CGCE-OPS-PROCESS-UNLISTED`,
   `CGCE-OPS-PROCESS-RECEIPT`, `CGCE-OPS-PROBE-RECEIPT`,
-  `CGCE-OPS-FOREIGN-ARTIFACT`, `CGCE-OPS-MANUAL-RECOVERY`.
+  `CGCE-OPS-FOREIGN-ARTIFACT`, `CGCE-OPS-MANUAL-RECOVERY`,
+  `CGCE-OPS-CONTROL-EXPIRED`.
 
 #### Fixed Task 3 runtime journal contract
 
@@ -748,6 +754,7 @@ may derive only these fixed journal/snapshot children:
   000-launch.json
   001-pid.json ... 998-pid.json
   999-result.json
+  manual-recovery-required.json
 ```
 
 This allowlist is scoped to Task 3 Runtime-owned snapshots and journals.
@@ -926,7 +933,8 @@ receipt. It has exact keys:
 schema_version,kind,run_id,sequence,created_at_utc,
 executable_path,executable_sha256,working_directory,
 allowed_executable_path_count,allowed_executable_paths_sha256,
-argument_count,arguments_sha256,timeout_seconds,previous_receipt_sha256
+argument_count,arguments_sha256,timeout_seconds,control_valid_until_utc,
+previous_receipt_sha256
 ```
 
 It is written, strictly read back, and checksum-verified before
@@ -941,13 +949,31 @@ previous_receipt_sha256
 ```
 
 PID identity is exact PID + canonical executable path + UTC creation
-`FileTime`. `999-result.json` has exact keys:
+`FileTime`. A descendant's numeric `ParentProcessId` is accepted only when it
+matches exactly one already observed parent identity and the descendant
+creation `FileTime` is not earlier than that exact parent's creation
+`FileTime`. Receipt readers enforce the same unique-parent and temporal
+ordering invariants, preventing a stale `ParentProcessId` from being joined to
+a reused PID. `999-result.json` has exact keys:
 
 ```text
 schema_version,kind,run_id,sequence,launch_receipt_sha256,
 previous_receipt_sha256,started_at_utc,exit_at_utc,exit_code,
 observed_processes,pid_receipts
 ```
+
+If a descendant PID/parent is visible but its executable or creation identity
+cannot be read, Runtime cannot safely create a normal PID identity receipt. It
+instead writes the sole no-overwrite
+`manual-recovery-required.json` sentinel with exact keys
+`schema_version,kind,run_id,reason,pid,parent_pid,observed_at_utc,
+previous_receipt_sha256`, where `reason=IDENTITY_UNREADABLE`. Receipt-aware
+activity validation strictly revalidates this sentinel and always returns
+`CGCE-OPS-MANUAL-RECOVERY`; automatic restore cannot erase or bypass that
+uncertainty. The same durable barrier is mandatory before failing on a reused
+numeric PID with a different identity or when the `001..998` identity receipt
+capacity cannot preserve another observed process; neither ambiguity may end
+as an evidence-free process error.
 
 Each observed-process item is exactly
 `sequence,pid,parent_pid,executable_path,creation_time_utc,
@@ -966,6 +992,19 @@ configured endpoint blocking. During one launched run, ancestry polling
 enforces the allowlist for every descendant actually observed from the known
 root. It does not claim kernel-enforced containment or complete history for an
 extremely short-lived descendant between polling samples.
+
+`Invoke-CgceChildProcess` requires a 1..86400 second timeout whose full window
+fits inside the exact control-evidence validity deadline. It binds that
+deadline into the immutable launch receipt, strictly reads the receipt back
+before launch, and rechecks the deadline immediately before `Start-Process`.
+Argument and executable-path arrays contain at most 4096 entries and each
+token/path is at most 4096 characters. Waiting uses only monotonic-stopwatch
+bounded `WaitForExit` slices of at most 100 ms, continuing the ancestry snapshot
+loop until the root and every observed identity are inactive, followed by one
+final identity sweep. An observed unlisted descendant is first persisted in the
+gapless PID chain and only then rejected; partial-chain readers retain that
+identity for recovery liveness checks, while a completed result can contain
+only allowlisted identities.
 
 - [ ] **Step 1: Write failing runtime tests**
 
@@ -1200,6 +1239,10 @@ deactivation과 clone activation을 state-bound operation으로 만든다.
   still held. `Write-CgceRunState` and `Block-CgceRunState` both reject
   same-phase blocking at `RESTORING`; Task 6's intent-bound writer exclusively
   owns its legal revision + 2 caught-failure form.
+- `source_manifest_checksum` is also immutable genesis/current identity.
+  Missing, null, non-lowercase, LF/CRLF-suffixed, genesis/current-drifted, or
+  caller-mutated CAS values fail closed. `New-CgceRunState` alone returns this
+  field as null; Prepare must assign it before either state file is written.
 - Task 4 does not generalize recovery transitions. Task 6 must implement a
   separate recovery compare-and-swap contract for its cross-phase restore
   cases instead of weakening the normal writer.
@@ -1231,9 +1274,10 @@ deactivation과 clone activation을 state-bound operation으로 만든다.
   recovery belongs only to Task 6.
 - `Enable-CgceInventoryProbe` is the sole writer of its final receipt.
   Prepare only validates the returned path/checksum and records the checksum.
-  Prepare captures the validated source-manifest checksum before the lock and
-  rechecks both that exact checksum and the handoff contents under the lock
-  immediately before and after probe staging.
+  Prepare captures the validated source-manifest checksum before the lock,
+  assigns it to `source_manifest_checksum` before genesis, and rechecks the
+  state-bound exact checksum plus the handoff contents under the lock before
+  genesis and immediately before and after probe staging.
 - Entry-point exceptions normalize the first boundary-anchored
   `CGCE-OPS-*` token, or `CGCE-OPS-BLOCKED` when none exists. Every helper
   return and incidental success-stream value is suppressed so the child
@@ -1370,7 +1414,12 @@ $validated = Assert-CgceControlEvidence `
     -ExpectedBundleChecksum $BundleSha256 `
     -NowUtc ([DateTime]::UtcNow)
 
-Assert-CgceHandoffSource -HandoffRoot $HandoffRoot -ManifestPath $SourceManifestPath
+$candidateSourceManifestChecksum = Get-CgceSha256 -Path $SourceManifestPath
+Assert-CgceHandoffSource `
+    -HandoffRoot $HandoffRoot `
+    -ManifestPath $SourceManifestPath `
+    -ExpectedManifestChecksum $candidateSourceManifestChecksum
+$sourceManifestChecksum = $candidateSourceManifestChecksum
 if ($validated.run_id -cne $RunId) {
     throw "CGCE-OPS-ID control/run ID mismatch"
 }
@@ -1416,6 +1465,7 @@ $originalChecksum = Write-CgceInventory `
 $state = New-CgceRunState -RunId $RunId -MaintenanceId $validated.maintenance_id -Paths $paths
 $state.bundle_checksum = $BundleSha256
 $state.control_evidence_checksum = $ControlEvidenceSha256
+$state.source_manifest_checksum = $sourceManifestChecksum
 $state.palserver_executable = $ServerExecutable
 $state.palserver_executable_checksum = Get-CgceSha256 -Path $ServerExecutable
 $state.server_process_paths = @($validated.server_process_paths)
@@ -1524,17 +1574,26 @@ git commit -m "feat: prepare verified Windows discovery clone"
 **Files:**
 - Create: `tools/windows-discovery/Invoke-CgceDiscovery.ps1`
 - Create: `tests/windows/fixtures/FakePalServer.cmd`
+- Modify: `tools/windows-discovery/modules/CgceDiscovery.Contract.psm1`
+- Modify: `tools/windows-discovery/schemas/run-state.schema.json`
+- Modify: `tools/windows-discovery/Prepare-CgceDiscovery.ps1`
+- Modify: `tests/windows/Contract.Tests.ps1`
 - Modify: `tests/windows/Runtime.Tests.ps1`
 - Modify: `tests/windows/Lifecycle.Tests.ps1`
+- Modify: `tests/windows/TestHarness.ps1`
 
 **Interfaces:**
 - Consumes: `PROBE_STAGED` state and a JSON dense string array of arguments.
+- Consumes immutable `source_manifest_checksum` from
+  `run-state.genesis.json`; it does not accept `HandoffRoot` or manifest path
+  on the CLI.
 - Produces: child PID/create/exit receipt, object/header capture inventory,
   phase `CAPTURED`.
 - Error codes: `CGCE-OPS-PROCESS-EXIT`, `CGCE-OPS-CAPTURE-MISSING`,
-  `CGCE-OPS-PHASE`, `CGCE-OPS-CHECKSUM`.
+  `CGCE-OPS-PHASE`, `CGCE-OPS-CHECKSUM`,
+  `CGCE-OPS-CONTROL-EXPIRED`.
 
-- [ ] **Step 1: Write failing argument/process/capture tests**
+- [x] **Step 1: Write failing argument/process/capture tests**
 
 ```powershell
 Invoke-CgceTest "invoke captures outputs only after child exit" {
@@ -1555,13 +1614,82 @@ The fake server fixture receives a synthetic UE4SS root, writes
 `UE4SS_ObjectDump.txt`, `CXXHeaderDump\Synthetic.hpp`, and a fresh `UE4SS.log`
 containing `CGCE_INVENTORY_COMPLETE ALL`, then exits `0`.
 
-- [ ] **Step 2: Run RED**
+Before the process test, add Contract and lifecycle RED cases proving:
+
+- the fresh constructor contains `source_manifest_checksum=$null`, while every
+  committed genesis/current state rejects a missing, null, uppercase, or
+  LF/CRLF-suffixed value;
+- genesis/current identity and normal state CAS reject any checksum drift
+  without changing state bytes;
+- a self-consistent handoff whose payload and manifest were both changed
+  (re-signed tree) is rejected against the stored checksum;
+- Invoke derives the tree from `$PSScriptRoot`, accepts a relocated copy with
+  identical manifest/payload bytes (same verified bytes may be relocated), and
+  rejects any case where the handoff tree and RunRoot must not overlap;
+- a copied Contract module that creates a sentinel side effect, together with
+  a recomputed payload record and manifest, is rejected before import. Assert
+  the sentinel is absent to prove no module side effect.
+
+- [x] **Step 2: Run RED**
 
 Run the Windows suite. Expected: invoke script missing.
 
-- [ ] **Step 3: Implement exact child invocation**
+- [x] **Step 3: Implement exact child invocation**
+
+Invoke has a small built-in bootstrap trust base before its normal module
+imports. `Get-CgceInvokeBootstrap` accepts only
+`$PSScriptRoot`, `$MyInvocation.MyCommand.Path`, `RunRoot`, and `RunId`. It:
+
+1. validates the RunId with a true-end lowercase regex and derives
+   `<handoff>\tools\windows-discovery\Invoke-CgceDiscovery.ps1`, handoff root,
+   `source-manifest.sha256`, and
+   `<RunRoot>\<RunId>\run-state.genesis.json`;
+2. rejects reparse components, a missing/non-leaf genesis or manifest, and any
+   equal/ancestor/descendant relationship between the derived handoff tree and
+   RunRoot;
+3. reads at most 1 MiB of genesis bytes, rejects UTF-8 BOM, decodes with
+   `New-Object System.Text.UTF8Encoding($false, $true)`, and requires exactly
+   one raw case-sensitive `"source_manifest_checksum"` property token plus
+   exactly one case-sensitive parsed top-level property whose value is one
+   lowercase 64-hex token;
+4. hashes the current manifest with built-in .NET SHA-256 and compares it to
+   that immutable genesis value before importing any handoff module;
+5. parses the already-authorized manifest text sufficiently to find exactly
+   one normalized record for each Common/Contract/Files/Runtime module, then
+   verifies each exact no-reparse leaf and SHA-256 before import.
+
+The bootstrap must not call a function from the handoff tree. It captures every
+built-in command return so failure emits no incidental success stream. The
+source manifest is content authority rather than location authority: same
+verified bytes may be relocated, but the handoff tree and RunRoot must not
+overlap. The entry-point script itself is the bootstrap trust base; the stated
+single-host threat model excludes a malicious administrator replacing the
+already executing script.
 
 ```powershell
+$bootstrap = Get-CgceInvokeBootstrap `
+    -ScriptRoot $PSScriptRoot `
+    -ScriptPath $MyInvocation.MyCommand.Path `
+    -BoundRunRoot $RunRoot `
+    -BoundRunId $RunId
+
+Import-CgceInvokeVerifiedModule `
+    -Path $bootstrap.contract_module `
+    -Name "CgceDiscovery.Contract"
+Import-CgceInvokeVerifiedModule `
+    -Path $bootstrap.files_module `
+    -Name "CgceDiscovery.Files"
+Import-CgceInvokeVerifiedModule `
+    -Path $bootstrap.runtime_module `
+    -Name "CgceDiscovery.Runtime"
+Import-CgceInvokeVerifiedModule `
+    -Path $bootstrap.common_module `
+    -Name "CgceDiscovery.Common"
+
+Assert-CgceHandoffSource `
+    -HandoffRoot $bootstrap.handoff_root `
+    -ManifestPath $bootstrap.manifest_path `
+    -ExpectedManifestChecksum $bootstrap.manifest_checksum
 $provisional = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
 $lock = Enter-CgceExclusiveLock -ServerRoot $provisional.paths.server_root -RunId $RunId
 $statePath = $null
@@ -1573,7 +1701,20 @@ if ($state.phase -ne "PROBE_STAGED" -or $state.outcome -ne "ACTIVE") {
     throw "CGCE-OPS-PHASE invoke requires PROBE_STAGED"
 }
 Assert-CgceRunMarker -State $state
+if ($state.source_manifest_checksum -cne
+        $bootstrap.manifest_checksum) {
+    throw "CGCE-OPS-CHECKSUM source manifest authority drift"
+}
+Assert-CgceHandoffSource `
+    -HandoffRoot $bootstrap.handoff_root `
+    -ManifestPath $bootstrap.manifest_path `
+    -ExpectedManifestChecksum $state.source_manifest_checksum
 
+$null = Assert-CgceInventoryProbeStaged `
+    -Paths $state.paths `
+    -RunDirectory $state.paths.run_directory `
+    -RunId $RunId `
+    -ExpectedFinalReceiptChecksum $state.probe_receipt_checksum
 $arguments = Read-CgceJsonStringArray -Path $ArgumentsPath
 Assert-CgceServerArguments -Arguments $arguments
 Assert-CgceEqualCanonicalPath -Expected $state.palserver_executable -Actual $ServerExecutable
@@ -1583,26 +1724,55 @@ if ((Get-CgceSha256 -Path $ServerExecutable) -ne $state.palserver_executable_che
 if ((Get-CgceSha256 -Path $state.paths.ue4ss_dll) -ne $state.ue4ss_dll_checksum) {
     throw "CGCE-OPS-CHECKSUM UE4SS DLL drift"
 }
-Assert-CgceControlEvidence `
+$control = Assert-CgceControlEvidence `
     -EvidencePath $state.paths.control_evidence `
     -ExpectedFileChecksum $state.control_evidence_checksum `
     -ExpectedBundleChecksum $state.bundle_checksum `
-    -NowUtc ([DateTime]::UtcNow) | Out-Null
+    -NowUtc ([DateTime]::UtcNow)
+Assert-CgceInvokeControlBinding -State $state -Control $control
 Assert-CgceNoServerActivity `
     -ExecutablePaths @($state.server_process_paths) `
     -Ports @($state.listener_ports) `
     -ReceiptRoot $state.paths.process_receipts
+Assert-CgceHandoffSource `
+    -HandoffRoot $bootstrap.handoff_root `
+    -ManifestPath $bootstrap.manifest_path `
+    -ExpectedManifestChecksum $state.source_manifest_checksum
 
 $state = Set-CgceRunPhase `
     -State $state -ExpectedPhase "PROBE_STAGED" -NextPhase "RUNNING"
 Write-CgceRunState -State $state -StatePath $statePath -ExpectedPhase "PROBE_STAGED"
+$state = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
+Assert-CgceRunMarker -State $state
+Assert-CgceHandoffSource `
+    -HandoffRoot $bootstrap.handoff_root `
+    -ManifestPath $bootstrap.manifest_path `
+    -ExpectedManifestChecksum $state.source_manifest_checksum
+$controlValidUntil = [DateTime]::ParseExact(
+    $control.valid_until_utc,
+    "yyyy-MM-dd'T'HH:mm:ss'Z'",
+    [System.Globalization.CultureInfo]::InvariantCulture,
+    [System.Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [System.Globalization.DateTimeStyles]::AdjustToUniversal
+)
+$preLaunchValidation = {
+    param($LaunchReceiptChecksum)
+    Assert-CgceInvokePreLaunchAuthority `
+        -Bootstrap $bootstrap `
+        -BoundRunRoot $RunRoot `
+        -BoundRunId $RunId `
+        -ExpectedExecutable $ServerExecutable `
+        -LaunchReceiptChecksum $LaunchReceiptChecksum
+}.GetNewClosure()
 $processRun = Invoke-CgceChildProcess `
     -Executable $ServerExecutable `
     -ExpectedExecutableChecksum $state.palserver_executable_checksum `
     -AllowedExecutablePaths @($state.server_process_paths) `
     -Arguments $arguments `
     -ReceiptRoot $state.paths.process_receipts `
-    -TimeoutSeconds $TimeoutSeconds
+    -TimeoutSeconds $TimeoutSeconds `
+    -ControlValidUntilUtc $controlValidUntil `
+    -PreLaunchValidation $preLaunchValidation
 
 if ($processRun.result.exit_code -ne 0) {
     throw "CGCE-OPS-PROCESS-EXIT non-zero child exit"
@@ -1646,12 +1816,33 @@ Write-CgceRunState -State $state -StatePath $statePath -ExpectedPhase "RUNNING"
 
 As in prepare, all work after lock acquisition is inside `try/finally`; the
 state is re-read under the lock before checking phase or paths.
+Immediately before the `RUNNING` CAS and again immediately before
+entering the launch helper, Invoke re-hashes the derived manifest against
+`state.source_manifest_checksum` and runs the full handoff validator. This
+closes drift after bootstrap; neither check accepts a caller-supplied handoff
+path.
 
 `Invoke-CgceChildProcess` re-hashes the executable against
 `ExpectedExecutableChecksum` immediately before launch, sets the working
 directory to the executable's parent, and writes the immutable no-overwrite
 pre-launch intent at `process_launch_receipt` before
 `Start-Process -PassThru`. It never replaces that file with PID data.
+The helper also requires the full timeout to fit inside
+`control_valid_until_utc`, binds that deadline into the launch intent, reads the
+intent back semantically, and rechecks both its checksum and the deadline
+before process creation. Its mandatory `PreLaunchValidation` callback is
+output-suppressed and is the final authority action before `Start-Process`;
+Runtime passes it the just-verified immutable launch-receipt checksum. Invoke
+supplies a closed-over callback that freshly re-reads `RUNNING` state, marker,
+the full probe journal/live matrix (requiring that exact launch receipt as the
+sole process-journal child), control, process inactivity,
+original/backup/clone inventories, PalServer/UE4SS hashes, and the complete
+handoff source.
+Runtime serializes accepted tokens with the standard Windows backslash/quote
+algorithm and passes one explicit native argument line; for a zero-token array
+it omits `ArgumentList` entirely. The quoted executable plus argument line must
+fit within the 32,766-character Windows process command-line bound before the
+launch intent is written.
 Immediately after launch it writes the root identity to `001-pid.json`; each
 newly observed descendant gets the next gapless chained no-overwrite
 PID/path/creation-time receipt through `998-pid.json`. Before launch it requires
@@ -1660,8 +1851,20 @@ it canonicalizes each descendant image and blocks before success if any image
 is absent from that same bound allowlist. The final
 `process_result_receipt` records exit UTC/code and the full observed PID set.
 During the bounded wait it recursively tracks descendants through
-`Win32_Process.ParentProcessId`; success requires the root and every observed
-descendant to exit, followed by the process/listener check shown above.
+`Win32_Process.ParentProcessId`, but joins a candidate only to one unique
+observed parent whose creation `FileTime` is not later than the candidate's;
+it uses at most 100 ms monotonic bounded wait slices and refreshes the process
+snapshot between slices. Success requires the root and every observed
+descendant to exit, followed by a quiescence identity sweep and the
+process/listener check shown above. If that sweep first discovers a live
+descendant, it re-enters the same bounded monitoring loop with the remaining
+timeout/control/launch deadline; success is impossible until a later sweep
+finds no live observed identity. An unlisted descendant gets a durable PID
+receipt before the allowlist verdict, so a partial failed chain still
+contributes to restore liveness checks.
+If the next live identity reuses an already receipted numeric PID or cannot fit
+within the bounded receipt sequence, Runtime first writes the chained
+manual-recovery sentinel and then fails with `CGCE-OPS-MANUAL-RECOVERY`.
 
 The state reaches `RUNNING` and the immutable launch intent exists before
 launch, so a crash can never replay `Start-Process`. Preflight blocks exact
@@ -1677,19 +1880,28 @@ it throws a stable error; the entry point marks the run blocked and instructs
 the operator to stop the child with the normal server shutdown procedure. It
 does not restore while any tracked process or listener remains alive.
 
-- [ ] **Step 4: Prove blocked behavior**
+- [x] **Step 4: Prove blocked behavior**
 
 Add tests for argument JSON that is not a dense string array, public/secret
 arguments, executable path/checksum drift, child non-zero exit, missing dumps,
 missing completion marker, timeout, and phase replay. Assert capture contains
 only the exact object file/header tree and no test changes the inactive
-original. Add a child-spawns-grandchild fixture, a still-listening descendant
-fixture, and argument cases with spaces/quotes/metacharacters to prove the
-process and quoting boundaries. Inject crashes after `RUNNING`, after launch
+original. Add a child-spawns-grandchild fixture and a still-listening
+descendant fixture. Prove accepted argument tokens round-trip as distinct
+native argv entries. Because the public validator deliberately rejects spaces,
+quotes, shell metacharacters, empty tokens, and trailing-whitespace ambiguity,
+assert those vectors are blocked at the public boundary; separately round-trip
+them through the private standard Windows command-line encoder with an
+argv-capture fixture as defense-in-depth. Inject crashes after `RUNNING`, after launch
 intent, after process creation, after each PID receipt, and before result
 receipt; prove Invoke never launches twice and Restore blocks until all exact
 process paths, durable PIDs, and ports are inactive. Also prove incomplete
 control path attestation and an observed unlisted descendant block the run.
+Also exercise missing/invalid `source_manifest_checksum`, current/genesis
+identity drift, relocated identical bytes, handoff/RunRoot overlap, plain
+payload drift, and a re-signed module tree. The re-signed case must put a
+sentinel write at module top level and prove checksum failure plus no module
+side effect before any handoff import.
 
 - [ ] **Step 5: Run GREEN and commit**
 
@@ -1745,6 +1957,12 @@ PalServer가 멈춘 뒤 original을 active path로 복원한다.
 - Produces: quarantined test clone/probe, exact restored original inventory,
   phase `RESTORED`; preserves `BLOCKED` outcome when the run failed.
 - Error code: `CGCE-OPS-MANUAL-RECOVERY`.
+- Automatic recovery is forbidden if any persisted state error code is
+  `CGCE-OPS-MANUAL-RECOVERY` or if
+  `receipts\process\manual-recovery-required.json` exists. Restore validates
+  both conditions under the server lock before creating a recovery intent and
+  again immediately before every mutation; either condition returns the same
+  stable manual-recovery error without changing state or filesystem bytes.
 - Internal activity-check ownership: Contract adds an unexported,
   state-derived `Assert-CgceRecoveryStateInactivity` used by all three recovery
   state writers. It re-reads the exact state-bound executable paths, listener
@@ -1814,7 +2032,11 @@ PalServer가 멈춘 뒤 original을 active path로 복원한다.
   precheck is insufficient.
   RED tests must inject process and listener activity after each preceding
   check and prove that the next intent/state/receipt/inventory/move/marker
-  mutation does not occur. Keep both recovery edges absent from
+  mutation does not occur. Also RED-test both manual-recovery barriers
+  independently: a state error without a sentinel and a valid no-overwrite
+  sentinel without a persisted state error must each prevent intent creation,
+  state CAS, receipt creation, inventory creation, tree moves, and marker
+  completion. Keep both recovery edges absent from
   `Set-CgceRunPhase`, `Write-CgceRunState`, and its normal checkpoint-field
   validator; only the three fixed-purpose recovery exports may call the private
   state CAS for those phase changes.
@@ -2302,8 +2524,10 @@ Expected: missing builder/verifier.
 The PowerShell `Assert-CgceHandoffSource` validator must parse the bundled
 `source-manifest.sha256` as strict lowercase SHA-256 plus normalized relative
 path records, reject duplicates/path escapes/unknown or missing entries, and
-hash every extracted artifact source before prepare can create run state. Add
-tampered, extra-entry, missing-entry, duplicate, and path-escape tests.
+first require its own file SHA-256 to equal `ExpectedManifestChecksum`. It
+hashes every extracted artifact source before prepare can create run state.
+Add tampered, re-signed, extra-entry, missing-entry, duplicate, and path-escape
+tests.
 
 - [ ] **Step 4: Implement the deterministic builder**
 
@@ -2492,8 +2716,12 @@ if ($bundleSha256 -ne $expectedBundleSha256) { throw "handoff checksum mismatch"
 if (Test-Path -LiteralPath $extractionRoot) { throw "handoff extraction destination exists" }
 Expand-Archive -LiteralPath $bundle -DestinationPath $extractionRoot
 $sourceManifestPath = Join-Path $handoffRoot "source-manifest.sha256"
+$sourceManifestSha256 = (Get-FileHash -LiteralPath $sourceManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 Import-Module (Join-Path $handoffRoot "tools\windows-discovery\modules\CgceDiscovery.Contract.psm1") -Force
-Assert-CgceHandoffSource -HandoffRoot $handoffRoot -ManifestPath $sourceManifestPath
+Assert-CgceHandoffSource `
+    -HandoffRoot $handoffRoot `
+    -ManifestPath $sourceManifestPath `
+    -ExpectedManifestChecksum $sourceManifestSha256
 
 $controlEvidenceSha256 = (Get-FileHash -LiteralPath $controlEvidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
 

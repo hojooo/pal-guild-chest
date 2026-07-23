@@ -338,12 +338,13 @@ function Get-CgcePrepareAuthority(
         $state.probe_receipt_checksum) {
         throw "CGCE-OPS-CHECKSUM probe receipt file drift"
     }
-    if ((Get-CgceSha256 -Path $ManifestPath) -cne $ManifestChecksum) {
-        throw "CGCE-OPS-CHECKSUM source manifest drift"
+    if ($state.source_manifest_checksum -cne $ManifestChecksum) {
+        throw "CGCE-OPS-CHECKSUM source manifest authority drift"
     }
     Assert-CgceHandoffSource `
         -HandoffRoot $HandoffRoot `
-        -ManifestPath $ManifestPath
+        -ManifestPath $ManifestPath `
+        -ExpectedManifestChecksum $state.source_manifest_checksum
     $control = Assert-CgceControlEvidence `
         -EvidencePath $state.paths.control_evidence `
         -ExpectedFileChecksum $state.control_evidence_checksum `
@@ -403,10 +404,13 @@ try {
         -ExpectedFileChecksum $ControlEvidenceSha256 `
         -ExpectedBundleChecksum $BundleSha256 `
         -NowUtc ([DateTime]::UtcNow)
+    $candidateSourceManifestChecksum = Get-CgceSha256 `
+        -Path $SourceManifestPath
     Assert-CgceHandoffSource `
         -HandoffRoot $HandoffRoot `
-        -ManifestPath $SourceManifestPath
-    $sourceManifestChecksum = Get-CgceSha256 -Path $SourceManifestPath
+        -ManifestPath $SourceManifestPath `
+        -ExpectedManifestChecksum $candidateSourceManifestChecksum
+    $sourceManifestChecksum = $candidateSourceManifestChecksum
     if ($validated.run_id -cne $RunId) {
         throw "CGCE-OPS-ID control/run ID mismatch"
     }
@@ -446,6 +450,10 @@ try {
     $lock = Enter-CgceExclusiveLock `
         -ServerRoot $paths.server_root `
         -RunId $RunId
+    Assert-CgceHandoffSource `
+        -HandoffRoot $HandoffRoot `
+        -ManifestPath $SourceManifestPath `
+        -ExpectedManifestChecksum $sourceManifestChecksum
     if (Test-Path -LiteralPath $paths.run_directory) {
         throw "CGCE-OPS-STATE-EXISTS final run directory exists"
     }
@@ -491,6 +499,7 @@ try {
         -Paths $paths
     $state.bundle_checksum = $BundleSha256
     $state.control_evidence_checksum = $ControlEvidenceSha256
+    $state.source_manifest_checksum = $sourceManifestChecksum
     $state.palserver_executable = $ServerExecutable
     $state.palserver_executable_checksum = $palserverChecksum
     $state.server_process_paths = [object[]]@($validated.server_process_paths)
@@ -498,6 +507,13 @@ try {
     $state.ue4ss_dll_checksum = $validated.ue4ss_dll_sha256
     $state.listener_ports = [object[]]@($validated.listener_ports)
     $state.inventory_checksums.original = $originalChecksum
+    if ($state.source_manifest_checksum -cne $sourceManifestChecksum) {
+        throw "CGCE-OPS-CHECKSUM source manifest authority drift"
+    }
+    Assert-CgceHandoffSource `
+        -HandoffRoot $HandoffRoot `
+        -ManifestPath $SourceManifestPath `
+        -ExpectedManifestChecksum $state.source_manifest_checksum
     Write-CgceJsonAtomic -Value $state -Path $paths.genesis_state
     $null = Copy-CgceFileVerified `
         -Source $paths.genesis_state `

@@ -100,6 +100,7 @@ end
             "Assert-CgceBootstrapTree",
             "Assert-CgceBootstrapLeaf",
             "Import-CgceVerifiedBootstrapModule",
+            "$state.source_manifest_checksum = $sourceManifestChecksum",
             "Initialize-CgceRunLayout",
             "Assert-CgceDiscoveryDiskCapacity",
             "Write-CgceActiveRunMarker",
@@ -187,6 +188,10 @@ end
             state_schema.properties.maintenance_id,
             34,
             "^m-[0-9a-f]{32}$"
+        )
+        a.equal(
+            "#/definitions/checksum",
+            state_schema.properties.source_manifest_checksum["$ref"]
         )
         assert_fixed_length(
             state_schema.definitions.checksum,
@@ -313,6 +318,100 @@ end
             "ExpectedExistingSha256",
         }) do
             a.equal(nil, plan:find(forbidden, 1, true))
+        end
+    end)
+
+    it("binds invoke bootstrap to immutable source-manifest authority", function()
+        local contract = read(
+            "tools/windows-discovery/modules/CgceDiscovery.Contract.psm1"
+        )
+        for _, required in ipairs({
+            "[string]$ExpectedManifestChecksum",
+            "source_manifest_checksum",
+            "source manifest authority drift",
+        }) do
+            a.equal(true, contract:find(required, 1, true) ~= nil)
+        end
+
+        local spec = read(
+            "docs/superpowers/specs/"
+                .. "2026-07-23-cgce-windows-discovery-operator-stage-design.md"
+        )
+        local plan = read(
+            "docs/superpowers/plans/"
+                .. "2026-07-23-cgce-windows-discovery-operator.md"
+        )
+        for _, document in ipairs({ spec, plan }) do
+            for _, required in ipairs({
+                "source_manifest_checksum",
+                "run-state.genesis.json",
+                "before importing any handoff module",
+                "same verified bytes may be relocated",
+                "handoff tree and RunRoot must not overlap",
+                "no module side effect",
+            }) do
+                a.equal(true, document:find(required, 1, true) ~= nil)
+            end
+        end
+        for _, required in ipairs({
+            "Get-CgceInvokeBootstrap",
+            "$PSScriptRoot",
+            "UTF8Encoding",
+            "source_manifest_checksum",
+            "Assert-CgceHandoffSource",
+            "-ExpectedManifestChecksum",
+            "re-signed",
+        }) do
+            a.equal(true, plan:find(required, 1, true) ~= nil)
+        end
+
+        local invoke = read(
+            "tools/windows-discovery/Invoke-CgceDiscovery.ps1"
+        )
+        for _, required in ipairs({
+            "function Read-CgceInvokeGenesisManifestChecksum",
+            "function Read-CgceInvokeBootstrapManifest",
+            "function Get-CgceInvokeBootstrap",
+            "New-Object System.Text.UTF8Encoding($false, $true)",
+            "$length -lt 1 -or $length -gt $MaxBytes",
+            "$stream.ReadByte() -ne -1",
+            "Get-CgceInvokeBootstrapSha256 `\n"
+                .. "        -Path $manifestPath `\n"
+                .. "        -MaxBytes 1048576",
+            '"source_manifest_checksum"\\s*:',
+            "source manifest authority drift",
+            "-ExpectedManifestChecksum $bootstrap.manifest_checksum",
+            "-ExpectedManifestChecksum $state.source_manifest_checksum",
+        }) do
+            a.equal(true, invoke:find(required, 1, true) ~= nil)
+        end
+        a.equal(
+            nil,
+            invoke:find(
+                "[System.IO.File]::ReadAllBytes($Path)",
+                1,
+                true
+            )
+        )
+        local bootstrap_call = assert(invoke:find(
+            "$bootstrap = Get-CgceInvokeBootstrap",
+            1,
+            true
+        ))
+        local first_import = assert(invoke:find(
+            "Import-CgceInvokeVerifiedModule `",
+            bootstrap_call,
+            true
+        ))
+        a.equal(true, bootstrap_call < first_import)
+
+        local lifecycle = read("tests/windows/Lifecycle.Tests.ps1")
+        for _, required in ipairs({
+            "invoke rejects a re-signed handoff before importing its changed module",
+            "drifted-module-loaded.txt",
+            "Assert-CgceEqual $false (Test-Path -LiteralPath $sentinel)",
+        }) do
+            a.equal(true, lifecycle:find(required, 1, true) ~= nil)
         end
     end)
 end)

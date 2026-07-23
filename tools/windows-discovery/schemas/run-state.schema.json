@@ -15,6 +15,7 @@
     "updated_at_utc",
     "bundle_checksum",
     "control_evidence_checksum",
+    "source_manifest_checksum",
     "palserver_executable",
     "palserver_executable_checksum",
     "ue4ss_version",
@@ -84,6 +85,9 @@
     },
     "control_evidence_checksum": {
       "$ref": "#/definitions/nullableChecksum"
+    },
+    "source_manifest_checksum": {
+      "$ref": "#/definitions/checksum"
     },
     "palserver_executable": {
       "$ref": "#/definitions/nullableNonEmptyString"

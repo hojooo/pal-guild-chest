@@ -9,6 +9,9 @@ Import-Module $filesModule | Out-Null
 $script:CgceTestProbeCrashSeam = $null
 $script:CgceTestActivitySnapshotSeam = $null
 $script:CgceTestRootProcessRecordSeam = $null
+$script:CgceTestProcessRecordsSeam = $null
+$script:CgceTestLaunchReceiptSeam = $null
+$script:CgceTestProcessCrashSeam = $null
 $script:CgceFreshModsText = "CGCEDiscoveryInventory : 1`r`n"
 $script:CgceSnapshotNames = @(
     "MODS_TXT",
@@ -90,6 +93,19 @@ function Test-CgceRuntimeUtcTimestamp($Value) {
         [Globalization.DateTimeStyles]::AssumeUniversal -bor
             [Globalization.DateTimeStyles]::AdjustToUniversal,
         [ref]$parsed
+    )
+}
+
+function ConvertFrom-CgceRuntimeUtcTimestamp($Value, [string]$Code) {
+    if (-not (Test-CgceRuntimeUtcTimestamp $Value)) {
+        throw "$Code invalid UTC timestamp"
+    }
+    return [DateTime]::ParseExact(
+        $Value,
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal -bor
+            [Globalization.DateTimeStyles]::AdjustToUniversal
     )
 }
 
@@ -195,7 +211,7 @@ function Get-CgceTreeSha256([object[]]$Entries) {
 }
 
 function Assert-CgceServerArguments([string[]]$Arguments) {
-    if ($null -eq $Arguments) {
+    if ($null -eq $Arguments -or $Arguments.Count -gt 4096) {
         throw "CGCE-OPS-ARGUMENT argument array is required"
     }
     $blocked = @(
@@ -208,6 +224,7 @@ function Assert-CgceServerArguments([string[]]$Arguments) {
     foreach ($argument in $Arguments) {
         if ($argument -isnot [string] -or
             [string]::IsNullOrEmpty($argument) -or
+            $argument.Length -gt 4096 -or
             $argument -cnotmatch '^[-A-Za-z0-9_=.:/\\]+\z') {
             throw "CGCE-OPS-ARGUMENT unsafe native argument token"
         }
@@ -222,14 +239,73 @@ function Assert-CgceServerArguments([string[]]$Arguments) {
     }
 }
 
+function ConvertTo-CgceWindowsCommandLineArgument([string]$Argument) {
+    if ($null -eq $Argument -or $Argument.IndexOf([char]0) -ge 0) {
+        throw "CGCE-OPS-ARGUMENT invalid native argument"
+    }
+    $builder = New-Object Text.StringBuilder
+    $null = $builder.Append([char]34)
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $backslashes += 1
+            continue
+        }
+        if ($character -eq [char]34) {
+            if ($backslashes -gt 0) {
+                $null = $builder.Append(
+                    ([string][char]92) * ($backslashes * 2)
+                )
+            }
+            $null = $builder.Append([char]92)
+            $null = $builder.Append([char]34)
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            $null = $builder.Append(
+                ([string][char]92) * $backslashes
+            )
+            $backslashes = 0
+        }
+        $null = $builder.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        $null = $builder.Append(
+            ([string][char]92) * ($backslashes * 2)
+        )
+    }
+    $null = $builder.Append([char]34)
+    return $builder.ToString()
+}
+
+function ConvertTo-CgceWindowsCommandLine([string[]]$Arguments) {
+    if ($null -eq $Arguments) {
+        throw "CGCE-OPS-ARGUMENT argument array is required"
+    }
+    $quoted = New-Object 'Collections.Generic.List[string]'
+    foreach ($argument in $Arguments) {
+        $null = $quoted.Add(
+            (ConvertTo-CgceWindowsCommandLineArgument -Argument $argument)
+        )
+    }
+    return [string]::Join(" ", $quoted.ToArray())
+}
+
 function ConvertTo-CgceRuntimeExecutablePaths([string[]]$ExecutablePaths) {
-    if ($null -eq $ExecutablePaths -or $ExecutablePaths.Count -eq 0) {
+    if ($null -eq $ExecutablePaths -or $ExecutablePaths.Count -eq 0 -or
+        $ExecutablePaths.Count -gt 4096) {
         throw "CGCE-OPS-PROCESS-QUERY exhaustive executable paths required"
     }
     $result = New-Object 'Collections.Generic.List[string]'
     $seen = New-Object 'Collections.Generic.HashSet[string]' `
         -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
     foreach ($path in $ExecutablePaths) {
+        if ($path -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($path) -or
+            $path.Length -gt 4096) {
+            throw "CGCE-OPS-PROCESS-QUERY invalid executable path"
+        }
         $canonical = ConvertTo-CgceCanonicalRuntimePath `
             -Path $path `
             -Code "CGCE-OPS-PROCESS-QUERY"
@@ -339,7 +415,7 @@ function Assert-CgceProcessReceiptDirectory([string]$ReceiptRoot) {
     }
     foreach ($child in @(Get-ChildItem -LiteralPath $ReceiptRoot -Force)) {
         if ($child.PSIsContainer -or
-            $child.Name -cnotmatch '^(?:000-launch|[0-9]{3}-pid|999-result)\.json\z') {
+            $child.Name -cnotmatch '^(?:000-launch|[0-9]{3}-pid|999-result|manual-recovery-required)\.json\z') {
             throw "CGCE-OPS-PROCESS-RECEIPT unknown process receipt child"
         }
     }
@@ -354,6 +430,7 @@ function Read-CgceLaunchReceipt([string]$Path, [string]$RunId) {
         "executable_path", "executable_sha256", "working_directory",
         "allowed_executable_path_count", "allowed_executable_paths_sha256",
         "argument_count", "arguments_sha256", "timeout_seconds",
+        "control_valid_until_utc",
         "previous_receipt_sha256"
     ) "CGCE-OPS-PROCESS-RECEIPT"
     if ($value.schema_version -cne "1.0" -or
@@ -368,8 +445,26 @@ function Read-CgceLaunchReceipt([string]$Path, [string]$RunId) {
         -not (Test-CgceRuntimeInteger `
             $value.allowed_executable_path_count 1 4096) -or
         -not (Test-CgceRuntimeInteger $value.argument_count 0 4096) -or
-        -not (Test-CgceRuntimeInteger $value.timeout_seconds 1 86400)) {
+        -not (Test-CgceRuntimeInteger $value.timeout_seconds 1 86400) -or
+        -not (Test-CgceRuntimeUtcTimestamp `
+            $value.control_valid_until_utc)) {
         throw "CGCE-OPS-PROCESS-RECEIPT invalid launch receipt fields"
+    }
+    try {
+        $createdAt = ConvertFrom-CgceRuntimeUtcTimestamp `
+            -Value $value.created_at_utc `
+            -Code "CGCE-OPS-PROCESS-RECEIPT"
+        $validUntil = ConvertFrom-CgceRuntimeUtcTimestamp `
+            -Value $value.control_valid_until_utc `
+            -Code "CGCE-OPS-PROCESS-RECEIPT"
+        $receiptDeadline = $createdAt.AddSeconds(
+            [int]$value.timeout_seconds
+        )
+    } catch {
+        throw "CGCE-OPS-PROCESS-RECEIPT invalid launch deadline"
+    }
+    if ($receiptDeadline -gt $validUntil) {
+        throw "CGCE-OPS-PROCESS-RECEIPT launch exceeds control validity"
     }
     $executable = ConvertTo-CgceCanonicalRuntimePath `
         $value.executable_path "CGCE-OPS-PROCESS-RECEIPT"
@@ -380,6 +475,49 @@ function Read-CgceLaunchReceipt([string]$Path, [string]$RunId) {
         throw "CGCE-OPS-PROCESS-RECEIPT launch working directory drift"
     }
     return $value
+}
+
+function Assert-CgceLaunchReceiptBinding(
+    $Actual,
+    $Expected,
+    [string[]]$CanonicalPaths,
+    [string[]]$Arguments
+) {
+    $actualExecutable = ConvertTo-CgceCanonicalRuntimePath `
+        $Actual.executable_path "CGCE-OPS-PROCESS-RECEIPT"
+    $expectedExecutable = ConvertTo-CgceCanonicalRuntimePath `
+        $Expected.executable_path "CGCE-OPS-PROCESS-RECEIPT"
+    $actualWorking = ConvertTo-CgceCanonicalRuntimePath `
+        $Actual.working_directory "CGCE-OPS-PROCESS-RECEIPT"
+    $expectedWorking = ConvertTo-CgceCanonicalRuntimePath `
+        $Expected.working_directory "CGCE-OPS-PROCESS-RECEIPT"
+    $expectedPathsDigest = Get-CgceFramedStringArraySha256 `
+        -Domain "CGCE-PATHS-1" `
+        -Values $CanonicalPaths
+    $expectedArgumentsDigest = Get-CgceFramedStringArraySha256 `
+        -Domain "CGCE-ARGS-1" `
+        -Values $Arguments
+    if ($Actual.schema_version -cne $Expected.schema_version -or
+        $Actual.kind -cne $Expected.kind -or
+        $Actual.run_id -cne $Expected.run_id -or
+        [int64]$Actual.sequence -ne [int64]$Expected.sequence -or
+        $Actual.created_at_utc -cne $Expected.created_at_utc -or
+        -not (Test-CgceRuntimePathEqual `
+            $actualExecutable $expectedExecutable) -or
+        $Actual.executable_sha256 -cne $Expected.executable_sha256 -or
+        -not (Test-CgceRuntimePathEqual $actualWorking $expectedWorking) -or
+        [int64]$Actual.allowed_executable_path_count -ne
+            [int64]$CanonicalPaths.Count -or
+        $Actual.allowed_executable_paths_sha256 -cne $expectedPathsDigest -or
+        [int64]$Actual.argument_count -ne [int64]$Arguments.Count -or
+        $Actual.arguments_sha256 -cne $expectedArgumentsDigest -or
+        [int64]$Actual.timeout_seconds -ne
+            [int64]$Expected.timeout_seconds -or
+        $Actual.control_valid_until_utc -cne
+            $Expected.control_valid_until_utc -or
+        $null -ne $Actual.previous_receipt_sha256) {
+        throw "CGCE-OPS-PROCESS-RECEIPT launch receipt semantic drift"
+    }
 }
 
 function Read-CgcePidReceipt(
@@ -428,6 +566,82 @@ function Read-CgcePidReceipt(
     return $value
 }
 
+function Read-CgceManualRecoveryBarrier(
+    [string]$Path,
+    [string]$RunId,
+    [string]$PreviousChecksum,
+    [object[]]$PidReceipts
+) {
+    try { $value = Read-CgceJsonObject -Path $Path } catch {
+        throw "CGCE-OPS-PROCESS-RECEIPT invalid manual-recovery barrier"
+    }
+    Assert-CgceRuntimeExactKeys $value @(
+        "schema_version", "kind", "run_id", "reason", "pid", "parent_pid",
+        "observed_at_utc", "previous_receipt_sha256"
+    ) "CGCE-OPS-PROCESS-RECEIPT"
+    if ($value.schema_version -cne "1.0" -or
+        $value.kind -cne "cgce_windows_discovery_process_manual_recovery" -or
+        $value.run_id -cne $RunId -or
+        $value.reason -cne "IDENTITY_UNREADABLE" -or
+        -not (Test-CgceRuntimeInteger $value.pid 1 ([uint32]::MaxValue)) -or
+        -not (Test-CgceRuntimeInteger `
+            $value.parent_pid 0 ([uint32]::MaxValue)) -or
+        -not (Test-CgceRuntimeUtcTimestamp $value.observed_at_utc) -or
+        $value.previous_receipt_sha256 -cne $PreviousChecksum) {
+        throw "CGCE-OPS-PROCESS-RECEIPT invalid manual-recovery barrier"
+    }
+    if ($PidReceipts.Count -eq 0) {
+        if ([int64]$value.parent_pid -ne 0) {
+            throw "CGCE-OPS-PROCESS-RECEIPT invalid root recovery barrier"
+        }
+    } else {
+        if (@($PidReceipts | Where-Object {
+                    [int64]$_.pid -eq [int64]$value.parent_pid
+                }).Count -ne 1) {
+            throw "CGCE-OPS-PROCESS-RECEIPT invalid descendant recovery barrier"
+        }
+    }
+    return $value
+}
+
+function Write-CgceManualRecoveryBarrier(
+    [string]$ReceiptRoot,
+    [string]$RunId,
+    [int64]$Pid,
+    [int64]$ParentPid,
+    [string]$PreviousChecksum,
+    [object[]]$PidReceipts
+) {
+    $path = Join-Path $ReceiptRoot "manual-recovery-required.json"
+    if (Test-Path -LiteralPath $path) {
+        throw "CGCE-OPS-MANUAL-RECOVERY manual-recovery barrier already exists"
+    }
+    $barrier = [pscustomobject][ordered]@{
+        schema_version = "1.0"
+        kind = "cgce_windows_discovery_process_manual_recovery"
+        run_id = $RunId
+        reason = "IDENTITY_UNREADABLE"
+        pid = $Pid
+        parent_pid = $ParentPid
+        observed_at_utc = (Get-CgceRuntimeUtcNow)
+        previous_receipt_sha256 = $PreviousChecksum
+    }
+    $written = Write-CgceRuntimeJson `
+        -Value $barrier `
+        -Path $path `
+        -Code "CGCE-OPS-MANUAL-RECOVERY"
+    $readBack = Read-CgceManualRecoveryBarrier `
+        -Path $path `
+        -RunId $RunId `
+        -PreviousChecksum $PreviousChecksum `
+        -PidReceipts $PidReceipts
+    if ([int64]$readBack.pid -ne $Pid -or
+        [int64]$readBack.parent_pid -ne $ParentPid -or
+        (Get-CgceSha256 -Path $path) -cne $written.checksum) {
+        throw "CGCE-OPS-MANUAL-RECOVERY barrier semantic drift"
+    }
+}
+
 function Assert-CgceProcessResult(
     [string]$Path,
     [string]$RunId,
@@ -464,10 +678,25 @@ function Assert-CgceProcessResult(
         @($value.pid_receipts).Count -ne $PidReceipts.Count) {
         throw "CGCE-OPS-PROCESS-RECEIPT invalid process result fields"
     }
-    if ([DateTime]::Parse($value.started_at_utc).ToUniversalTime() -lt
-            [DateTime]::Parse($Launch.created_at_utc).ToUniversalTime() -or
-        [DateTime]::Parse($value.exit_at_utc).ToUniversalTime() -lt
-            [DateTime]::Parse($value.started_at_utc).ToUniversalTime()) {
+    $launchCreated = ConvertFrom-CgceRuntimeUtcTimestamp `
+        -Value $Launch.created_at_utc `
+        -Code "CGCE-OPS-PROCESS-RECEIPT"
+    $controlDeadline = ConvertFrom-CgceRuntimeUtcTimestamp `
+        -Value $Launch.control_valid_until_utc `
+        -Code "CGCE-OPS-PROCESS-RECEIPT"
+    $startedAt = ConvertFrom-CgceRuntimeUtcTimestamp `
+        -Value $value.started_at_utc `
+        -Code "CGCE-OPS-PROCESS-RECEIPT"
+    $exitAt = ConvertFrom-CgceRuntimeUtcTimestamp `
+        -Value $value.exit_at_utc `
+        -Code "CGCE-OPS-PROCESS-RECEIPT"
+    $launchDeadline = $launchCreated.AddSeconds(
+        [int]$Launch.timeout_seconds
+    )
+    if ($startedAt -lt $launchCreated -or
+        $exitAt -lt $startedAt -or
+        $exitAt -gt $launchDeadline -or
+        $exitAt -gt $controlDeadline) {
         throw "CGCE-OPS-PROCESS-RECEIPT invalid process result timestamps"
     }
     for ($index = 0; $index -lt $PidReceipts.Count; $index += 1) {
@@ -527,6 +756,15 @@ function Assert-CgceProcessResult(
                 }).Count -ne 1) {
             throw "CGCE-OPS-PROCESS-RECEIPT observed executable not allowed"
         }
+        $receiptCreated = ConvertFrom-CgceRuntimeUtcTimestamp `
+            -Value $expected.creation_time_utc `
+            -Code "CGCE-OPS-PROCESS-RECEIPT"
+        $receiptObserved = ConvertFrom-CgceRuntimeUtcTimestamp `
+            -Value $expected.observed_at_utc `
+            -Code "CGCE-OPS-PROCESS-RECEIPT"
+        if ($exitAt -lt $receiptCreated -or $exitAt -lt $receiptObserved) {
+            throw "CGCE-OPS-PROCESS-RECEIPT result predates PID observation"
+        }
         if ($index -eq 0 -and
             -not (Test-CgceRuntimePathEqual `
                 (ConvertTo-CgceCanonicalRuntimePath `
@@ -565,6 +803,7 @@ function Read-CgceProcessReceiptChain(
     }
     $previous = Get-CgceSha256 -Path $launchPath
     $pidReceipts = New-Object 'Collections.Generic.List[object]'
+    $hasUnlisted = $false
     for ($sequence = 1; $sequence -le 998; $sequence += 1) {
         $path = Join-Path $ReceiptRoot (
             $sequence.ToString("000") + "-pid.json"
@@ -579,17 +818,49 @@ function Read-CgceProcessReceiptChain(
             -PreviousChecksum $previous
         $receiptExecutable = ConvertTo-CgceCanonicalRuntimePath `
             $receipt.executable_path "CGCE-OPS-PROCESS-RECEIPT"
+        if (@($pidReceipts.ToArray() | Where-Object {
+                    [int64]$_.pid -eq [int64]$receipt.pid
+                }).Count -ne 0) {
+            throw "CGCE-OPS-PROCESS-RECEIPT duplicate PID identity"
+        }
+        if ($sequence -eq 1) {
+            if ([int64]$receipt.parent_pid -ne 0 -or
+                -not (Test-CgceRuntimePathEqual `
+                    $receiptExecutable $launchExecutable)) {
+                throw "CGCE-OPS-PROCESS-RECEIPT root PID launch binding drift"
+            }
+        } else {
+            $parentMatches = @($pidReceipts.ToArray() | Where-Object {
+                [int64]$_.pid -eq [int64]$receipt.parent_pid
+            })
+            if ($parentMatches.Count -ne 1) {
+                throw "CGCE-OPS-PROCESS-RECEIPT descendant parent chain drift"
+            }
+            if ([int64]$receipt.creation_time_filetime_utc -lt
+                [int64]$parentMatches[0].creation_time_filetime_utc) {
+                throw "CGCE-OPS-PROCESS-RECEIPT descendant predates parent"
+            }
+        }
+        $null = $pidReceipts.Add($receipt)
         if (@($CanonicalPaths | Where-Object {
                     Test-CgceRuntimePathEqual $_ $receiptExecutable
                 }).Count -ne 1) {
-            throw "CGCE-OPS-PROCESS-RECEIPT PID executable not allowed"
+            $hasUnlisted = $true
         }
-        $null = $pidReceipts.Add($receipt)
         $previous = Get-CgceSha256 -Path $path
     }
     $pidFiles = @(Get-ChildItem -LiteralPath $ReceiptRoot -Filter "*-pid.json")
     if ($pidFiles.Count -ne $pidReceipts.Count) {
         throw "CGCE-OPS-PROCESS-RECEIPT PID receipt sequence gap"
+    }
+    $barrierPath = Join-Path $ReceiptRoot "manual-recovery-required.json"
+    if (Test-Path -LiteralPath $barrierPath -PathType Leaf) {
+        $null = Read-CgceManualRecoveryBarrier `
+            -Path $barrierPath `
+            -RunId $runId `
+            -PreviousChecksum $previous `
+            -PidReceipts ([object[]]$pidReceipts.ToArray())
+        throw "CGCE-OPS-MANUAL-RECOVERY durable process identity barrier"
     }
     $resultPath = Join-Path $ReceiptRoot "999-result.json"
     if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
@@ -607,6 +878,7 @@ function Read-CgceProcessReceiptChain(
         launch = $launch
         launch_checksum = (Get-CgceSha256 -Path $launchPath)
         pid_receipts = [object[]]$pidReceipts.ToArray()
+        has_unlisted_pid_receipt = $hasUnlisted
         last_checksum = $previous
     }
 }
@@ -878,6 +1150,12 @@ function Assert-CgceProbePathObjectsEqual($Expected, $Actual) {
 function Invoke-CgceProbeCrash([string]$Point) {
     if ($null -ne $script:CgceTestProbeCrashSeam) {
         $null = & $script:CgceTestProbeCrashSeam $Point
+    }
+}
+
+function Invoke-CgceProcessCrash([string]$Point) {
+    if ($null -ne $script:CgceTestProcessCrashSeam) {
+        $null = & $script:CgceTestProcessCrashSeam $Point
     }
 }
 
@@ -1624,6 +1902,199 @@ function Get-CgceSnapshotState($Snapshot) {
         artifact_type = "DIRECTORY"; present = $true
         length = $null; sha256 = $null
         tree_sha256 = (Get-CgceTreeSha256 -Entries @($Snapshot.entries))
+    }
+}
+
+function Assert-CgceStagedArtifactMatches(
+    [string]$Path,
+    [string]$Type,
+    $Expected
+) {
+    Assert-CgceNoReparseInPath -Path $Path
+    if (-not $Expected.present) {
+        if (Test-Path -LiteralPath $Path) {
+            throw "CGCE-OPS-PROBE-RECEIPT absent staged artifact appeared"
+        }
+        return
+    }
+    if ($Type -ceq "DIRECTORY") {
+        Assert-CgceTreeHasNoReparsePoints -Root $Path
+    }
+    $actual = New-CgceArtifactState -Path $Path -Type $Type
+    if (-not (Test-CgceArtifactStateEqual $actual $Expected)) {
+        throw "CGCE-OPS-PROBE-RECEIPT staged artifact state drift"
+    }
+}
+
+function Assert-CgceRuntimeDirectoryEmpty([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "CGCE-OPS-PROBE-RECEIPT fixed directory missing"
+    }
+    Assert-CgceNoReparseInPath -Path $Path
+    Assert-CgceTreeHasNoReparsePoints -Root $Path
+    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) {
+        throw "CGCE-OPS-PROBE-RECEIPT fixed directory is not empty"
+    }
+}
+
+function Assert-CgceInventoryProbeStaged(
+    $Paths,
+    [string]$RunDirectory,
+    [string]$RunId,
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedFinalReceiptChecksum,
+    [string]$ExpectedLaunchReceiptChecksum = ""
+) {
+    Assert-CgceRuntimePaths $Paths $RunDirectory $RunId
+    if (-not (Test-CgceRuntimeChecksum $ExpectedFinalReceiptChecksum)) {
+        throw "CGCE-OPS-PROBE-RECEIPT invalid expected final checksum"
+    }
+    if (-not [string]::IsNullOrEmpty($ExpectedLaunchReceiptChecksum) -and
+        -not (Test-CgceRuntimeChecksum $ExpectedLaunchReceiptChecksum)) {
+        throw "CGCE-OPS-PROCESS-RECEIPT invalid expected launch checksum"
+    }
+    Assert-CgceNoReparseInPath -Path $RunDirectory
+    Assert-CgceTreeHasNoReparsePoints -Root $RunDirectory
+
+    $recordedOriginal = @(
+        Read-CgceInventory `
+            -Path $Paths.original_inventory `
+            -ExpectedKind "original"
+    )
+    $recordedBackup = @(
+        Read-CgceInventory `
+            -Path $Paths.backup_inventory `
+            -ExpectedKind "backup"
+    )
+    $recordedClone = @(
+        Read-CgceInventory `
+            -Path $Paths.clone_inventory `
+            -ExpectedKind "clone"
+    )
+    Compare-CgceInventory `
+        -Expected $recordedOriginal `
+        -Actual $recordedBackup
+    Compare-CgceInventory `
+        -Expected $recordedOriginal `
+        -Actual $recordedClone
+    Compare-CgceInventory `
+        -Expected $recordedOriginal `
+        -Actual @(Get-CgceTreeInventory -Root $Paths.inactive_original)
+    Compare-CgceInventory `
+        -Expected $recordedBackup `
+        -Actual @(Get-CgceTreeInventory -Root $Paths.backup_saved)
+    Compare-CgceInventory `
+        -Expected $recordedClone `
+        -Actual @(Get-CgceTreeInventory -Root $Paths.active_saved)
+
+    $intentAuthority = Read-CgceProbeIntentAuthority `
+        -Paths $Paths `
+        -RunDirectory $RunDirectory `
+        -RunId $RunId
+    $authority = Read-CgceProbeStageAuthority `
+        -Paths $Paths `
+        -RunId $RunId `
+        -Intent $intentAuthority.intent `
+        -Snapshots $intentAuthority.snapshots
+    if ([int]$authority.last_sequence -ne 60 -or
+        $null -eq $authority.final_checksum -or
+        $authority.final_checksum -cne $ExpectedFinalReceiptChecksum -or
+        (Get-CgceSha256 -Path $Paths.probe_receipt) -cne
+            $ExpectedFinalReceiptChecksum) {
+        throw "CGCE-OPS-PROBE-RECEIPT expected final receipt mismatch"
+    }
+
+    $snapshots = $intentAuthority.snapshots
+    $freshBytes = (New-Object Text.UTF8Encoding($false)).GetBytes(
+        $script:CgceFreshModsText
+    )
+    $freshMods = [pscustomobject][ordered]@{
+        artifact_type = "FILE"
+        present = $true
+        length = [int64]$freshBytes.Length
+        sha256 = (Get-CgceBytesSha256 $freshBytes)
+        tree_sha256 = $null
+    }
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.mods_txt `
+        -Type "FILE" `
+        -Expected $freshMods
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.mods_original `
+        -Type "FILE" `
+        -Expected (Get-CgceSnapshotState $snapshots.MODS_TXT)
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.probe_staged `
+        -Type "DIRECTORY" `
+        -Expected (Get-CgceSnapshotState $snapshots.PROBE_SOURCE)
+    Assert-CgceStagedArtifactMatches `
+        -Path $intentAuthority.intent.paths.probe_source `
+        -Type "DIRECTORY" `
+        -Expected (Get-CgceSnapshotState $snapshots.PROBE_SOURCE)
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.object_dump `
+        -Type "FILE" `
+        -Expected (New-CgceAbsentArtifactState "FILE")
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.object_dump_original `
+        -Type "FILE" `
+        -Expected (Get-CgceSnapshotState $snapshots.OBJECT_DUMP)
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.cxx_header_dump `
+        -Type "DIRECTORY" `
+        -Expected (New-CgceAbsentArtifactState "DIRECTORY")
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.cxx_header_dump_original `
+        -Type "DIRECTORY" `
+        -Expected (Get-CgceSnapshotState $snapshots.CXX_HEADER_DUMP)
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.ue4ss_log `
+        -Type "FILE" `
+        -Expected (New-CgceAbsentArtifactState "FILE")
+    Assert-CgceStagedArtifactMatches `
+        -Path $Paths.ue4ss_log_original `
+        -Type "FILE" `
+        -Expected (Get-CgceSnapshotState $snapshots.UE4SS_LOG)
+
+    foreach ($path in @(
+        $Paths.mods_test,
+        $Paths.probe_quarantine,
+        $Paths.object_dump_quarantine,
+        $Paths.cxx_header_dump_quarantine,
+        $Paths.ue4ss_log_quarantine,
+        $Paths.capture_inventory,
+        $Paths.restored_inventory,
+        $intentAuthority.intent.paths.probe_restore_receipts
+    )) {
+        Assert-CgceNoReparseInPath -Path $path
+        if (Test-Path -LiteralPath $path) {
+            throw "CGCE-OPS-PROBE-RECEIPT pre-launch residue exists"
+        }
+    }
+    foreach ($directory in @(
+        $Paths.capture,
+        $Paths.restore_receipts
+    )) {
+        Assert-CgceRuntimeDirectoryEmpty -Path $directory
+    }
+    if ([string]::IsNullOrEmpty($ExpectedLaunchReceiptChecksum)) {
+        Assert-CgceRuntimeDirectoryEmpty -Path $Paths.process_receipts
+    } else {
+        Assert-CgceNoReparseInPath -Path $Paths.process_receipts
+        Assert-CgceTreeHasNoReparsePoints -Root $Paths.process_receipts
+        Assert-CgceProcessReceiptDirectory `
+            -ReceiptRoot $Paths.process_receipts
+        $launchPath = Join-Path $Paths.process_receipts "000-launch.json"
+        $children = @(Get-ChildItem `
+            -LiteralPath $Paths.process_receipts `
+            -Force)
+        if ($children.Count -ne 1 -or
+            $children[0].Name -cne "000-launch.json" -or
+            -not (Test-Path -LiteralPath $launchPath -PathType Leaf) -or
+            (Get-CgceSha256 -Path $launchPath) -cne
+                $ExpectedLaunchReceiptChecksum) {
+            throw "CGCE-OPS-PROCESS-RECEIPT staged launch intent drift"
+        }
     }
 }
 
@@ -2535,21 +3006,37 @@ function Restore-CgceInventoryProbe(
 }
 
 function Get-CgceProcessIdentityFromRecord($Record, [string]$FallbackPath) {
-    $path = if ($Record.PSObject.Properties["ExecutablePath"] -ne $null -and
+    if ($null -eq $Record -or
+        $null -eq $Record.PSObject.Properties["ProcessId"] -or
+        $null -eq $Record.PSObject.Properties["ParentProcessId"] -or
+        -not (Test-CgceRuntimeInteger `
+            $Record.ProcessId 1 ([uint32]::MaxValue)) -or
+        -not (Test-CgceRuntimeInteger `
+            $Record.ParentProcessId 0 ([uint32]::MaxValue))) {
+        throw "CGCE-OPS-MANUAL-RECOVERY process identity is incomplete"
+    }
+    $pathText = if ($Record.PSObject.Properties["ExecutablePath"] -ne $null -and
         -not [string]::IsNullOrWhiteSpace([string]$Record.ExecutablePath)) {
-        ConvertTo-CgceCanonicalRuntimePath `
-            ([string]$Record.ExecutablePath) "CGCE-OPS-PROCESS-QUERY"
-    } else { $FallbackPath }
-    $fileTime = Get-CgceProcessCreationFileTime $Record
-    $time = [DateTime]::FromFileTimeUtc($fileTime).ToString(
-        "yyyy-MM-dd'T'HH:mm:ss'Z'",
-        [Globalization.CultureInfo]::InvariantCulture
-    )
-    return [pscustomobject]@{
+        [string]$Record.ExecutablePath
+    } elseif (-not [string]::IsNullOrWhiteSpace($FallbackPath)) {
+        $FallbackPath
+    } else {
+        throw "CGCE-OPS-MANUAL-RECOVERY process executable identity unavailable"
+    }
+    try {
+        $path = ConvertTo-CgceCanonicalRuntimePath `
+            $pathText "CGCE-OPS-MANUAL-RECOVERY"
+        $fileTime = Get-CgceProcessCreationFileTime $Record
+        $time = [DateTime]::FromFileTimeUtc($fileTime).ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    } catch {
+        throw "CGCE-OPS-MANUAL-RECOVERY process identity unreadable"
+    }
+    return [pscustomobject][ordered]@{
         pid = [int64]$Record.ProcessId
-        parent_pid = if ($Record.PSObject.Properties["ParentProcessId"] -ne $null) {
-            [int64]$Record.ParentProcessId
-        } else { [int64]0 }
+        parent_pid = [int64]$Record.ParentProcessId
         executable_path = $path
         creation_time_utc = $time
         creation_time_filetime_utc = [int64]$fileTime
@@ -2586,26 +3073,175 @@ function Get-CgceRootProcessRecord($Process, [string]$CanonicalPath) {
     return $record
 }
 
+function Get-CgceProcessRecordsSnapshot {
+    try {
+        if ($null -ne $script:CgceTestProcessRecordsSeam) {
+            $records = @(& $script:CgceTestProcessRecordsSeam)
+        } else {
+            $records = @(
+                Get-CimInstance `
+                    -ClassName "Win32_Process" `
+                    -ErrorAction Stop
+            )
+        }
+    } catch {
+        throw "CGCE-OPS-PROCESS-QUERY descendant query failed"
+    }
+    foreach ($record in $records) {
+        if ($null -eq $record -or
+            $null -eq $record.PSObject.Properties["ProcessId"] -or
+            $null -eq $record.PSObject.Properties["ParentProcessId"] -or
+            -not (Test-CgceRuntimeInteger `
+                $record.ProcessId 0 ([uint32]::MaxValue)) -or
+            -not (Test-CgceRuntimeInteger `
+                $record.ParentProcessId 0 ([uint32]::MaxValue))) {
+            throw "CGCE-OPS-PROCESS-QUERY incomplete process telemetry"
+        }
+    }
+    return [object[]]$records
+}
+
+function Get-CgceLiveObservedProcessCount(
+    [object[]]$Observed,
+    [object[]]$Records
+) {
+    $live = 0
+    foreach ($identity in $Observed) {
+        foreach ($record in $Records) {
+            if ([int64]$record.ProcessId -eq [int64]$identity.pid) {
+                $current = Get-CgceProcessIdentityFromRecord $record ""
+                if ((Test-CgceRuntimePathEqual `
+                        $current.executable_path `
+                        $identity.executable_path) -and
+                    [int64]$current.creation_time_filetime_utc -eq
+                        [int64]$identity.creation_time_filetime_utc) {
+                    $live += 1
+                }
+            }
+        }
+    }
+    return $live
+}
+
+function Assert-CgceObservedProcessesTerminated(
+    [object[]]$Observed,
+    [object[]]$Records
+) {
+    if ((Get-CgceLiveObservedProcessCount `
+            -Observed $Observed `
+            -Records $Records) -ne 0) {
+        throw "CGCE-OPS-PROCESS-TIMEOUT observed process still active"
+    }
+}
+
+function Get-CgceRemainingProcessMilliseconds(
+    $Stopwatch,
+    [int]$TimeoutSeconds
+) {
+    $limit = [int64]$TimeoutSeconds * 1000
+    $elapsed = [int64][Math]::Ceiling($Stopwatch.Elapsed.TotalMilliseconds)
+    $remaining = $limit - $elapsed
+    if ($remaining -le 0) {
+        return 0
+    }
+    if ($remaining -gt [int]::MaxValue) {
+        return [int]::MaxValue
+    }
+    return [int]$remaining
+}
+
+function Assert-CgceProcessCompletedWithinDeadline(
+    $Stopwatch,
+    [int]$TimeoutSeconds,
+    [DateTime]$ControlDeadlineUtc
+) {
+    $limit = [int64]$TimeoutSeconds * 1000
+    if ($Stopwatch.Elapsed.TotalMilliseconds -gt [double]$limit) {
+        throw "CGCE-OPS-PROCESS-TIMEOUT child exited after timeout"
+    }
+    if ([DateTime]::UtcNow -gt $ControlDeadlineUtc) {
+        throw "CGCE-OPS-CONTROL-EXPIRED child exited after control validity"
+    }
+}
+
+function ConvertTo-CgceControlDeadline($Value) {
+    try {
+        if ($Value -is [DateTime]) {
+            if (([DateTime]$Value).Kind -ne [DateTimeKind]::Utc) {
+                throw "control deadline must already be UTC"
+            }
+            $utc = [DateTime]$Value
+        } elseif ($Value -is [string]) {
+            $utc = ConvertFrom-CgceRuntimeUtcTimestamp `
+                -Value $Value `
+                -Code "CGCE-OPS-CONTROL-EXPIRED"
+        } else {
+            throw "invalid control deadline type"
+        }
+        $text = $utc.ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        if (-not (Test-CgceRuntimeUtcTimestamp $text)) {
+            throw "invalid normalized control deadline"
+        }
+    } catch {
+        throw "CGCE-OPS-CONTROL-EXPIRED invalid control validity deadline"
+    }
+    return [pscustomobject]@{
+        value = $utc
+        text = $text
+    }
+}
+
 function Invoke-CgceChildProcess(
     [string]$Executable,
     [string]$ExpectedExecutableChecksum,
     [string[]]$AllowedExecutablePaths,
     [string[]]$Arguments,
     [string]$ReceiptRoot,
-    [int]$TimeoutSeconds
+    [int]$TimeoutSeconds,
+    [Parameter(Mandatory = $true)]
+    [scriptblock]$PreLaunchValidation,
+    [Parameter(Mandatory = $true)]
+    $ControlValidUntilUtc
 ) {
     Assert-CgceServerArguments $Arguments
-    if ($TimeoutSeconds -lt 1) {
+    $nativeCommandLine = if ($Arguments.Count -eq 0) {
+        [string]::Empty
+    } else {
+        ConvertTo-CgceWindowsCommandLine -Arguments $Arguments
+    }
+    if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 86400) {
         throw "CGCE-OPS-PROCESS-TIMEOUT invalid timeout"
+    }
+    $controlDeadline = ConvertTo-CgceControlDeadline $ControlValidUntilUtc
+    try {
+        $requiredDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    } catch {
+        throw "CGCE-OPS-CONTROL-EXPIRED invalid launch deadline"
+    }
+    if ($requiredDeadline -gt $controlDeadline.value) {
+        throw "CGCE-OPS-CONTROL-EXPIRED timeout exceeds control validity"
     }
     $canonicalExecutable = ConvertTo-CgceCanonicalRuntimePath `
         $Executable "CGCE-OPS-PROCESS-RECEIPT"
+    $encodedExecutable = ConvertTo-CgceWindowsCommandLineArgument `
+        -Argument $canonicalExecutable
+    $nativeCommandLength = $encodedExecutable.Length
+    if ($nativeCommandLine.Length -gt 0) {
+        $nativeCommandLength += 1 + $nativeCommandLine.Length
+    }
+    if ($nativeCommandLength -gt 32766) {
+        throw "CGCE-OPS-ARGUMENT native command line exceeds Windows limit"
+    }
     $paths = @(ConvertTo-CgceRuntimeExecutablePaths $AllowedExecutablePaths)
     if (-not (@($paths | Where-Object {
                 Test-CgceRuntimePathEqual $_ $canonicalExecutable
             }).Count -eq 1)) {
         throw "CGCE-OPS-PROCESS-UNLISTED executable absent from allowlist"
     }
+    Assert-CgceNoReparseInPath -Path $canonicalExecutable
     if (-not (Test-Path -LiteralPath $canonicalExecutable -PathType Leaf) -or
         -not (Test-CgceRuntimeChecksum $ExpectedExecutableChecksum) -or
         (Get-CgceSha256 $canonicalExecutable) -cne $ExpectedExecutableChecksum) {
@@ -2617,12 +3253,13 @@ function Invoke-CgceChildProcess(
         throw "CGCE-OPS-PROCESS-RECEIPT process launch replay blocked"
     }
     $working = Split-Path -Parent $canonicalExecutable
+    $createdAt = Get-CgceRuntimeUtcNow
     $launch = [pscustomobject][ordered]@{
         schema_version = "1.0"
         kind = "cgce_windows_discovery_process_launch"
         run_id = $runId
         sequence = 0
-        created_at_utc = (Get-CgceRuntimeUtcNow)
+        created_at_utc = $createdAt
         executable_path = $canonicalExecutable
         executable_sha256 = $ExpectedExecutableChecksum
         working_directory = $working
@@ -2633,44 +3270,158 @@ function Invoke-CgceChildProcess(
         arguments_sha256 = (Get-CgceFramedStringArraySha256 `
             "CGCE-ARGS-1" $Arguments)
         timeout_seconds = $TimeoutSeconds
+        control_valid_until_utc = $controlDeadline.text
         previous_receipt_sha256 = $null
     }
     $launchPath = Join-Path $ReceiptRoot "000-launch.json"
     $launchWrite = Write-CgceRuntimeJson `
         $launch $launchPath "CGCE-OPS-PROCESS-RECEIPT"
+    if ($null -ne $script:CgceTestLaunchReceiptSeam) {
+        $null = & $script:CgceTestLaunchReceiptSeam $launchPath
+    }
+    $launchAuthority = Read-CgceLaunchReceipt `
+        -Path $launchPath `
+        -RunId $runId
+    Assert-CgceLaunchReceiptBinding `
+        -Actual $launchAuthority `
+        -Expected $launch `
+        -CanonicalPaths $paths `
+        -Arguments $Arguments
+    $launchDeadlineUtc = (
+        ConvertFrom-CgceRuntimeUtcTimestamp `
+            -Value $launchAuthority.created_at_utc `
+            -Code "CGCE-OPS-PROCESS-RECEIPT"
+    ).AddSeconds($TimeoutSeconds)
+    if ((Get-CgceSha256 -Path $launchPath) -cne $launchWrite.checksum) {
+        throw "CGCE-OPS-PROCESS-RECEIPT launch receipt checksum drift"
+    }
+    if ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds) -gt
+        $controlDeadline.value) {
+        throw "CGCE-OPS-CONTROL-EXPIRED launch deadline no longer authorized"
+    }
+    Assert-CgceNoReparseInPath -Path $canonicalExecutable
+    if (-not (Test-Path -LiteralPath $canonicalExecutable -PathType Leaf) -or
+        (Get-CgceSha256 -Path $canonicalExecutable) -cne
+            $ExpectedExecutableChecksum) {
+        throw "CGCE-OPS-CHECKSUM executable drift immediately before launch"
+    }
+    if ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds) -gt
+        $controlDeadline.value) {
+        throw "CGCE-OPS-CONTROL-EXPIRED pre-launch authority deadline expired"
+    }
+    if ([DateTime]::UtcNow -gt $launchDeadlineUtc) {
+        throw "CGCE-OPS-PROCESS-TIMEOUT launch intent expired before authority"
+    }
+    $null = & $PreLaunchValidation $launchWrite.checksum
+    if ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds) -gt
+        $controlDeadline.value) {
+        throw "CGCE-OPS-CONTROL-EXPIRED pre-launch authority expired"
+    }
+    if ([DateTime]::UtcNow -gt $launchDeadlineUtc) {
+        throw "CGCE-OPS-PROCESS-TIMEOUT launch intent expired"
+    }
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $startedAt = Get-CgceRuntimeUtcNow
+    $startParameters = @{
+        FilePath = $canonicalExecutable
+        WorkingDirectory = $working
+        PassThru = $true
+    }
+    if ($nativeCommandLine.Length -gt 0) {
+        $startParameters["ArgumentList"] = [string[]]@($nativeCommandLine)
+    }
     try {
-        $process = Start-Process `
-            -FilePath $canonicalExecutable `
-            -ArgumentList $Arguments `
-            -WorkingDirectory $working `
-            -PassThru
+        $process = Start-Process @startParameters
     } catch {
         throw "CGCE-OPS-PROCESS-QUERY child launch failed"
     }
-    $startedAt = Get-CgceRuntimeUtcNow
-    $rootRecord = Get-CgceRootProcessRecord `
-        -Process $process `
-        -CanonicalPath $canonicalExecutable
-    $rootIdentity = Get-CgceProcessIdentityFromRecord `
-        $rootRecord $canonicalExecutable
+    Invoke-CgceProcessCrash "after-process-start"
+    try {
+        $immediateRootRecord = [pscustomobject]@{
+            ProcessId = [int64]$process.Id
+            ParentProcessId = [int64]0
+            ExecutablePath = $canonicalExecutable
+            CreationTimeFileTimeUtc = [int64](
+                $process.StartTime.ToUniversalTime().ToFileTimeUtc()
+            )
+        }
+        $immediateRootIdentity = Get-CgceProcessIdentityFromRecord `
+            $immediateRootRecord `
+            $canonicalExecutable
+    } catch {
+        Write-CgceManualRecoveryBarrier `
+            -ReceiptRoot $ReceiptRoot `
+            -RunId $runId `
+            -Pid ([int64]$process.Id) `
+            -ParentPid 0 `
+            -PreviousChecksum $launchWrite.checksum `
+            -PidReceipts @()
+        throw "CGCE-OPS-MANUAL-RECOVERY immediate root identity unavailable"
+    }
     $observed = New-Object 'Collections.Generic.List[object]'
     $bindings = New-Object 'Collections.Generic.List[object]'
     $seen = New-Object 'Collections.Generic.HashSet[string]'
     $previous = $launchWrite.checksum
 
     function Add-ProcessIdentity($Identity) {
-        if ($script:processObserved.Count -ge 998) {
-            throw "CGCE-OPS-PROCESS-RECEIPT PID receipt bound exceeded"
+        if ($null -eq $Identity -or
+            -not (Test-CgceRuntimeInteger `
+                $Identity.pid 1 ([uint32]::MaxValue)) -or
+            -not (Test-CgceRuntimeInteger `
+                $Identity.parent_pid 0 ([uint32]::MaxValue)) -or
+            -not (Test-CgceRuntimeInteger `
+                $Identity.creation_time_filetime_utc 1 ([int64]::MaxValue)) -or
+            -not (Test-CgceRuntimeUtcTimestamp $Identity.creation_time_utc) -or
+            [string]::IsNullOrWhiteSpace([string]$Identity.executable_path)) {
+            throw "CGCE-OPS-MANUAL-RECOVERY process identity unreadable"
         }
-        $isAllowed = @($script:processAllowed | Where-Object {
-            Test-CgceRuntimePathEqual $_ $Identity.executable_path
-        }).Count -eq 1
-        if (-not $isAllowed) {
-            throw "CGCE-OPS-PROCESS-UNLISTED observed descendant not allowlisted"
-        }
-        $key = "$($Identity.pid)|$($Identity.executable_path)|$($Identity.creation_time_filetime_utc)"
+        $identityPath = ConvertTo-CgceCanonicalRuntimePath `
+            $Identity.executable_path "CGCE-OPS-MANUAL-RECOVERY"
+        $key = "$($Identity.pid)|$identityPath|$($Identity.creation_time_filetime_utc)"
         if (-not $script:processSeen.Add($key)) { return }
+        if (@($script:processObserved.ToArray() | Where-Object {
+                    [int64]$_.pid -eq [int64]$Identity.pid
+                }).Count -ne 0) {
+            Write-CgceManualRecoveryBarrier `
+                -ReceiptRoot $script:processReceiptRoot `
+                -RunId $script:processRunId `
+                -Pid ([int64]$Identity.pid) `
+                -ParentPid ([int64]$Identity.parent_pid) `
+                -PreviousChecksum $script:processPrevious `
+                -PidReceipts ([object[]]$script:processObserved.ToArray())
+            throw "CGCE-OPS-MANUAL-RECOVERY duplicate PID identity"
+        }
+        if ($script:processObserved.Count -ge 998) {
+            Write-CgceManualRecoveryBarrier `
+                -ReceiptRoot $script:processReceiptRoot `
+                -RunId $script:processRunId `
+                -Pid ([int64]$Identity.pid) `
+                -ParentPid ([int64]$Identity.parent_pid) `
+                -PreviousChecksum $script:processPrevious `
+                -PidReceipts ([object[]]$script:processObserved.ToArray())
+            throw "CGCE-OPS-MANUAL-RECOVERY PID receipt bound exceeded"
+        }
         $sequence = $script:processObserved.Count + 1
+        if ($sequence -eq 1) {
+            if ([int64]$Identity.pid -ne [int64]$script:processRootPid -or
+                [int64]$Identity.parent_pid -ne 0) {
+                throw "CGCE-OPS-PROCESS-RECEIPT root PID binding drift"
+            }
+        } else {
+            $parentMatches = @(
+                $script:processObserved.ToArray() |
+                    Where-Object {
+                        [int64]$_.pid -eq [int64]$Identity.parent_pid
+                    }
+            )
+            if ($parentMatches.Count -ne 1) {
+                throw "CGCE-OPS-PROCESS-RECEIPT descendant parent not unique"
+            }
+            if ([int64]$Identity.creation_time_filetime_utc -lt
+                [int64]$parentMatches[0].creation_time_filetime_utc) {
+                throw "CGCE-OPS-PROCESS-RECEIPT descendant predates parent"
+            }
+        }
         $receipt = [pscustomobject][ordered]@{
             schema_version = "1.0"
             kind = "cgce_windows_discovery_process_pid"
@@ -2678,7 +3429,7 @@ function Invoke-CgceChildProcess(
             sequence = $sequence
             pid = [int64]$Identity.pid
             parent_pid = [int64]$Identity.parent_pid
-            executable_path = $Identity.executable_path
+            executable_path = $identityPath
             creation_time_utc = $Identity.creation_time_utc
             creation_time_filetime_utc = [int64]$Identity.creation_time_filetime_utc
             observed_at_utc = (Get-CgceRuntimeUtcNow)
@@ -2689,11 +3440,83 @@ function Invoke-CgceChildProcess(
         )
         $written = Write-CgceRuntimeJson `
             $receipt $path "CGCE-OPS-PROCESS-RECEIPT"
-        $null = $script:processObserved.Add($receipt)
+        $readBack = Read-CgcePidReceipt `
+            -Path $path `
+            -RunId $script:processRunId `
+            -ExpectedSequence $sequence `
+            -PreviousChecksum $script:processPrevious
+        if ([int64]$readBack.pid -ne [int64]$receipt.pid -or
+            [int64]$readBack.parent_pid -ne [int64]$receipt.parent_pid -or
+            -not (Test-CgceRuntimePathEqual `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $readBack.executable_path `
+                    "CGCE-OPS-PROCESS-RECEIPT") `
+                $identityPath) -or
+            $readBack.creation_time_utc -cne $receipt.creation_time_utc -or
+            [int64]$readBack.creation_time_filetime_utc -ne
+                [int64]$receipt.creation_time_filetime_utc -or
+            (Get-CgceSha256 -Path $path) -cne $written.checksum) {
+            throw "CGCE-OPS-PROCESS-RECEIPT PID receipt semantic drift"
+        }
+        $null = $script:processObserved.Add($readBack)
         $null = $script:processBindings.Add([pscustomobject][ordered]@{
             sequence = $sequence; path = $path; sha256 = $written.checksum
         })
         $script:processPrevious = $written.checksum
+        Invoke-CgceProcessCrash ("after-pid-" + $sequence)
+        if ($sequence -eq 1 -and
+            -not (Test-CgceRuntimePathEqual `
+                $identityPath $script:processRootExecutable)) {
+            throw "CGCE-OPS-PROCESS-RECEIPT root executable binding drift"
+        }
+        $isAllowed = @($script:processAllowed | Where-Object {
+            Test-CgceRuntimePathEqual $_ $identityPath
+        }).Count -eq 1
+        if (-not $isAllowed) {
+            throw "CGCE-OPS-PROCESS-UNLISTED observed descendant not allowlisted"
+        }
+    }
+
+    function Add-ObservedDescendants([object[]]$Records) {
+        $added = $true
+        while ($added) {
+            $added = $false
+            foreach ($record in $Records) {
+                $parentMatches = @(
+                    $script:processObserved.ToArray() |
+                        Where-Object {
+                            [int64]$_.pid -eq
+                                [int64]$record.ParentProcessId
+                        }
+                )
+                if ($parentMatches.Count -gt 1) {
+                    throw "CGCE-OPS-PROCESS-RECEIPT ambiguous parent PID"
+                }
+                if ($parentMatches.Count -eq 1) {
+                    try {
+                        $identity = Get-CgceProcessIdentityFromRecord $record ""
+                    } catch {
+                        Write-CgceManualRecoveryBarrier `
+                            -ReceiptRoot $script:processReceiptRoot `
+                            -RunId $script:processRunId `
+                            -Pid ([int64]$record.ProcessId) `
+                            -ParentPid ([int64]$record.ParentProcessId) `
+                            -PreviousChecksum $script:processPrevious `
+                            -PidReceipts ([object[]]$script:processObserved.ToArray())
+                        throw "CGCE-OPS-MANUAL-RECOVERY process identity unreadable"
+                    }
+                    if ([int64]$identity.creation_time_filetime_utc -lt
+                        [int64]$parentMatches[0].creation_time_filetime_utc) {
+                        continue
+                    }
+                    $before = $script:processObserved.Count
+                    Add-ProcessIdentity $identity
+                    if ($script:processObserved.Count -gt $before) {
+                        $added = $true
+                    }
+                }
+            }
+        }
     }
     $script:processObserved = $observed
     $script:processBindings = $bindings
@@ -2702,54 +3525,111 @@ function Invoke-CgceChildProcess(
     $script:processRunId = $runId
     $script:processReceiptRoot = $ReceiptRoot
     $script:processPrevious = $previous
+    $script:processRootPid = [int64]$process.Id
+    $script:processRootExecutable = $canonicalExecutable
     try {
-        Add-ProcessIdentity $rootIdentity
-        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        Add-ProcessIdentity $immediateRootIdentity
+        $rootRecord = Get-CgceRootProcessRecord `
+            -Process $process `
+            -CanonicalPath $canonicalExecutable
+        $verifiedRootIdentity = Get-CgceProcessIdentityFromRecord `
+            $rootRecord `
+            $canonicalExecutable
+        if ([int64]$verifiedRootIdentity.pid -ne
+                [int64]$immediateRootIdentity.pid -or
+            -not (Test-CgceRuntimePathEqual `
+                $verifiedRootIdentity.executable_path `
+                $immediateRootIdentity.executable_path) -or
+            [int64]$verifiedRootIdentity.creation_time_filetime_utc -ne
+                [int64]$immediateRootIdentity.creation_time_filetime_utc) {
+            throw "CGCE-OPS-MANUAL-RECOVERY root identity verification drift"
+        }
         while ($true) {
-            try {
-                $records = @(Get-CimInstance -ClassName "Win32_Process" -ErrorAction Stop)
-            } catch {
-                throw "CGCE-OPS-PROCESS-QUERY descendant query failed"
+            $records = @(Get-CgceProcessRecordsSnapshot)
+            Add-ObservedDescendants -Records $records
+            $live = Get-CgceLiveObservedProcessCount `
+                -Observed ([object[]]$observed.ToArray()) `
+                -Records $records
+            $remainingMilliseconds = Get-CgceRemainingProcessMilliseconds `
+                -Stopwatch $stopwatch `
+                -TimeoutSeconds $TimeoutSeconds
+            $controlRemainingMilliseconds = [int64][Math]::Floor(
+                ($controlDeadline.value - [DateTime]::UtcNow).TotalMilliseconds
+            )
+            if ($controlRemainingMilliseconds -le 0) {
+                $remainingMilliseconds = 0
+            } elseif ($controlRemainingMilliseconds -lt
+                $remainingMilliseconds) {
+                $remainingMilliseconds = [int]$controlRemainingMilliseconds
             }
-            $knownPids = @($observed | ForEach-Object { [int64]$_.pid })
-            $added = $true
-            while ($added) {
-                $added = $false
-                foreach ($record in $records) {
-                    if ($knownPids -contains [int64]$record.ParentProcessId) {
-                        $identity = Get-CgceProcessIdentityFromRecord $record ""
-                        $before = $observed.Count
-                        Add-ProcessIdentity $identity
-                        if ($observed.Count -gt $before) {
-                            $knownPids += [int64]$identity.pid
-                            $added = $true
-                        }
-                    }
+            $launchRemainingMilliseconds = [int64][Math]::Floor(
+                ($launchDeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds
+            )
+            if ($launchRemainingMilliseconds -le 0) {
+                $remainingMilliseconds = 0
+            } elseif ($launchRemainingMilliseconds -lt
+                $remainingMilliseconds) {
+                $remainingMilliseconds = [int]$launchRemainingMilliseconds
+            }
+            $waitSliceMilliseconds = [Math]::Min(
+                100,
+                $remainingMilliseconds
+            )
+            $rootExited = $process.WaitForExit($waitSliceMilliseconds)
+            if ($rootExited -and $live -eq 0) {
+                Assert-CgceProcessCompletedWithinDeadline `
+                    -Stopwatch $stopwatch `
+                    -TimeoutSeconds $TimeoutSeconds `
+                    -ControlDeadlineUtc $controlDeadline.value
+                if ([DateTime]::UtcNow -gt $launchDeadlineUtc) {
+                    throw "CGCE-OPS-PROCESS-TIMEOUT child exited after launch intent"
                 }
-            }
-            $live = 0
-            foreach ($identity in @($observed)) {
-                foreach ($record in $records) {
-                    if ([int64]$record.ProcessId -eq [int64]$identity.pid) {
-                        $current = Get-CgceProcessIdentityFromRecord $record ""
-                        if ((Test-CgceRuntimePathEqual `
-                                $current.executable_path `
-                                $identity.executable_path) -and
-                            [int64]$current.creation_time_filetime_utc -eq
-                                [int64]$identity.creation_time_filetime_utc) {
-                            $live += 1
-                        }
-                    }
+                $finalRecords = @(Get-CgceProcessRecordsSnapshot)
+                Add-ObservedDescendants -Records $finalRecords
+                $finalLive = Get-CgceLiveObservedProcessCount `
+                    -Observed ([object[]]$observed.ToArray()) `
+                    -Records $finalRecords
+                if ($finalLive -ne 0) {
+                    continue
                 }
+                Assert-CgceObservedProcessesTerminated `
+                    -Observed ([object[]]$observed.ToArray()) `
+                    -Records $finalRecords
+                break
             }
-            if ($live -eq 0) { break }
-            if ([DateTime]::UtcNow -ge $deadline) {
+            if ($remainingMilliseconds -le 0) {
                 throw "CGCE-OPS-PROCESS-TIMEOUT child process still active"
             }
-            Start-Sleep -Milliseconds 100
+            if ($rootExited) {
+                Start-Sleep -Milliseconds $waitSliceMilliseconds
+            }
         }
-        $process.WaitForExit()
-        $exitCode = [int]$process.ExitCode
+        if (-not $process.WaitForExit(0)) {
+            throw "CGCE-OPS-PROCESS-TIMEOUT root process still active"
+        }
+        Assert-CgceProcessCompletedWithinDeadline `
+            -Stopwatch $stopwatch `
+            -TimeoutSeconds $TimeoutSeconds `
+            -ControlDeadlineUtc $controlDeadline.value
+        if ([DateTime]::UtcNow -gt $launchDeadlineUtc) {
+            throw "CGCE-OPS-PROCESS-TIMEOUT final sweep exceeded launch intent"
+        }
+        try {
+            $exitCode = [int]$process.ExitCode
+            $exitAt = Get-CgceRuntimeUtcNow
+        } catch {
+            throw "CGCE-OPS-MANUAL-RECOVERY root exit identity unavailable"
+        }
+        Assert-CgceProcessCompletedWithinDeadline `
+            -Stopwatch $stopwatch `
+            -TimeoutSeconds $TimeoutSeconds `
+            -ControlDeadlineUtc $controlDeadline.value
+        $exitAtValue = ConvertFrom-CgceRuntimeUtcTimestamp `
+            -Value $exitAt `
+            -Code "CGCE-OPS-PROCESS-RECEIPT"
+        if ($exitAtValue -gt $launchDeadlineUtc) {
+            throw "CGCE-OPS-PROCESS-TIMEOUT result exceeded launch intent"
+        }
         $observedResult = @(
             foreach ($receipt in @($observed)) {
                 [pscustomobject][ordered]@{
@@ -2770,14 +3650,18 @@ function Invoke-CgceChildProcess(
             launch_receipt_sha256 = $launchWrite.checksum
             previous_receipt_sha256 = $script:processPrevious
             started_at_utc = $startedAt
-            exit_at_utc = (Get-CgceRuntimeUtcNow)
+            exit_at_utc = $exitAt
             exit_code = $exitCode
             observed_processes = [object[]]$observedResult
             pid_receipts = [object[]]$bindings.ToArray()
         }
+        Invoke-CgceProcessCrash "before-result"
         $resultPath = Join-Path $ReceiptRoot "999-result.json"
         $resultWrite = Write-CgceRuntimeJson `
             $result $resultPath "CGCE-OPS-PROCESS-RECEIPT"
+        $null = Read-CgceProcessReceiptChain `
+            -ReceiptRoot $ReceiptRoot `
+            -CanonicalPaths $paths
         return [pscustomobject][ordered]@{
             result = $resultWrite.value
             launch_receipt_checksum = $launchWrite.checksum
@@ -2791,12 +3675,18 @@ function Invoke-CgceChildProcess(
         $script:processRunId = $null
         $script:processReceiptRoot = $null
         $script:processPrevious = $null
+        $script:processRootPid = $null
+        $script:processRootExecutable = $null
+        if ($null -ne $stopwatch) {
+            $stopwatch.Stop()
+        }
     }
 }
 
 Export-ModuleMember -Function @(
     "Assert-CgceNoServerActivity",
     "Assert-CgceNoForeignRunArtifacts",
+    "Assert-CgceInventoryProbeStaged",
     "Assert-CgceServerArguments",
     "Enable-CgceInventoryProbe",
     "Restore-CgceInventoryProbe",

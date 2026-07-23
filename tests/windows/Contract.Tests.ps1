@@ -91,6 +91,7 @@ function Write-CgceContractTestControl([string]$Path, $Value) {
 }
 
 function Set-CgceContractCreatedEvidence($State) {
+    $State.source_manifest_checksum = ("e" * 64)
     $State.inventory_checksums.original = ("1" * 64)
 }
 
@@ -295,24 +296,35 @@ Invoke-CgceTest "normal transition helper rejects fixed-purpose recovery edges" 
     }
 }
 
-Invoke-CgceTest "strict JSON preserves root kinds and one-element arrays" {
+Invoke-CgceTest "strict JSON preserves root kinds and exact string array shape" {
     $root = New-CgceContractTestRoot
     try {
         $objectPath = Join-Path $root "object.json"
         $objectArrayPath = Join-Path $root "object-array.json"
         $stringPath = Join-Path $root "string.json"
-        $stringArrayPath = Join-Path $root "string-array.json"
         Write-CgceContractTestUtf8 $objectPath "{}"
         Write-CgceContractTestUtf8 $objectArrayPath "[{}]"
         Write-CgceContractTestUtf8 $stringPath '"x"'
-        Write-CgceContractTestUtf8 $stringArrayPath '["x"]'
 
         Assert-CgceEqual 0 @((Read-CgceJsonObject $objectPath).PSObject.Properties).Count
         Assert-CgceThrows "CGCE-OPS-JSON" { Read-CgceJsonObject $objectArrayPath }
         Assert-CgceThrows "CGCE-OPS-JSON" { Read-CgceJsonObject $stringPath }
-        $values = @(Read-CgceJsonStringArray $stringArrayPath)
-        Assert-CgceEqual 1 $values.Count
-        Assert-CgceEqual "x" $values[0]
+        foreach ($case in @(
+            [pscustomobject]@{ Json = "[]"; Expected = @() },
+            [pscustomobject]@{ Json = '["x"]'; Expected = @("x") },
+            [pscustomobject]@{
+                Json = '["one","two","three"]'
+                Expected = @("one", "two", "three")
+            }
+        )) {
+            $path = Join-Path `
+                $root `
+                ("string-array-" + [guid]::NewGuid().ToString("N") + ".json")
+            Write-CgceContractTestUtf8 $path $case.Json
+            $values = Read-CgceJsonStringArray $path
+            Assert-CgceEqual $true ($values -is [string[]])
+            Assert-CgceDeepEqual $case.Expected $values
+        }
     } finally {
         Remove-Item -LiteralPath $root -Recurse -Force
     }
@@ -551,9 +563,10 @@ Invoke-CgceTest "new run state has every exact field and state replacement incre
         Assert-CgceEqual "CREATED" $state.phase
         Assert-CgceEqual "ACTIVE" $state.outcome
         Assert-CgceEqual 0 $state.revision
-        Assert-CgceEqual 24 @($state.PSObject.Properties).Count
+        Assert-CgceEqual 25 @($state.PSObject.Properties).Count
         Assert-CgceEqual 41 @($state.paths.PSObject.Properties).Count
         Assert-CgceEqual 4 @($state.inventory_checksums.PSObject.Properties).Count
+        Assert-CgceEqual $null $state.source_manifest_checksum
         Assert-CgceEqual $null $state.inventory_checksums.original
         Set-CgceContractCreatedEvidence $state
         Write-CgceJsonAtomic $state $paths.genesis_state
@@ -565,6 +578,78 @@ Invoke-CgceTest "new run state has every exact field and state replacement incre
         $read = Read-CgceRunState -RunRoot $root -RunId $state.run_id
         Assert-CgceEqual "BACKUP_VERIFIED" $read.phase
         Assert-CgceEqual 1 $read.revision
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "committed run state requires immutable source manifest authority" {
+    $root = New-CgceContractTestRoot
+    try {
+        $paths = New-CgceContractTestPaths $root
+        New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
+        New-Item -ItemType Directory -Path $paths.server_root | Out-Null
+        $state = New-CgceRunState `
+            -RunId "r-0123456789abcdef0123456789abcdef" `
+            -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+            -Paths $paths
+        Set-CgceContractCreatedEvidence $state
+        Write-CgceJsonAtomic $state $paths.genesis_state
+        Write-CgceJsonAtomic $state $paths.state
+        Assert-CgceEqual `
+            ("e" * 64) `
+            (Read-CgceRunState $root $state.run_id).source_manifest_checksum
+
+        $missing = Read-CgceJsonObject $paths.state
+        $missing.PSObject.Properties.Remove("source_manifest_checksum")
+        Write-CgceContractTestUtf8 `
+            $paths.state `
+            ($missing | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-JSON" {
+            Read-CgceRunState $root $state.run_id
+        }
+
+        foreach ($invalid in @(
+            $null,
+            ("E" * 64),
+            (("e" * 64) + "`n"),
+            (("e" * 64) + "`r`n")
+        )) {
+            $candidate = Read-CgceJsonObject $paths.genesis_state
+            $candidate.source_manifest_checksum = $invalid
+            Write-CgceContractTestUtf8 `
+                $paths.state `
+                ($candidate | ConvertTo-Json -Depth 12)
+            Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+                Read-CgceRunState $root $state.run_id
+            }
+        }
+
+        $drift = Read-CgceJsonObject $paths.genesis_state
+        $drift.source_manifest_checksum = ("f" * 64)
+        Write-CgceContractTestUtf8 `
+            $paths.state `
+            ($drift | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Read-CgceRunState $root $state.run_id
+        }
+
+        Write-CgceContractTestUtf8 `
+            $paths.state `
+            ((Read-CgceJsonObject $paths.genesis_state) |
+                ConvertTo-Json -Depth 12)
+        $oldChecksum = Get-CgceSha256 $paths.state
+        $transition = Read-CgceJsonObject $paths.state
+        $transition.source_manifest_checksum = ("f" * 64)
+        $transition.inventory_checksums.backup = ("2" * 64)
+        $transition = Set-CgceRunPhase `
+            $transition `
+            "CREATED" `
+            "BACKUP_VERIFIED"
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Write-CgceRunState $transition $paths.state "CREATED"
+        }
+        Assert-CgceEqual $oldChecksum (Get-CgceSha256 $paths.state)
     } finally {
         Remove-Item -LiteralPath $root -Recurse -Force
     }
@@ -1544,13 +1629,40 @@ Invoke-CgceTest "handoff manifest accepts only the exact sorted payload allowlis
         }
         $manifest = Join-Path $root "source-manifest.sha256"
         Write-CgceContractTestUtf8 $manifest (($records -join "`n") + "`n")
-        Assert-CgceHandoffSource -HandoffRoot $root -ManifestPath $manifest
+        $manifestChecksum = Get-CgceSha256 $manifest
+        Assert-CgceHandoffSource `
+            -HandoffRoot $root `
+            -ManifestPath $manifest `
+            -ExpectedManifestChecksum $manifestChecksum
 
         $records[1] = ("0" * 64) + "  " + $paths[1]
         Write-CgceContractTestUtf8 $manifest (($records -join "`n") + "`n")
         Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
-            Assert-CgceHandoffSource -HandoffRoot $root -ManifestPath $manifest
+            Assert-CgceHandoffSource `
+                -HandoffRoot $root `
+                -ManifestPath $manifest `
+                -ExpectedManifestChecksum $manifestChecksum
         }
+
+        Write-CgceContractTestUtf8 `
+            (Join-Path $root ($paths[1] -replace '/', '\')) `
+            "re-signed payload"
+        $records[1] = (
+            Get-CgceSha256 (
+                Join-Path $root ($paths[1] -replace '/', '\')
+            )
+        ) + "  " + $paths[1]
+        Write-CgceContractTestUtf8 $manifest (($records -join "`n") + "`n")
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Assert-CgceHandoffSource `
+                -HandoffRoot $root `
+                -ManifestPath $manifest `
+                -ExpectedManifestChecksum $manifestChecksum
+        }
+        Assert-CgceHandoffSource `
+            -HandoffRoot $root `
+            -ManifestPath $manifest `
+            -ExpectedManifestChecksum (Get-CgceSha256 $manifest)
     } finally {
         Remove-Item -LiteralPath $root -Recurse -Force
     }

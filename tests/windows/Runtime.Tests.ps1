@@ -60,6 +60,54 @@ function Set-CgceRuntimeTestRootProcessRecordSeam($Seam) {
     } $Seam
 }
 
+function Set-CgceRuntimeTestProcessRecordsSeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    & $module {
+        param($Value)
+        $script:CgceTestProcessRecordsSeam = $Value
+    } $Seam
+}
+
+function Set-CgceRuntimeTestLaunchReceiptSeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    & $module {
+        param($Value)
+        $script:CgceTestLaunchReceiptSeam = $Value
+    } $Seam
+}
+
+function Set-CgceRuntimeTestProcessCrashSeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    & $module {
+        param($Value)
+        $script:CgceTestProcessCrashSeam = $Value
+    } $Seam
+}
+
+function Wait-CgceRuntimeTestReceiptRootExit([string]$ReceiptRoot) {
+    $rootReceipt = Read-CgceJsonObject `
+        -Path (Join-Path $ReceiptRoot "001-pid.json")
+    $rootProcess = Get-Process `
+        -Id ([int]$rootReceipt.pid) `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $rootProcess) { return }
+    $sameRoot = $false
+    try {
+        $sameRoot = (
+            $rootProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
+        ) -eq [int64]$rootReceipt.creation_time_filetime_utc
+    } catch {
+        $sameRoot = $false
+    }
+    try {
+        if ($sameRoot -and -not $rootProcess.WaitForExit(5000)) {
+            throw "CGCE-TEST root process did not exit"
+        }
+    } finally {
+        $rootProcess.Dispose()
+    }
+}
+
 function New-CgceRuntimeProbeFixture {
     $base = New-CgceRuntimeTestRoot
     $serverRoot = Join-Path $base "server"
@@ -113,6 +161,48 @@ function New-CgceRuntimeProbeFixture {
     }
 }
 
+function Initialize-CgceRuntimePreparedProbeFixture($Fixture) {
+    foreach ($directory in @(
+        (Split-Path -Parent $Fixture.Paths.original_inventory),
+        (Split-Path -Parent $Fixture.Paths.backup_saved),
+        $Fixture.Paths.capture,
+        $Fixture.Paths.process_receipts,
+        $Fixture.Paths.restore_receipts
+    )) {
+        if (-not (Test-Path -LiteralPath $directory)) {
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        }
+    }
+    Write-CgceRuntimeTestUtf8 `
+        -Path (Join-Path $Fixture.Paths.active_saved "World.sav") `
+        -Text "synthetic world"
+    $original = @(Get-CgceTreeInventory -Root $Fixture.Paths.active_saved)
+    $null = Copy-CgceTreeVerified `
+        -Source $Fixture.Paths.active_saved `
+        -Destination $Fixture.Paths.inactive_original
+    $null = Copy-CgceTreeVerified `
+        -Source $Fixture.Paths.active_saved `
+        -Destination $Fixture.Paths.backup_saved
+    $null = Write-CgceInventory `
+        -Entries $original `
+        -Path $Fixture.Paths.original_inventory `
+        -Kind "original"
+    $null = Write-CgceInventory `
+        -Entries $original `
+        -Path $Fixture.Paths.backup_inventory `
+        -Kind "backup"
+    $null = Write-CgceInventory `
+        -Entries $original `
+        -Path $Fixture.Paths.clone_inventory `
+        -Kind "clone"
+    return Enable-CgceInventoryProbe `
+        -Ue4ssRoot $Fixture.Ue4ssRoot `
+        -ProbeSource $Fixture.ProbeSource `
+        -RunDirectory $Fixture.Paths.run_directory `
+        -RunId $Fixture.RunId `
+        -Paths $Fixture.Paths
+}
+
 function Assert-CgceRuntimeBeforeImages($Fixture) {
     Assert-CgceEqual $Fixture.ModsChecksum `
         (Get-CgceRuntimeTestSha256 $Fixture.Paths.mods_txt)
@@ -161,12 +251,60 @@ Invoke-CgceTest "server arguments reject public secret and native parsing hazard
         "@response.txt",
         "line`nbreak",
         "-port=8211`n",
-        "-port=8211`r`n"
+        "-port=8211`r`n",
+        ("x" * 4097)
     )) {
         Assert-CgceThrows "CGCE-OPS-ARGUMENT" {
             Assert-CgceServerArguments -Arguments @($argument)
         }
     }
+}
+
+Invoke-CgceTest "Windows native argument quoting preserves exact CRT token boundaries" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    $quote = [char]34
+    $slash = [char]92
+    $vectors = @(
+        [pscustomobject]@{
+            Value = ""
+            Expected = [string]$quote + [string]$quote
+        },
+        [pscustomobject]@{
+            Value = "has space"
+            Expected = [string]$quote + "has space" + [string]$quote
+        },
+        [pscustomobject]@{
+            Value = 'embedded"quote'
+            Expected = [string]$quote + "embedded" + [string]$slash +
+                [string]$quote + "quote" + [string]$quote
+        },
+        [pscustomobject]@{
+            Value = "trailing$slash"
+            Expected = [string]$quote + "trailing" +
+                ([string]$slash * 2) + [string]$quote
+        },
+        [pscustomobject]@{
+            Value = "&|<>^"
+            Expected = [string]$quote + "&|<>^" + [string]$quote
+        }
+    )
+    foreach ($vector in $vectors) {
+        $actual = & $module {
+            param($Value)
+            ConvertTo-CgceWindowsCommandLineArgument -Argument $Value
+        } $vector.Value
+        Assert-CgceEqual $vector.Expected $actual
+    }
+    $joined = & $module {
+        param($Values)
+        ConvertTo-CgceWindowsCommandLine -Arguments $Values
+    } ([string[]]@($vectors | ForEach-Object { $_.Value }))
+    Assert-CgceEqual `
+        ([string]::Join(
+            " ",
+            [string[]]@($vectors | ForEach-Object { $_.Expected })
+        )) `
+        $joined
 }
 
 Invoke-CgceTest "runtime checksum rejects valid prefixes followed by line endings" {
@@ -178,6 +316,43 @@ Invoke-CgceTest "runtime checksum rejects valid prefixes followed by line ending
                 param($Value)
                 Test-CgceRuntimeChecksum $Value
             } (("a" * 64) + $suffix))
+    }
+}
+
+Invoke-CgceTest "launch receipt requires its bounded timeout inside control validity" {
+    $root = New-CgceRuntimeTestRoot
+    try {
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $path = Join-Path $root "000-launch.json"
+        $launch = [pscustomobject][ordered]@{
+            schema_version = "1.0"
+            kind = "cgce_windows_discovery_process_launch"
+            run_id = $runId
+            sequence = 0
+            created_at_utc = "2026-07-23T01:00:00Z"
+            executable_path = "D:\PalServer\PalServer.exe"
+            executable_sha256 = ("a" * 64)
+            working_directory = "D:\PalServer"
+            allowed_executable_path_count = 1
+            allowed_executable_paths_sha256 = ("b" * 64)
+            argument_count = 0
+            arguments_sha256 = ("c" * 64)
+            timeout_seconds = 30
+            control_valid_until_utc = "2026-07-23T01:00:29Z"
+            previous_receipt_sha256 = $null
+        }
+        Write-CgceJsonAtomic -Value $launch -Path $path
+        $module = Get-Module "CgceDiscovery.Runtime"
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            & $module {
+                param($ReceiptPath, $ExpectedRunId)
+                Read-CgceLaunchReceipt `
+                    -Path $ReceiptPath `
+                    -RunId $ExpectedRunId
+            } $path $runId
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
     }
 }
 
@@ -380,7 +555,8 @@ Invoke-CgceTest "receipt-aware activity validates allowlist digest and PID ident
                 -Domain "CGCE-PATHS-1" -Values $allowed)
             argument_count = 1
             arguments_sha256 = ("b" * 64)
-            timeout_seconds = 30
+            timeout_seconds = 300
+            control_valid_until_utc = "2026-07-23T02:00:00Z"
             previous_receipt_sha256 = $null
         }
         $launchPath = Join-Path $receiptRoot "000-launch.json"
@@ -391,7 +567,7 @@ Invoke-CgceTest "receipt-aware activity validates allowlist digest and PID ident
             run_id = $runId
             sequence = 1
             pid = 42
-            parent_pid = 1
+            parent_pid = 0
             executable_path = "D:\PalServer\PalServer.exe"
             creation_time_utc = "2026-07-23T01:01:01Z"
             creation_time_filetime_utc = [int64]134292420610000000
@@ -455,7 +631,8 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
                 -Domain "CGCE-PATHS-1" -Values $allowed)
             argument_count = 1
             arguments_sha256 = ("b" * 64)
-            timeout_seconds = 30
+            timeout_seconds = 300
+            control_valid_until_utc = "2026-07-23T02:00:00Z"
             previous_receipt_sha256 = $null
         }
         $launchPath = Join-Path $receiptRoot "000-launch.json"
@@ -466,7 +643,7 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
             run_id = $runId
             sequence = 1
             pid = 42
-            parent_pid = 1
+            parent_pid = 0
             executable_path = $allowed[0]
             creation_time_utc = "2026-07-23T01:01:01Z"
             creation_time_filetime_utc = [int64]134292420610000000
@@ -488,7 +665,7 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
             observed_processes = @([pscustomobject][ordered]@{
                 sequence = 1
                 pid = 42
-                parent_pid = 1
+                parent_pid = 0
                 executable_path = $allowed[0]
                 creation_time_utc = "2026-07-23T01:01:01Z"
                 creation_time_filetime_utc = [int64]134292420610000000
@@ -509,6 +686,27 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
             -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
 
         $resultPath = Join-Path $receiptRoot "999-result.json"
+        $result.exit_at_utc = "2026-07-23T01:01:01Z"
+        Write-CgceRuntimeTestUtf8 `
+            -Path $resultPath `
+            -Text ($result | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
+        }
+        $result.exit_at_utc = "2026-07-23T01:05:01Z"
+        Write-CgceRuntimeTestUtf8 `
+            -Path $resultPath `
+            -Text ($result | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
+        }
+        $result.exit_at_utc = "2026-07-23T01:01:03Z"
+        Write-CgceRuntimeTestUtf8 `
+            -Path $resultPath `
+            -Text ($result | ConvertTo-Json -Depth 12)
+
         $tamperedResult = Read-CgceJsonObject $resultPath
         $tamperedResult.exit_code = "0"
         Write-CgceRuntimeTestUtf8 `
@@ -554,7 +752,7 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
         $result.observed_processes = @([pscustomobject][ordered]@{
             sequence = 1
             pid = 42
-            parent_pid = 1
+            parent_pid = 0
             executable_path = $allowed[0]
             creation_time_utc = "2026-07-23T01:01:01Z"
             creation_time_filetime_utc = [int64]134292420610000000
@@ -571,6 +769,271 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
     } finally {
         Set-CgceRuntimeTestActivitySeam $null
         Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "partial process chain retains unlisted descendants for liveness" {
+    $root = New-CgceRuntimeTestRoot
+    try {
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $root "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $allowed = @("D:\PalServer\PalServer.exe")
+        $launch = [pscustomobject][ordered]@{
+            schema_version = "1.0"
+            kind = "cgce_windows_discovery_process_launch"
+            run_id = $runId
+            sequence = 0
+            created_at_utc = "2026-07-23T01:00:00Z"
+            executable_path = $allowed[0]
+            executable_sha256 = ("a" * 64)
+            working_directory = "D:\PalServer"
+            allowed_executable_path_count = 1
+            allowed_executable_paths_sha256 = (Get-CgceRuntimeTestFramedDigest `
+                -Domain "CGCE-PATHS-1" -Values $allowed)
+            argument_count = 1
+            arguments_sha256 = ("b" * 64)
+            timeout_seconds = 300
+            control_valid_until_utc = "2026-07-23T02:00:00Z"
+            previous_receipt_sha256 = $null
+        }
+        $launchPath = Join-Path $receiptRoot "000-launch.json"
+        Write-CgceJsonAtomic -Value $launch -Path $launchPath
+        $rootPid = [pscustomobject][ordered]@{
+            schema_version = "1.0"
+            kind = "cgce_windows_discovery_process_pid"
+            run_id = $runId
+            sequence = 1
+            pid = 42
+            parent_pid = 0
+            executable_path = $allowed[0]
+            creation_time_utc = "2026-07-23T01:01:01Z"
+            creation_time_filetime_utc = [int64]134292420610000000
+            observed_at_utc = "2026-07-23T01:01:02Z"
+            previous_receipt_sha256 = (Get-CgceRuntimeTestSha256 $launchPath)
+        }
+        $rootPidPath = Join-Path $receiptRoot "001-pid.json"
+        Write-CgceJsonAtomic -Value $rootPid -Path $rootPidPath
+        $unlistedPid = [pscustomobject][ordered]@{
+            schema_version = "1.0"
+            kind = "cgce_windows_discovery_process_pid"
+            run_id = $runId
+            sequence = 2
+            pid = 43
+            parent_pid = 42
+            executable_path = "D:\Unexpected\child.exe"
+            creation_time_utc = "2026-07-23T01:01:02Z"
+            creation_time_filetime_utc = [int64]134292420620000000
+            observed_at_utc = "2026-07-23T01:01:03Z"
+            previous_receipt_sha256 = (Get-CgceRuntimeTestSha256 $rootPidPath)
+        }
+        $unlistedPidPath = Join-Path $receiptRoot "002-pid.json"
+        Write-CgceJsonAtomic -Value $unlistedPid -Path $unlistedPidPath
+
+        $module = Get-Module "CgceDiscovery.Runtime"
+        $chain = & $module {
+            param($Root, $Paths)
+            Read-CgceProcessReceiptChain `
+                -ReceiptRoot $Root `
+                -CanonicalPaths $Paths
+        } $receiptRoot $allowed
+        Assert-CgceEqual 2 @($chain.pid_receipts).Count
+        Assert-CgceEqual $true $chain.has_unlisted_pid_receipt
+
+        Set-CgceRuntimeTestActivitySeam {
+            New-CgceRuntimeActivitySnapshot -Processes @(
+                [pscustomobject]@{
+                    ProcessId = 43
+                    ParentProcessId = 42
+                    ExecutablePath = "D:\Unexpected\child.exe"
+                    CreationTimeFileTimeUtc = [int64]134292420620000000
+                }
+            ) -Tcp @() -Udp @()
+        }
+        Assert-CgceThrows "CGCE-OPS-PROCESS-ACTIVE" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths $allowed `
+                -Ports @(8211) `
+                -ReceiptRoot $receiptRoot
+        }
+
+        Set-CgceRuntimeTestActivitySeam {
+            New-CgceRuntimeActivitySnapshot -Processes @() -Tcp @() -Udp @()
+        }
+        Assert-CgceNoServerActivity `
+            -ExecutablePaths $allowed `
+            -Ports @(8211) `
+            -ReceiptRoot $receiptRoot
+
+        $result = [pscustomobject][ordered]@{
+            schema_version = "1.0"
+            kind = "cgce_windows_discovery_process_result"
+            run_id = $runId
+            sequence = 999
+            launch_receipt_sha256 = (Get-CgceRuntimeTestSha256 $launchPath)
+            previous_receipt_sha256 = (Get-CgceRuntimeTestSha256 $unlistedPidPath)
+            started_at_utc = "2026-07-23T01:01:00Z"
+            exit_at_utc = "2026-07-23T01:01:04Z"
+            exit_code = 0
+            observed_processes = @(
+                [pscustomobject][ordered]@{
+                    sequence = 1; pid = 42; parent_pid = 0
+                    executable_path = $allowed[0]
+                    creation_time_utc = "2026-07-23T01:01:01Z"
+                    creation_time_filetime_utc = [int64]134292420610000000
+                },
+                [pscustomobject][ordered]@{
+                    sequence = 2; pid = 43; parent_pid = 42
+                    executable_path = "D:\Unexpected\child.exe"
+                    creation_time_utc = "2026-07-23T01:01:02Z"
+                    creation_time_filetime_utc = [int64]134292420620000000
+                }
+            )
+            pid_receipts = @(
+                [pscustomobject][ordered]@{
+                    sequence = 1
+                    path = $rootPidPath
+                    sha256 = (Get-CgceRuntimeTestSha256 $rootPidPath)
+                },
+                [pscustomobject][ordered]@{
+                    sequence = 2
+                    path = $unlistedPidPath
+                    sha256 = (Get-CgceRuntimeTestSha256 $unlistedPidPath)
+                }
+            )
+        }
+        Write-CgceJsonAtomic `
+            -Value $result `
+            -Path (Join-Path $receiptRoot "999-result.json")
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths $allowed `
+                -Ports @(8211) `
+                -ReceiptRoot $receiptRoot
+        }
+    } finally {
+        Set-CgceRuntimeTestActivitySeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "partial process chain binds unique temporal parent ancestry" {
+    $root = New-CgceRuntimeTestRoot
+    try {
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $allowed = @(
+            "D:\PalServer\PalServer.exe",
+            "D:\PalServer\PalServer-Win64-Shipping.exe"
+        )
+        foreach ($case in @(
+            "ROOT",
+            "PARENT",
+            "ROOT_PARENT",
+            "DUPLICATE_PID",
+            "PREDATES_PARENT"
+        )) {
+            $receiptRoot = Join-Path $root "$case\$runId\receipts\process"
+            New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+            $launch = [pscustomobject][ordered]@{
+                schema_version = "1.0"
+                kind = "cgce_windows_discovery_process_launch"
+                run_id = $runId
+                sequence = 0
+                created_at_utc = "2026-07-23T01:00:00Z"
+                executable_path = $allowed[0]
+                executable_sha256 = ("a" * 64)
+                working_directory = "D:\PalServer"
+                allowed_executable_path_count = 2
+                allowed_executable_paths_sha256 = (
+                    Get-CgceRuntimeTestFramedDigest `
+                        -Domain "CGCE-PATHS-1" `
+                        -Values $allowed
+                )
+                argument_count = 1
+                arguments_sha256 = ("b" * 64)
+                timeout_seconds = 30
+                control_valid_until_utc = "2026-07-23T02:00:00Z"
+                previous_receipt_sha256 = $null
+            }
+            $launchPath = Join-Path $receiptRoot "000-launch.json"
+            Write-CgceJsonAtomic -Value $launch -Path $launchPath
+            $pid1 = [pscustomobject][ordered]@{
+                schema_version = "1.0"
+                kind = "cgce_windows_discovery_process_pid"
+                run_id = $runId
+                sequence = 1
+                pid = 42
+                parent_pid = $(if ($case -ceq "ROOT_PARENT") { 1 } else { 0 })
+                executable_path = $(if ($case -ceq "ROOT") {
+                    $allowed[1]
+                } else { $allowed[0] })
+                creation_time_utc = "2026-07-23T01:01:01Z"
+                creation_time_filetime_utc = [int64]134292420610000000
+                observed_at_utc = "2026-07-23T01:01:02Z"
+                previous_receipt_sha256 = (
+                    Get-CgceRuntimeTestSha256 $launchPath
+                )
+            }
+            $pid1Path = Join-Path $receiptRoot "001-pid.json"
+            Write-CgceJsonAtomic -Value $pid1 -Path $pid1Path
+            if ($case -in @("PARENT", "DUPLICATE_PID", "PREDATES_PARENT")) {
+                $pid2 = [pscustomobject][ordered]@{
+                    schema_version = "1.0"
+                    kind = "cgce_windows_discovery_process_pid"
+                    run_id = $runId
+                    sequence = 2
+                    pid = $(if ($case -ceq "DUPLICATE_PID") { 42 } else { 43 })
+                    parent_pid = $(if ($case -ceq "PARENT") { 999 } else { 42 })
+                    executable_path = $allowed[1]
+                    creation_time_utc = $(if ($case -ceq "PREDATES_PARENT") {
+                        "2026-07-23T01:01:00Z"
+                    } else {
+                        "2026-07-23T01:01:02Z"
+                    })
+                    creation_time_filetime_utc = $(if (
+                        $case -ceq "PREDATES_PARENT"
+                    ) {
+                        [int64]134292420600000000
+                    } else {
+                        [int64]134292420620000000
+                    })
+                    observed_at_utc = "2026-07-23T01:01:03Z"
+                    previous_receipt_sha256 = (
+                        Get-CgceRuntimeTestSha256 $pid1Path
+                    )
+                }
+                Write-CgceJsonAtomic `
+                    -Value $pid2 `
+                    -Path (Join-Path $receiptRoot "002-pid.json")
+            }
+            $module = Get-Module "CgceDiscovery.Runtime"
+            Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+                & $module {
+                    param($Root, $Paths)
+                    Read-CgceProcessReceiptChain `
+                        -ReceiptRoot $Root `
+                        -CanonicalPaths $Paths
+                } $receiptRoot $allowed
+            }
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "unreadable descendant identity fails closed for manual recovery" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    $record = [pscustomobject]@{
+        ProcessId = 43
+        ParentProcessId = 42
+        ExecutablePath = $null
+        CreationTimeFileTimeUtc = [int64]134292420620000000
+    }
+    Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+        & $module {
+            param($Value)
+            Get-CgceProcessIdentityFromRecord $Value ""
+        } $record
     }
 }
 
@@ -769,6 +1232,211 @@ Invoke-CgceTest "inventory probe writes one exact mods line and sole final recei
         Assert-CgceEqual $false `
             (Test-Path -LiteralPath $fixture.Paths.probe_staged)
     } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "staged probe authority is output-free and binds inventories journal and live matrix" {
+    $fixture = New-CgceRuntimeProbeFixture
+    try {
+        $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
+        $output = @(
+            Assert-CgceInventoryProbeStaged `
+                -Paths $fixture.Paths `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId `
+                -ExpectedFinalReceiptChecksum $receipt.checksum
+        )
+        Assert-CgceEqual 0 $output.Count
+
+        $launchPath = Join-Path `
+            $fixture.Paths.process_receipts `
+            "000-launch.json"
+        Write-CgceJsonAtomic `
+            -Value ([pscustomobject][ordered]@{ staged_test = $true }) `
+            -Path $launchPath
+        $launchChecksum = Get-CgceRuntimeTestSha256 $launchPath
+        $launchBoundOutput = @(
+            Assert-CgceInventoryProbeStaged `
+                -Paths $fixture.Paths `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId `
+                -ExpectedFinalReceiptChecksum $receipt.checksum `
+                -ExpectedLaunchReceiptChecksum $launchChecksum
+        )
+        Assert-CgceEqual 0 $launchBoundOutput.Count
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceInventoryProbeStaged `
+                -Paths $fixture.Paths `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId `
+                -ExpectedFinalReceiptChecksum $receipt.checksum `
+                -ExpectedLaunchReceiptChecksum ("f" * 64)
+        }
+        Write-CgceRuntimeTestUtf8 `
+            -Path (Join-Path $fixture.Paths.process_receipts "001-pid.json") `
+            -Text "{}"
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceInventoryProbeStaged `
+                -Paths $fixture.Paths `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId `
+                -ExpectedFinalReceiptChecksum $receipt.checksum `
+                -ExpectedLaunchReceiptChecksum $launchChecksum
+        }
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "staged probe authority rejects inventory live output and residue drift" {
+    $cases = @(
+        [pscustomobject]@{
+            Name = "clone live drift"
+            Code = "CGCE-OPS-INVENTORY"
+            Mutate = {
+                param($Fixture)
+                Write-CgceRuntimeTestUtf8 `
+                    -Path (Join-Path $Fixture.Paths.active_saved "drift.sav") `
+                    -Text "drift"
+            }
+        },
+        [pscustomobject]@{
+            Name = "isolated mods drift"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Mutate = {
+                param($Fixture)
+                Write-CgceRuntimeTestUtf8 `
+                    -Path $Fixture.Paths.mods_txt `
+                    -Text "CGCEDiscoveryInventory : 0`r`n"
+            }
+        },
+        [pscustomobject]@{
+            Name = "staged probe drift"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Mutate = {
+                param($Fixture)
+                Write-CgceRuntimeTestUtf8 `
+                    -Path (Join-Path $Fixture.Paths.probe_staged "drift.lua") `
+                    -Text "return false"
+            }
+        },
+        [pscustomobject]@{
+            Name = "generated output appeared"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Mutate = {
+                param($Fixture)
+                Write-CgceRuntimeTestUtf8 `
+                    -Path $Fixture.Paths.object_dump `
+                    -Text "early output"
+            }
+        },
+        [pscustomobject]@{
+            Name = "capture residue"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Mutate = {
+                param($Fixture)
+                Write-CgceRuntimeTestUtf8 `
+                    -Path (Join-Path $Fixture.Paths.capture "foreign.txt") `
+                    -Text "foreign"
+            }
+        },
+        [pscustomobject]@{
+            Name = "process receipt residue"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Mutate = {
+                param($Fixture)
+                Write-CgceRuntimeTestUtf8 `
+                    -Path (Join-Path $Fixture.Paths.process_receipts "foreign.json") `
+                    -Text "{}"
+            }
+        },
+        [pscustomobject]@{
+            Name = "restore journal residue"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Mutate = {
+                param($Fixture)
+                Write-CgceRuntimeTestUtf8 `
+                    -Path (Join-Path $Fixture.Paths.restore_receipts "foreign.json") `
+                    -Text "{}"
+            }
+        },
+        [pscustomobject]@{
+            Name = "probe restore journal residue"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Mutate = {
+                param($Fixture)
+                $restore = Join-Path $Fixture.Paths.probe_receipts "restore"
+                New-Item -ItemType Directory -Path $restore -Force | Out-Null
+                Write-CgceRuntimeTestUtf8 `
+                    -Path (Join-Path $restore "foreign.json") `
+                    -Text "{}"
+            }
+        },
+        [pscustomobject]@{
+            Name = "quarantine residue"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Mutate = {
+                param($Fixture)
+                New-Item `
+                    -ItemType Directory `
+                    -Path $Fixture.Paths.probe_quarantine `
+                    -Force | Out-Null
+            }
+        }
+    )
+    foreach ($case in $cases) {
+        $fixture = New-CgceRuntimeProbeFixture
+        try {
+            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
+            $null = & $case.Mutate $fixture
+            Assert-CgceThrows $case.Code {
+                Assert-CgceInventoryProbeStaged `
+                    -Paths $fixture.Paths `
+                    -RunDirectory $fixture.Paths.run_directory `
+                    -RunId $fixture.RunId `
+                    -ExpectedFinalReceiptChecksum $receipt.checksum
+            }
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+
+    $fixture = New-CgceRuntimeProbeFixture
+    try {
+        $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
+        Assert-CgceThrows "CGCE-OPS-PROBE-RECEIPT" {
+            Assert-CgceInventoryProbeStaged `
+                -Paths $fixture.Paths `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId `
+                -ExpectedFinalReceiptChecksum ("f" * 64)
+        }
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "staged probe authority rejects reparse points before reading authority" {
+    $fixture = New-CgceRuntimeProbeFixture
+    $junction = $null
+    try {
+        $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
+        $target = Join-Path $fixture.Base "outside-authority"
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+        $junction = Join-Path $fixture.Paths.run_directory "before\authority-link"
+        New-Item -ItemType Junction -Path $junction -Target $target | Out-Null
+        Assert-CgceThrows "CGCE-OPS-REPARSE" {
+            Assert-CgceInventoryProbeStaged `
+                -Paths $fixture.Paths `
+                -RunDirectory $fixture.Paths.run_directory `
+                -RunId $fixture.RunId `
+                -ExpectedFinalReceiptChecksum $receipt.checksum
+        }
+    } finally {
+        if ($null -ne $junction -and (Test-Path -LiteralPath $junction)) {
+            [System.IO.Directory]::Delete($junction)
+        }
         Remove-Item -LiteralPath $fixture.Base -Recurse -Force
     }
 }
@@ -1202,7 +1870,598 @@ Invoke-CgceTest "foreign artifact preflight blocks active originals probe and mo
     }
 }
 
-Invoke-CgceTest "child process writes immutable intent PID and result receipts without arguments" {
+Invoke-CgceTest "child process contract bounds inputs and control validity before launch" {
+    $command = Get-Command "Invoke-CgceChildProcess"
+    foreach ($parameterName in @("ControlValidUntilUtc", "PreLaunchValidation")) {
+        $mandatory = @(
+            $command.Parameters[$parameterName].Attributes |
+                Where-Object {
+                    $_ -is [System.Management.Automation.ParameterAttribute]
+                } |
+                ForEach-Object { $_.Mandatory }
+        )
+        Assert-CgceEqual $true ($mandatory -contains $true)
+    }
+
+    $common = @{
+        Executable = "D:\PalServer\PalServer.exe"
+        ExpectedExecutableChecksum = ("a" * 64)
+        AllowedExecutablePaths = @("D:\PalServer\PalServer.exe")
+        Arguments = @("-port=8211")
+        ReceiptRoot = "D:\runs\r-0123456789abcdef0123456789abcdef\receipts\process"
+        PreLaunchValidation = {}
+        ControlValidUntilUtc = [DateTime]::UtcNow.AddMinutes(5).ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    }
+    foreach ($timeout in @(0, 86401)) {
+        Assert-CgceThrows "CGCE-OPS-PROCESS-TIMEOUT" {
+            Invoke-CgceChildProcess @common -TimeoutSeconds $timeout
+        }
+    }
+
+    $manyArguments = @(
+        for ($index = 0; $index -lt 4097; $index += 1) {
+            "-x$index"
+        }
+    )
+    $tooManyArguments = @{} + $common
+    $tooManyArguments.Arguments = [string[]]$manyArguments
+    Assert-CgceThrows "CGCE-OPS-ARGUMENT" {
+        Invoke-CgceChildProcess @tooManyArguments -TimeoutSeconds 1
+    }
+    $oversizedCommandLine = @{} + $common
+    $oversizedCommandLine.Arguments = [string[]]@(
+        for ($index = 0; $index -lt 8; $index += 1) {
+            "x" * 4096
+        }
+    )
+    Assert-CgceThrows "CGCE-OPS-ARGUMENT" {
+        Invoke-CgceChildProcess @oversizedCommandLine -TimeoutSeconds 1
+    }
+
+    $manyPaths = @(
+        for ($index = 0; $index -lt 4097; $index += 1) {
+            "D:\PalServer\server-$index.exe"
+        }
+    )
+    $tooManyPaths = @{} + $common
+    $tooManyPaths.AllowedExecutablePaths = [string[]]$manyPaths
+    Assert-CgceThrows "CGCE-OPS-PROCESS-QUERY" {
+        Invoke-CgceChildProcess @tooManyPaths -TimeoutSeconds 1
+    }
+    $oversizedPath = @{} + $common
+    $oversizedPath.AllowedExecutablePaths = @(
+        "D:\" + ("a" * 4097)
+    )
+    Assert-CgceThrows "CGCE-OPS-PROCESS-QUERY" {
+        Invoke-CgceChildProcess @oversizedPath -TimeoutSeconds 1
+    }
+
+    foreach ($validUntil in @(
+        "not-a-time",
+        [DateTime]::SpecifyKind(
+            [DateTime]::UtcNow.AddMinutes(5),
+            [DateTimeKind]::Unspecified
+        ),
+        [DateTime]::UtcNow.AddSeconds(10).ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    )) {
+        $invalidControl = @{} + $common
+        $invalidControl.ControlValidUntilUtc = $validUntil
+        Assert-CgceThrows "CGCE-OPS-CONTROL-EXPIRED" {
+            Invoke-CgceChildProcess @invalidControl -TimeoutSeconds 30
+        }
+    }
+}
+
+Invoke-CgceTest "child process implementation uses only bounded waits and a final identity sweep" {
+    $definition = (Get-Command "Invoke-CgceChildProcess").Definition
+    Assert-CgceEqual $false $definition.Contains(".WaitForExit()")
+    Assert-CgceEqual $false $definition.Contains(
+        'WaitForExit($remainingMilliseconds)'
+    )
+    Assert-CgceEqual $true $definition.Contains(
+        'WaitForExit($waitSliceMilliseconds)'
+    )
+    Assert-CgceEqual $true $definition.Contains(
+        "Assert-CgceObservedProcessesTerminated"
+    )
+    Assert-CgceEqual $true $definition.Contains(
+        '$null = & $PreLaunchValidation $launchWrite.checksum'
+    )
+    Assert-CgceEqual $false $definition.Contains(
+        "-ArgumentList `$Arguments"
+    )
+    Assert-CgceEqual $true $definition.Contains(
+        '["ArgumentList"] = [string[]]@($nativeCommandLine)'
+    )
+    Assert-CgceEqual $true $definition.Contains("[Diagnostics.Stopwatch]::StartNew()")
+}
+
+Invoke-CgceTest "child completion rejects elapsed timeout and control deadlines" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    $elapsed = [pscustomobject]@{
+        Elapsed = [pscustomobject]@{
+            TotalMilliseconds = [double]30001
+        }
+    }
+    Assert-CgceThrows "CGCE-OPS-PROCESS-TIMEOUT" {
+        & $module {
+            param($Clock)
+            Assert-CgceProcessCompletedWithinDeadline `
+                -Stopwatch $Clock `
+                -TimeoutSeconds 30 `
+                -ControlDeadlineUtc ([DateTime]::UtcNow.AddMinutes(5))
+        } $elapsed
+    }
+    $withinTimeout = [pscustomobject]@{
+        Elapsed = [pscustomobject]@{
+            TotalMilliseconds = [double]1
+        }
+    }
+    Assert-CgceThrows "CGCE-OPS-CONTROL-EXPIRED" {
+        & $module {
+            param($Clock)
+            Assert-CgceProcessCompletedWithinDeadline `
+                -Stopwatch $Clock `
+                -TimeoutSeconds 30 `
+                -ControlDeadlineUtc ([DateTime]::UtcNow.AddSeconds(-1))
+        } $withinTimeout
+    }
+}
+
+Invoke-CgceTest "Windows native quoting survives an actual argv capture process" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        $className = "CgceArgvCapture" + [guid]::NewGuid().ToString("N")
+        $helper = Join-Path $base "argv-capture.exe"
+        $output = Join-Path $base "argv.txt"
+        $source = @"
+using System;
+using System.IO;
+using System.Text;
+public static class $className {
+    public static int Main(string[] args) {
+        if (args.Length < 1) return 64;
+        string[] lines = new string[args.Length - 1];
+        for (int index = 1; index < args.Length; index++) {
+            lines[index - 1] = Convert.ToBase64String(
+                Encoding.UTF8.GetBytes(args[index])
+            );
+        }
+        File.WriteAllLines(args[0], lines, new UTF8Encoding(false));
+        return 0;
+    }
+}
+"@
+        $null = Add-Type `
+            -TypeDefinition $source `
+            -Language CSharp `
+            -OutputAssembly $helper `
+            -OutputType ConsoleApplication
+        $expected = [string[]]@(
+            "",
+            "has space",
+            'embedded"quote',
+            "trailing\",
+            "&|<>^"
+        )
+        $nativeArguments = [string[]]@($output) + $expected
+        $commandLine = & (Get-Module "CgceDiscovery.Runtime") {
+            param($Values)
+            ConvertTo-CgceWindowsCommandLine -Arguments $Values
+        } $nativeArguments
+        $process = Start-Process `
+            -FilePath $helper `
+            -ArgumentList $commandLine `
+            -WorkingDirectory $base `
+            -PassThru
+        if (-not $process.WaitForExit(30000)) {
+            throw "CGCE-TEST argv capture timed out"
+        }
+        Assert-CgceEqual 0 $process.ExitCode
+        $actual = [string[]]@(
+            foreach ($line in [System.IO.File]::ReadAllLines($output)) {
+                [System.Text.Encoding]::UTF8.GetString(
+                    [Convert]::FromBase64String($line)
+                )
+            }
+        )
+        Assert-CgceEqual `
+            ([string]::Join("`0", $expected)) `
+            ([string]::Join("`0", $actual))
+    } finally {
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "zero arguments omit ArgumentList and oversized commands never launch" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        $className = "CgceZeroArg" + [guid]::NewGuid().ToString("N")
+        $helper = Join-Path $base "zero-arg.exe"
+        $marker = Join-Path $base "launched.txt"
+        $source = @"
+using System;
+using System.IO;
+public static class $className {
+    public static int Main(string[] args) {
+        File.WriteAllText("launched.txt", "launched");
+        return args.Length == 0 ? 0 : 65;
+    }
+}
+"@
+        $null = Add-Type `
+            -TypeDefinition $source `
+            -Language CSharp `
+            -OutputAssembly $helper `
+            -OutputType ConsoleApplication
+        $checksum = Get-CgceRuntimeTestSha256 $helper
+        $controlValidUntil = [DateTime]::UtcNow.AddMinutes(5)
+
+        $zeroRunId = "r-11111111111111111111111111111111"
+        $zeroRoot = Join-Path $base "$zeroRunId\receipts\process"
+        New-Item -ItemType Directory -Path $zeroRoot -Force | Out-Null
+        $zeroRun = Invoke-CgceChildProcess `
+            -Executable $helper `
+            -ExpectedExecutableChecksum $checksum `
+            -AllowedExecutablePaths @($helper) `
+            -Arguments ([string[]]@()) `
+            -ReceiptRoot $zeroRoot `
+            -TimeoutSeconds 30 `
+            -PreLaunchValidation {} `
+            -ControlValidUntilUtc $controlValidUntil
+        Assert-CgceEqual 0 $zeroRun.result.exit_code
+        Assert-CgceEqual $true `
+            (Test-Path -LiteralPath $marker -PathType Leaf)
+        $zeroLaunch = Read-CgceJsonObject `
+            -Path (Join-Path $zeroRoot "000-launch.json")
+        Assert-CgceEqual 0 $zeroLaunch.argument_count
+
+        [System.IO.File]::Delete($marker)
+        $boundedRunId = "r-22222222222222222222222222222222"
+        $boundedRoot = Join-Path $base "$boundedRunId\receipts\process"
+        New-Item -ItemType Directory -Path $boundedRoot -Force | Out-Null
+        $oversized = [string[]]@(
+            for ($index = 0; $index -lt 8; $index += 1) {
+                "x" * 4096
+            }
+        )
+        Assert-CgceThrows "CGCE-OPS-ARGUMENT" {
+            Invoke-CgceChildProcess `
+                -Executable $helper `
+                -ExpectedExecutableChecksum $checksum `
+                -AllowedExecutablePaths @($helper) `
+                -Arguments $oversized `
+                -ReceiptRoot $boundedRoot `
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc $controlValidUntil
+        }
+        Assert-CgceEqual $false (Test-Path -LiteralPath $marker)
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem -LiteralPath $boundedRoot -Force).Count
+    } finally {
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "final sweep descendants re-enter bounded monitoring until terminated" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-44444444444444444444444444444444"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        $snapshots = [pscustomobject]@{ Count = 0 }
+        $childPid = [int64]420045
+        Set-CgceRuntimeTestProcessRecordsSeam {
+            $snapshots.Count += 1
+            if ($snapshots.Count -eq 1) {
+                Wait-CgceRuntimeTestReceiptRootExit $receiptRoot
+                return @()
+            }
+            if ($snapshots.Count -eq 2) {
+                $rootReceipt = Read-CgceJsonObject `
+                    -Path (Join-Path $receiptRoot "001-pid.json")
+                return @([pscustomobject]@{
+                    ProcessId = $childPid
+                    ParentProcessId = [int64]$rootReceipt.pid
+                    ExecutablePath = $executable
+                    CreationTimeFileTimeUtc = (
+                        [int64]$rootReceipt.creation_time_filetime_utc + 1
+                    )
+                })
+            }
+            return @()
+        }.GetNewClosure()
+
+        $completed = Invoke-CgceChildProcess `
+            -Executable $executable `
+            -ExpectedExecutableChecksum $checksum `
+            -AllowedExecutablePaths @($executable) `
+            -Arguments @("/d", "/c", "exit", "/b", "0") `
+            -ReceiptRoot $receiptRoot `
+            -TimeoutSeconds 30 `
+            -PreLaunchValidation {} `
+            -ControlValidUntilUtc ([DateTime]::UtcNow.AddMinutes(5))
+
+        Assert-CgceEqual 0 $completed.result.exit_code
+        Assert-CgceEqual $true ($snapshots.Count -ge 4)
+        Assert-CgceEqual 2 @($completed.result.observed_processes).Count
+        Assert-CgceEqual `
+            $childPid `
+            ([int64]$completed.result.observed_processes[1].pid)
+        Assert-CgceEqual $true `
+            (Test-Path `
+                -LiteralPath (Join-Path $receiptRoot "002-pid.json") `
+                -PathType Leaf)
+        Assert-CgceEqual $true `
+            (Test-Path `
+                -LiteralPath (Join-Path $receiptRoot "999-result.json") `
+                -PathType Leaf)
+    } finally {
+        Set-CgceRuntimeTestProcessRecordsSeam $null
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "stale pre-parent ParentPID records never create receipts" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-55555555555555555555555555555555"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        $snapshots = [pscustomobject]@{ Count = 0 }
+        $stalePid = [int64]420046
+        Set-CgceRuntimeTestProcessRecordsSeam {
+            $snapshots.Count += 1
+            if ($snapshots.Count -eq 1) {
+                Wait-CgceRuntimeTestReceiptRootExit $receiptRoot
+                $rootReceipt = Read-CgceJsonObject `
+                    -Path (Join-Path $receiptRoot "001-pid.json")
+                return @([pscustomobject]@{
+                    ProcessId = $stalePid
+                    ParentProcessId = [int64]$rootReceipt.pid
+                    ExecutablePath = $executable
+                    CreationTimeFileTimeUtc = (
+                        [int64]$rootReceipt.creation_time_filetime_utc - 1
+                    )
+                })
+            }
+            return @()
+        }.GetNewClosure()
+
+        $completed = Invoke-CgceChildProcess `
+            -Executable $executable `
+            -ExpectedExecutableChecksum $checksum `
+            -AllowedExecutablePaths @($executable) `
+            -Arguments @("/d", "/c", "exit", "/b", "0") `
+            -ReceiptRoot $receiptRoot `
+            -TimeoutSeconds 30 `
+            -PreLaunchValidation {} `
+            -ControlValidUntilUtc ([DateTime]::UtcNow.AddMinutes(5))
+
+        Assert-CgceEqual 0 $completed.result.exit_code
+        Assert-CgceEqual 1 @($completed.result.observed_processes).Count
+        Assert-CgceEqual $false `
+            (Test-Path `
+                -LiteralPath (Join-Path $receiptRoot "002-pid.json"))
+        Assert-CgceEqual $true `
+            (Test-Path `
+                -LiteralPath (Join-Path $receiptRoot "999-result.json") `
+                -PathType Leaf)
+    } finally {
+        Set-CgceRuntimeTestProcessRecordsSeam $null
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "reused live PID identity leaves a durable recovery barrier" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-66666666666666666666666666666666"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        $reusedPid = [int64]420047
+        Set-CgceRuntimeTestProcessRecordsSeam {
+            $rootReceipt = Read-CgceJsonObject `
+                -Path (Join-Path $receiptRoot "001-pid.json")
+            return @(
+                [pscustomobject]@{
+                    ProcessId = $reusedPid
+                    ParentProcessId = [int64]$rootReceipt.pid
+                    ExecutablePath = $executable
+                    CreationTimeFileTimeUtc = (
+                        [int64]$rootReceipt.creation_time_filetime_utc + 1
+                    )
+                },
+                [pscustomobject]@{
+                    ProcessId = $reusedPid
+                    ParentProcessId = [int64]$rootReceipt.pid
+                    ExecutablePath = "C:\Unexpected\reused.exe"
+                    CreationTimeFileTimeUtc = (
+                        [int64]$rootReceipt.creation_time_filetime_utc + 2
+                    )
+                }
+            )
+        }.GetNewClosure()
+
+        Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+            Invoke-CgceChildProcess `
+                -Executable $executable `
+                -ExpectedExecutableChecksum $checksum `
+                -AllowedExecutablePaths @($executable) `
+                -Arguments @("/d", "/c", "exit", "/b", "0") `
+                -ReceiptRoot $receiptRoot `
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc ([DateTime]::UtcNow.AddMinutes(5))
+        }
+
+        $barrierPath = Join-Path `
+            $receiptRoot `
+            "manual-recovery-required.json"
+        $barrier = Read-CgceJsonObject -Path $barrierPath
+        $rootReceipt = Read-CgceJsonObject `
+            -Path (Join-Path $receiptRoot "001-pid.json")
+        $firstChildPath = Join-Path $receiptRoot "002-pid.json"
+        Assert-CgceEqual "IDENTITY_UNREADABLE" $barrier.reason
+        Assert-CgceEqual $reusedPid ([int64]$barrier.pid)
+        Assert-CgceEqual `
+            ([int64]$rootReceipt.pid) `
+            ([int64]$barrier.parent_pid)
+        Assert-CgceEqual `
+            (Get-CgceRuntimeTestSha256 $firstChildPath) `
+            $barrier.previous_receipt_sha256
+        Assert-CgceEqual $true `
+            (Test-Path `
+                -LiteralPath $firstChildPath `
+                -PathType Leaf)
+        Assert-CgceEqual $false `
+            (Test-Path `
+                -LiteralPath (Join-Path $receiptRoot "003-pid.json"))
+        Assert-CgceEqual $false `
+            (Test-Path `
+                -LiteralPath (Join-Path $receiptRoot "999-result.json"))
+
+        Set-CgceRuntimeTestActivitySeam {
+            New-CgceRuntimeActivitySnapshot -Processes @() -Tcp @() -Udp @()
+        }
+        Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths @($executable) `
+                -Ports @(8211) `
+                -ReceiptRoot $receiptRoot
+        }
+    } finally {
+        Set-CgceRuntimeTestActivitySeam $null
+        Set-CgceRuntimeTestProcessRecordsSeam $null
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "process crash seams preserve exact immutable partial receipts" {
+    foreach ($case in @(
+        [pscustomobject]@{
+            Point = "after-process-start"
+            ExpectedPidReceipts = 0
+        },
+        [pscustomobject]@{
+            Point = "after-pid-1"
+            ExpectedPidReceipts = 1
+        },
+        [pscustomobject]@{
+            Point = "after-pid-2"
+            ExpectedPidReceipts = 2
+        },
+        [pscustomobject]@{
+            Point = "before-result"
+            ExpectedPidReceipts = 1
+        }
+    )) {
+        $base = New-CgceRuntimeTestRoot
+        try {
+            if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+                throw "CGCE-TEST ComSpec is required on Windows"
+            }
+            $runId = "r-33333333333333333333333333333333"
+            $receiptRoot = Join-Path $base "$runId\receipts\process"
+            New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+            $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+            $checksum = Get-CgceRuntimeTestSha256 $executable
+            if ($case.Point -ceq "after-pid-2") {
+                Set-CgceRuntimeTestProcessRecordsSeam {
+                    $rootReceipt = Read-CgceJsonObject `
+                        -Path (Join-Path $receiptRoot "001-pid.json")
+                    return @([pscustomobject]@{
+                        ProcessId = 420044
+                        ParentProcessId = [int64]$rootReceipt.pid
+                        ExecutablePath = $executable
+                        CreationTimeFileTimeUtc = (
+                            [int64]$rootReceipt.creation_time_filetime_utc + 1
+                        )
+                    })
+                }.GetNewClosure()
+            }
+            Set-CgceRuntimeTestProcessCrashSeam {
+                param($Point)
+                if ($Point -ceq $case.Point) {
+                    throw "CGCE-TEST-PROCESS-CRASH $Point"
+                }
+            }.GetNewClosure()
+            Assert-CgceThrows "CGCE-TEST-PROCESS-CRASH" {
+                Invoke-CgceChildProcess `
+                    -Executable $executable `
+                    -ExpectedExecutableChecksum $checksum `
+                    -AllowedExecutablePaths @($executable) `
+                    -Arguments @("/d", "/c", "exit", "/b", "0") `
+                    -ReceiptRoot $receiptRoot `
+                    -TimeoutSeconds 30 `
+                    -PreLaunchValidation {} `
+                    -ControlValidUntilUtc ([DateTime]::UtcNow.AddMinutes(5))
+            }
+            Assert-CgceEqual $true `
+                (Test-Path `
+                    -LiteralPath (Join-Path $receiptRoot "000-launch.json") `
+                    -PathType Leaf)
+            Assert-CgceEqual `
+                $case.ExpectedPidReceipts `
+                @(Get-ChildItem `
+                    -LiteralPath $receiptRoot `
+                    -Filter "*-pid.json").Count
+            $expectedNames = @("000-launch.json")
+            for ($sequence = 1;
+                $sequence -le $case.ExpectedPidReceipts;
+                $sequence += 1) {
+                $expectedNames += (
+                    $sequence.ToString("000") + "-pid.json"
+                )
+            }
+            $actualNames = @(
+                Get-ChildItem -LiteralPath $receiptRoot -Force |
+                    ForEach-Object { $_.Name } |
+                    Sort-Object
+            )
+            Assert-CgceEqual `
+                ([string]::Join(",", $expectedNames)) `
+                ([string]::Join(",", $actualNames))
+            Assert-CgceEqual $false `
+                (Test-Path `
+                    -LiteralPath (Join-Path $receiptRoot "999-result.json"))
+            Assert-CgceEqual $false `
+                (Test-Path `
+                    -LiteralPath (
+                        Join-Path $receiptRoot "manual-recovery-required.json"
+                    ))
+        } finally {
+            Set-CgceRuntimeTestProcessCrashSeam $null
+            Set-CgceRuntimeTestProcessRecordsSeam $null
+            Remove-Item -LiteralPath $base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "child process receipts never persist plaintext arguments" {
     $base = New-CgceRuntimeTestRoot
     try {
         if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
@@ -1213,6 +2472,10 @@ Invoke-CgceTest "child process writes immutable intent PID and result receipts w
         New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
         $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
         $checksum = Get-CgceRuntimeTestSha256 $executable
+        $controlValidUntil = [DateTime]::UtcNow.AddMinutes(5).ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
         Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
             Invoke-CgceChildProcess `
                 -Executable $executable `
@@ -1220,7 +2483,9 @@ Invoke-CgceTest "child process writes immutable intent PID and result receipts w
                 -AllowedExecutablePaths @($executable) `
                 -Arguments @("/d", "/c", "exit", "/b", "7") `
                 -ReceiptRoot $receiptRoot `
-                -TimeoutSeconds 30
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc $controlValidUntil
         }
         Assert-CgceEqual `
             0 `
@@ -1231,7 +2496,9 @@ Invoke-CgceTest "child process writes immutable intent PID and result receipts w
             -AllowedExecutablePaths @($executable) `
             -Arguments @("/d", "/c", "exit", "/b", "7") `
             -ReceiptRoot $receiptRoot `
-            -TimeoutSeconds 30
+            -TimeoutSeconds 30 `
+            -PreLaunchValidation {} `
+            -ControlValidUntilUtc $controlValidUntil
 
         Assert-CgceEqual 7 $run.result.exit_code
         Assert-CgceEqual `
@@ -1257,11 +2524,13 @@ Invoke-CgceTest "child process writes immutable intent PID and result receipts w
             "argument_count",
             "arguments_sha256",
             "timeout_seconds",
+            "control_valid_until_utc",
             "previous_receipt_sha256"
         )
         Assert-CgceEqual "cgce_windows_discovery_process_launch" $launch.kind
         Assert-CgceEqual 0 $launch.sequence
         Assert-CgceEqual 5 $launch.argument_count
+        Assert-CgceEqual $controlValidUntil $launch.control_valid_until_utc
         Assert-CgceEqual $null $launch.previous_receipt_sha256
 
         $pidReceipt = Read-CgceJsonObject `
@@ -1281,6 +2550,7 @@ Invoke-CgceTest "child process writes immutable intent PID and result receipts w
         )
         Assert-CgceEqual "cgce_windows_discovery_process_pid" $pidReceipt.kind
         Assert-CgceEqual 1 $pidReceipt.sequence
+        Assert-CgceEqual 0 $pidReceipt.parent_pid
         Assert-CgceEqual $run.launch_receipt_checksum `
             $pidReceipt.previous_receipt_sha256
 
@@ -1317,9 +2587,291 @@ Invoke-CgceTest "child process writes immutable intent PID and result receipts w
                 -AllowedExecutablePaths @($executable) `
                 -Arguments @("/d", "/c", "exit", "/b", "0") `
                 -ReceiptRoot $receiptRoot `
-                -TimeoutSeconds 30
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc $controlValidUntil
         }
     } finally {
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "child launch semantically reads back intent before Start-Process" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        $controlValidUntil = [DateTime]::UtcNow.AddMinutes(5).ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        Set-CgceRuntimeTestLaunchReceiptSeam {
+            param($Path)
+            $receipt = Read-CgceJsonObject -Path $Path
+            $receipt.argument_count = 99
+            Write-CgceRuntimeTestUtf8 `
+                -Path $Path `
+                -Text ($receipt | ConvertTo-Json -Depth 12)
+        }
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Invoke-CgceChildProcess `
+                -Executable $executable `
+                -ExpectedExecutableChecksum $checksum `
+                -AllowedExecutablePaths @($executable) `
+                -Arguments @("/d", "/c", "exit", "/b", "0") `
+                -ReceiptRoot $receiptRoot `
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc $controlValidUntil
+        }
+        Assert-CgceEqual $true `
+            (Test-Path -LiteralPath (Join-Path $receiptRoot "000-launch.json"))
+        Assert-CgceEqual $false `
+            (Test-Path -LiteralPath (Join-Path $receiptRoot "001-pid.json"))
+    } finally {
+        Set-CgceRuntimeTestLaunchReceiptSeam $null
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "child launch invokes final pre-launch authority before Start-Process" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        $validation = {
+            param($LaunchChecksum)
+            $launchPath = Join-Path $receiptRoot "000-launch.json"
+            if ($LaunchChecksum -cne
+                (Get-CgceRuntimeTestSha256 $launchPath)) {
+                throw "CGCE-TEST-PRELAUNCH-CHECKSUM"
+            }
+            if (-not (Test-Path `
+                    -LiteralPath $launchPath `
+                    -PathType Leaf)) {
+                throw "CGCE-TEST-PRELAUNCH-MISSING-INTENT"
+            }
+            throw "CGCE-TEST-PRELAUNCH-BLOCKED"
+        }.GetNewClosure()
+        Assert-CgceThrows "CGCE-TEST-PRELAUNCH-BLOCKED" {
+            Invoke-CgceChildProcess `
+                -Executable $executable `
+                -ExpectedExecutableChecksum $checksum `
+                -AllowedExecutablePaths @($executable) `
+                -Arguments @("/d", "/c", "exit", "/b", "0") `
+                -ReceiptRoot $receiptRoot `
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation $validation `
+                -ControlValidUntilUtc ([DateTime]::UtcNow.AddMinutes(5))
+        }
+        Assert-CgceEqual $false `
+            (Test-Path -LiteralPath (Join-Path $receiptRoot "001-pid.json"))
+    } finally {
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "child launch rehashes the executable after intent read-back" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = Join-Path $base "synthetic-cmd.exe"
+        $null = Copy-CgceFileVerified `
+            -Source ([System.IO.Path]::GetFullPath($env:ComSpec)) `
+            -Destination $executable
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        $controlValidUntil = [DateTime]::UtcNow.AddMinutes(5)
+        Set-CgceRuntimeTestLaunchReceiptSeam {
+            param($Path)
+            [System.IO.File]::AppendAllText($executable, "drift")
+        }.GetNewClosure()
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Invoke-CgceChildProcess `
+                -Executable $executable `
+                -ExpectedExecutableChecksum $checksum `
+                -AllowedExecutablePaths @($executable) `
+                -Arguments @("/d", "/c", "exit", "/b", "0") `
+                -ReceiptRoot $receiptRoot `
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc $controlValidUntil
+        }
+        Assert-CgceEqual $true `
+            (Test-Path -LiteralPath (Join-Path $receiptRoot "000-launch.json"))
+        Assert-CgceEqual $false `
+            (Test-Path -LiteralPath (Join-Path $receiptRoot "001-pid.json"))
+    } finally {
+        Set-CgceRuntimeTestLaunchReceiptSeam $null
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "unlisted descendant receipt is durable before launch fails" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        $controlValidUntil = [DateTime]::UtcNow.AddMinutes(5).ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        Set-CgceRuntimeTestProcessRecordsSeam {
+            $rootReceipt = Read-CgceJsonObject `
+                -Path (Join-Path $receiptRoot "001-pid.json")
+            return @([pscustomobject]@{
+                ProcessId = 420042
+                ParentProcessId = [int64]$rootReceipt.pid
+                ExecutablePath = "C:\Unexpected\child.exe"
+                CreationTimeFileTimeUtc = (
+                    [int64]$rootReceipt.creation_time_filetime_utc + 1
+                )
+            })
+        }.GetNewClosure()
+        Assert-CgceThrows "CGCE-OPS-PROCESS-UNLISTED" {
+            Invoke-CgceChildProcess `
+                -Executable $executable `
+                -ExpectedExecutableChecksum $checksum `
+                -AllowedExecutablePaths @($executable) `
+                -Arguments @("/d", "/c", "exit", "/b", "0") `
+                -ReceiptRoot $receiptRoot `
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc $controlValidUntil
+        }
+        $unlisted = Read-CgceJsonObject `
+            -Path (Join-Path $receiptRoot "002-pid.json")
+        Assert-CgceEqual "C:\Unexpected\child.exe" $unlisted.executable_path
+        Assert-CgceEqual $false `
+            (Test-Path -LiteralPath (Join-Path $receiptRoot "999-result.json"))
+    } finally {
+        Set-CgceRuntimeTestProcessRecordsSeam $null
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "unreadable descendant leaves a durable manual-recovery barrier" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        $snapshotCount = 0
+        Set-CgceRuntimeTestProcessRecordsSeam {
+            $snapshotCount += 1
+            $rootReceipt = Read-CgceJsonObject `
+                -Path (Join-Path $receiptRoot "001-pid.json")
+            return @([pscustomobject]@{
+                ProcessId = 420043
+                ParentProcessId = [int64]$rootReceipt.pid
+                ExecutablePath = $(if ($snapshotCount -eq 1) {
+                    $executable
+                } else {
+                    $null
+                })
+                CreationTimeFileTimeUtc = (
+                    [int64]$rootReceipt.creation_time_filetime_utc + 1
+                )
+            })
+        }.GetNewClosure()
+        Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+            Invoke-CgceChildProcess `
+                -Executable $executable `
+                -ExpectedExecutableChecksum $checksum `
+                -AllowedExecutablePaths @($executable) `
+                -Arguments @("/d", "/c", "exit", "/b", "0") `
+                -ReceiptRoot $receiptRoot `
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc ([DateTime]::UtcNow.AddMinutes(5))
+        }
+        $barrierPath = Join-Path $receiptRoot "manual-recovery-required.json"
+        $barrier = Read-CgceJsonObject -Path $barrierPath
+        Assert-CgceEqual `
+            "cgce_windows_discovery_process_manual_recovery" `
+            $barrier.kind
+        Assert-CgceEqual "IDENTITY_UNREADABLE" $barrier.reason
+        Assert-CgceEqual 420043 $barrier.pid
+        Assert-CgceEqual $true `
+            (Test-Path `
+                -LiteralPath (Join-Path $receiptRoot "002-pid.json") `
+                -PathType Leaf)
+
+        Set-CgceRuntimeTestActivitySeam {
+            New-CgceRuntimeActivitySnapshot -Processes @() -Tcp @() -Udp @()
+        }
+        Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths @($executable) `
+                -Ports @(8211) `
+                -ReceiptRoot $receiptRoot
+        }
+    } finally {
+        Set-CgceRuntimeTestActivitySeam $null
+        Set-CgceRuntimeTestProcessRecordsSeam $null
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "root PID receipt is durable before CIM verification fails" {
+    $base = New-CgceRuntimeTestRoot
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+            throw "CGCE-TEST ComSpec is required on Windows"
+        }
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $receiptRoot = Join-Path $base "$runId\receipts\process"
+        New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
+        $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
+        $checksum = Get-CgceRuntimeTestSha256 $executable
+        Set-CgceRuntimeTestRootProcessRecordSeam {
+            throw "synthetic CIM access denied"
+        }
+        Assert-CgceThrows "CGCE-OPS-PROCESS-QUERY" {
+            Invoke-CgceChildProcess `
+                -Executable $executable `
+                -ExpectedExecutableChecksum $checksum `
+                -AllowedExecutablePaths @($executable) `
+                -Arguments @("/d", "/c", "exit", "/b", "0") `
+                -ReceiptRoot $receiptRoot `
+                -TimeoutSeconds 30 `
+                -PreLaunchValidation {} `
+                -ControlValidUntilUtc ([DateTime]::UtcNow.AddMinutes(5))
+        }
+        $rootReceipt = Read-CgceJsonObject `
+            -Path (Join-Path $receiptRoot "001-pid.json")
+        Assert-CgceEqual $executable $rootReceipt.executable_path
+        Assert-CgceEqual $false `
+            (Test-Path -LiteralPath (Join-Path $receiptRoot "999-result.json"))
+    } finally {
+        Set-CgceRuntimeTestRootProcessRecordSeam $null
         Remove-Item -LiteralPath $base -Recurse -Force
     }
 }
@@ -1373,6 +2925,7 @@ Invoke-CgceTest "runtime module exports only its approved Task 3 surface" {
     $expected = @(
         "Assert-CgceNoForeignRunArtifacts",
         "Assert-CgceNoServerActivity",
+        "Assert-CgceInventoryProbeStaged",
         "Assert-CgceServerArguments",
         "Enable-CgceInventoryProbe",
         "Invoke-CgceChildProcess",

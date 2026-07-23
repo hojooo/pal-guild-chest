@@ -130,9 +130,18 @@ function New-CgceSyntheticFixture {
         PrepareScript = (Join-Path `
             $handoffRoot `
             "tools\windows-discovery\Prepare-CgceDiscovery.ps1")
+        InvokeScript = (Join-Path `
+            $handoffRoot `
+            "tools\windows-discovery\Invoke-CgceDiscovery.ps1")
+        FakeServerScript = (Join-Path `
+            $handoffRoot `
+            "tests\windows\fixtures\FakePalServer.cmd")
         RepositoryPrepareScript = (Join-Path `
             $repositoryRoot `
             "tools\windows-discovery\Prepare-CgceDiscovery.ps1")
+        RepositoryInvokeScript = (Join-Path `
+            $repositoryRoot `
+            "tools\windows-discovery\Invoke-CgceDiscovery.ps1")
     }
 }
 
@@ -206,6 +215,271 @@ function Invoke-CgcePrepareChild(
     }
 }
 
+function New-CgcePreparedFixture(
+    [string]$Mode = "success",
+    [bool]$IncludeSleeperInAllowlist = $false,
+    [bool]$IncludeLauncherInAllowlist = $false,
+    [bool]$IncludeListenerInAllowlist = $false
+) {
+    $fixture = New-CgceSyntheticFixture
+    $runtimeSleeper = Join-Path `
+        $fixture.ServerRoot `
+        "cgce-fake-sleeper.exe"
+    $runtimeLauncher = Join-Path `
+        $fixture.ServerRoot `
+        "cgce-fake-launcher.exe"
+    $runtimeListener = Join-Path `
+        $fixture.ServerRoot `
+        "cgce-fake-listener.exe"
+    $additionalProcessPaths = New-Object `
+        'System.Collections.Generic.List[string]'
+    if ($IncludeSleeperInAllowlist) {
+        $additionalProcessPaths.Add($runtimeSleeper)
+    }
+    if ($IncludeLauncherInAllowlist) {
+        $additionalProcessPaths.Add($runtimeLauncher)
+    }
+    if ($IncludeListenerInAllowlist) {
+        $additionalProcessPaths.Add($runtimeListener)
+    }
+    $listenerPort = $null
+    if ($IncludeListenerInAllowlist) {
+        for ($attempt = 0; $attempt -lt 10; $attempt += 1) {
+            $portProbe = New-Object `
+                -TypeName System.Net.Sockets.TcpListener `
+                -ArgumentList ([System.Net.IPAddress]::Loopback), 0
+            try {
+                $portProbe.Start()
+                $candidatePort = [int]$portProbe.LocalEndpoint.Port
+            } finally {
+                $portProbe.Stop()
+            }
+            if ($candidatePort -ne 65534) {
+                $listenerPort = $candidatePort
+                break
+            }
+        }
+        if ($null -eq $listenerPort) {
+            throw "CGCE-TEST unique listener port allocation failed"
+        }
+    }
+    if ($additionalProcessPaths.Count -gt 0 -or $null -ne $listenerPort) {
+        $control = Read-CgceJsonObject -Path $fixture.ControlPath
+        $control.server_process_paths = [object[]](
+            @($control.server_process_paths) +
+                @($additionalProcessPaths.ToArray())
+        )
+        if ($null -ne $listenerPort) {
+            $control.listener_ports = [object[]](
+                @($control.listener_ports) + @($listenerPort)
+            )
+        }
+        Write-CgceLifecycleUtf8 `
+            -Path $fixture.ControlPath `
+            -Text ($control | ConvertTo-Json -Depth 8)
+        $fixture.ControlSha = Get-CgceSha256 $fixture.ControlPath
+    }
+    $prepared = Invoke-CgcePrepareChild -Fixture $fixture
+    if ($prepared.ExitCode -ne 0 -or
+        @($prepared.Stdout).Count -ne 1 -or
+        $prepared.Stdout[0] -cne
+            "CGCE_WINDOWS_DISCOVERY_OK PROBE_STAGED $($fixture.RunId)" -or
+        -not [string]::IsNullOrEmpty($prepared.Stderr)) {
+        throw "CGCE-TEST synthetic prepare failed"
+    }
+    $runtimeFakeServer = Join-Path `
+        $fixture.ServerRoot `
+        "cgce-fake-server.cmd"
+    [System.IO.File]::Copy(
+        $fixture.FakeServerScript,
+        $runtimeFakeServer,
+        $false
+    )
+    $systemPing = Join-Path $env:SystemRoot "System32\ping.exe"
+    if (-not (Test-Path -LiteralPath $systemPing -PathType Leaf)) {
+        throw "CGCE-TEST system ping fixture is missing"
+    }
+    [System.IO.File]::Copy($systemPing, $runtimeSleeper, $false)
+    if ($IncludeLauncherInAllowlist) {
+        [System.IO.File]::Copy(
+            (Join-Path $env:SystemRoot "System32\cmd.exe"),
+            $runtimeLauncher,
+            $false
+        )
+    }
+    if ($IncludeListenerInAllowlist) {
+        $listenerClass = "CgceListener" +
+            [guid]::NewGuid().ToString("N")
+        $listenerSource = @"
+using System;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+public static class $listenerClass {
+    public static int Main(string[] args) {
+        if (args.Length != 1) return 64;
+        int port = Int32.Parse(args[0]);
+        TcpListener listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        try { Thread.Sleep(3000); } finally { listener.Stop(); }
+        File.WriteAllText(
+            "cgce-listener-exited.txt",
+            "exited",
+            new UTF8Encoding(false)
+        );
+        return 0;
+    }
+}
+"@
+        $null = Add-Type `
+            -TypeDefinition $listenerSource `
+            -Language CSharp `
+            -OutputAssembly $runtimeListener `
+            -OutputType ConsoleApplication
+    }
+    $grandchildScript = Join-Path `
+        $fixture.ServerRoot `
+        "cgce-fake-grandchild.cmd"
+    Write-CgceLifecycleUtf8 `
+        -Path $grandchildScript `
+        -Text (
+            "@echo off`r`n" +
+            "cgce-fake-sleeper.exe 127.0.0.1 -n 4 > nul`r`n" +
+            "exit /b %ERRORLEVEL%`r`n"
+        )
+    $argumentsPath = Join-Path $fixture.Base "server-arguments.json"
+    $arguments = [object[]]@(
+        "/d",
+        "/c",
+        "cgce-fake-server.cmd",
+        "Pal\Binaries\Win64",
+        $Mode
+    )
+    if ($null -ne $listenerPort) {
+        $arguments = [object[]](@($arguments) + @([string]$listenerPort))
+    }
+    Write-CgceLifecycleUtf8 `
+        -Path $argumentsPath `
+        -Text ($arguments | ConvertTo-Json -Compress)
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name ArgumentsPath `
+        -Value $argumentsPath
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name RuntimeFakeServer `
+        -Value $runtimeFakeServer
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name RuntimeSleeper `
+        -Value $runtimeSleeper
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name RuntimeLauncher `
+        -Value $runtimeLauncher
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name RuntimeListener `
+        -Value $runtimeListener
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name ListenerPort `
+        -Value $listenerPort
+    return $fixture
+}
+
+function Invoke-CgceInvokeChild(
+    $Fixture,
+    [int]$TimeoutSeconds = 30,
+    [string]$ModuleSetup = ""
+) {
+    $stderrPath = Join-Path $Fixture.Base (
+        "invoke-stderr-" + [guid]::NewGuid().ToString("N")
+    )
+    $entryScript = $Fixture.InvokeScript
+    if (-not [string]::IsNullOrWhiteSpace($ModuleSetup)) {
+        $entryScript = Join-Path $Fixture.Base (
+            "invoke-wrapper-" + [guid]::NewGuid().ToString("N") + ".ps1"
+        )
+        $toolRoot = Join-Path $Fixture.HandoffRoot "tools\windows-discovery"
+        $wrapper = @(
+            '$ErrorActionPreference = "Stop"'
+            ('$commonModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "CgceDiscovery.Common.psm1"
+                )) + ' -Global -PassThru')
+            ('$contractModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Contract.psm1"
+                )) + ' -Global -PassThru')
+            ('$filesModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Files.psm1"
+                )) + ' -Global -PassThru')
+            ('$runtimeModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Runtime.psm1"
+                )) + ' -Global -PassThru')
+            $ModuleSetup
+            ('& ' + (ConvertTo-CgceLifecycleSingleQuoted $Fixture.InvokeScript) +
+                ' @args')
+            'exit $LASTEXITCODE'
+        ) -join "`r`n"
+        Write-CgceLifecycleUtf8 -Path $entryScript -Text ($wrapper + "`r`n")
+    }
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $entryScript,
+        "-RunRoot", $Fixture.RunRoot,
+        "-RunId", $Fixture.RunId,
+        "-ServerExecutable", $Fixture.ServerExecutable,
+        "-ArgumentsPath", $Fixture.ArgumentsPath,
+        "-TimeoutSeconds", $TimeoutSeconds
+    )
+    $stdout = @(& "$PSHOME\powershell.exe" @arguments 2> $stderrPath)
+    $exitCode = $LASTEXITCODE
+    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+        [System.IO.File]::ReadAllText($stderrPath)
+    } else {
+        ""
+    }
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Stdout = $stdout
+        Stderr = $stderr
+    }
+}
+
+function Wait-CgceLifecycleServerInactive(
+    $Fixture,
+    [int]$Attempts = 100
+) {
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt += 1) {
+        try {
+            $state = Read-CgceRunState `
+                -RunRoot $Fixture.RunRoot `
+                -RunId $Fixture.RunId
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths ([string[]]$state.server_process_paths) `
+                -Ports ([int[]]$state.listener_ports) `
+                -ReceiptRoot $Fixture.Paths.process_receipts
+            return
+        } catch {
+            if (-not $_.Exception.Message.StartsWith(
+                    "CGCE-OPS-PROCESS-ACTIVE",
+                    [StringComparison]::Ordinal
+                )) {
+                throw
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "CGCE-TEST synthetic server process did not exit"
+}
+
 function Update-CgceLifecycleControl(
     $Fixture,
     [scriptblock]$Mutation
@@ -216,6 +490,72 @@ function Update-CgceLifecycleControl(
         -Path $Fixture.ControlPath `
         -Text ($control | ConvertTo-Json -Depth 8)
     $Fixture.ControlSha = Get-CgceSha256 $Fixture.ControlPath
+}
+
+function Update-CgceLifecycleHandoffManifest($Fixture) {
+    $records = New-Object 'System.Collections.Generic.List[string]'
+    $paths = @(Get-CgceLifecycleHandoffPaths)
+    [Array]::Sort($paths, [StringComparer]::Ordinal)
+    foreach ($relative in $paths) {
+        $path = Join-Path $Fixture.HandoffRoot ($relative -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "CGCE-TEST handoff payload missing during manifest rebuild"
+        }
+        $records.Add((Get-CgceSha256 $path) + "  " + $relative)
+    }
+    Write-CgceLifecycleUtf8 `
+        -Path $Fixture.SourceManifestPath `
+        -Text (($records.ToArray() -join "`n") + "`n")
+    $Fixture.SourceManifestSha = Get-CgceSha256 $Fixture.SourceManifestPath
+}
+
+function Relocate-CgceLifecycleHandoff($Fixture) {
+    $sourceRoot = $Fixture.HandoffRoot
+    $destinationRoot = Join-Path `
+        $Fixture.Base `
+        ("handoff-relocated-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $destinationRoot | Out-Null
+
+    foreach ($relative in @(Get-CgceLifecycleHandoffPaths)) {
+        $source = Join-Path $sourceRoot ($relative -replace '/', '\')
+        $destination = Join-Path `
+            $destinationRoot `
+            ($relative -replace '/', '\')
+        $parent = Split-Path -Parent $destination
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        [System.IO.File]::Copy($source, $destination, $false)
+        if ((Get-CgceSha256 $source) -cne (Get-CgceSha256 $destination)) {
+            throw "CGCE-TEST relocated handoff payload checksum mismatch"
+        }
+    }
+
+    $destinationManifest = Join-Path `
+        $destinationRoot `
+        "source-manifest.sha256"
+    [System.IO.File]::Copy(
+        $Fixture.SourceManifestPath,
+        $destinationManifest,
+        $false
+    )
+    if ((Get-CgceSha256 $destinationManifest) -cne
+            $Fixture.SourceManifestSha) {
+        throw "CGCE-TEST relocated handoff manifest checksum mismatch"
+    }
+
+    $Fixture.HandoffRoot = $destinationRoot
+    $Fixture.SourceManifestPath = $destinationManifest
+    $Fixture.PrepareScript = Join-Path `
+        $destinationRoot `
+        "tools\windows-discovery\Prepare-CgceDiscovery.ps1"
+    $Fixture.InvokeScript = Join-Path `
+        $destinationRoot `
+        "tools\windows-discovery\Invoke-CgceDiscovery.ps1"
+    $Fixture.FakeServerScript = Join-Path `
+        $destinationRoot `
+        "tests\windows\fixtures\FakePalServer.cmd"
+    return $destinationRoot
 }
 
 function Assert-CgcePreparePreGenesisBlocked(
@@ -418,6 +758,62 @@ function New-CgceActivityDriftSetup(
     return $result
 }
 
+function New-CgceInvokeLaunchDriftSetup(
+    [ValidateSet("probe-residue", "ue4ss-drift")]
+    [string]$Kind,
+    [string]$Target
+) {
+    $template = @'
+& $runtimeModule {
+    param([string]$kind, [string]$target)
+    $script:CgceTestLaunchReceiptSeam = {
+        param([string]$Path)
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        if ($kind -ceq "probe-residue") {
+            [System.IO.File]::WriteAllText(
+                $target,
+                "synthetic late probe output",
+                $encoding
+            )
+        } else {
+            [System.IO.File]::AppendAllText(
+                $target,
+                "synthetic drift",
+                $encoding
+            )
+        }
+    }.GetNewClosure()
+} __KIND__ __TARGET__
+'@
+    $result = $template.Replace(
+        "__KIND__",
+        (ConvertTo-CgceLifecycleSingleQuoted $Kind)
+    )
+    $result = $result.Replace(
+        "__TARGET__",
+        (ConvertTo-CgceLifecycleSingleQuoted $Target)
+    )
+    return $result
+}
+
+function New-CgceInvokeProcessCrashSetup([string]$CrashPoint) {
+    $template = @'
+& $runtimeModule {
+    param([string]$crashPoint)
+    $script:CgceTestProcessCrashSeam = {
+        param([string]$point)
+        if ($point -ceq $crashPoint) {
+            throw "CGCE-OPS-PROCESS-QUERY synthetic process crash boundary"
+        }
+    }.GetNewClosure()
+} __CRASH_POINT__
+'@
+    return $template.Replace(
+        "__CRASH_POINT__",
+        (ConvertTo-CgceLifecycleSingleQuoted $CrashPoint)
+    )
+}
+
 Invoke-CgceTest "prepare pre-genesis failure matrix preserves active Saved bytes" {
     $cases = @(
         [pscustomobject]@{
@@ -481,6 +877,17 @@ Invoke-CgceTest "prepare pre-genesis failure matrix preserves active Saved bytes
                 Update-CgceLifecycleControl $Fixture {
                     param($Control, $Ignored)
                     $Control.ue4ss_version = "3.0.2"
+                }
+            }
+        },
+        [pscustomobject]@{
+            Name = "incomplete server process path attestation"
+            Code = "CGCE-OPS-CONTROL"
+            Setup = {
+                param($Fixture)
+                Update-CgceLifecycleControl $Fixture {
+                    param($Control, $Ignored)
+                    $Control.server_process_paths_complete = $false
                 }
             }
         },
@@ -1231,6 +1638,954 @@ Invoke-CgceTest "prepare replay rejects the existing final run directory without
         Compare-CgceInventory `
             -Expected $inactiveBefore `
             -Actual @(Get-CgceTreeInventory -Root $fixture.Paths.inactive_original)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke runs a relocated prepared child once and captures only exact dump outputs" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $preparedHandoffRoot = $fixture.HandoffRoot
+        $relocatedHandoffRoot = Relocate-CgceLifecycleHandoff $fixture
+        Assert-CgceEqual $false ($preparedHandoffRoot -ceq $relocatedHandoffRoot)
+        Assert-CgceEqual `
+            $fixture.SourceManifestSha `
+            (Get-CgceSha256 $fixture.SourceManifestPath)
+        $result = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual 0 $result.ExitCode
+        Assert-CgceEqual 1 @($result.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_OK CAPTURED $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        Assert-CgceEqual "CAPTURED" $state.phase
+        Assert-CgceEqual "ACTIVE" $state.outcome
+        foreach ($checksum in @(
+            $state.process_launch_receipt_checksum,
+            $state.process_result_receipt_checksum,
+            $state.capture_inventory_checksum
+        )) {
+            Assert-CgceEqual $true ($checksum -cmatch '^[0-9a-f]{64}\z')
+        }
+        Assert-CgceEqual `
+            $state.process_launch_receipt_checksum `
+            (Get-CgceSha256 $state.paths.process_launch_receipt)
+        Assert-CgceEqual `
+            $state.process_result_receipt_checksum `
+            (Get-CgceSha256 $state.paths.process_result_receipt)
+        Assert-CgceEqual `
+            $state.capture_inventory_checksum `
+            (Get-CgceSha256 $state.paths.capture_inventory)
+
+        $captureChildren = @(
+            Get-ChildItem -LiteralPath $state.paths.capture -Force |
+                ForEach-Object { $_.Name }
+        )
+        [Array]::Sort($captureChildren, [StringComparer]::Ordinal)
+        Assert-CgceDeepEqual `
+            @("CXXHeaderDump", "UE4SS_ObjectDump.txt") `
+            $captureChildren
+        Assert-CgceEqual `
+            $true `
+            ((Get-Item `
+                -LiteralPath (Join-Path `
+                    $state.paths.capture `
+                    "UE4SS_ObjectDump.txt")).Length -gt 0)
+        Assert-CgceEqual `
+            $true `
+            (@(Get-ChildItem `
+                    -LiteralPath (Join-Path `
+                        $state.paths.capture `
+                        "CXXHeaderDump") `
+                    -File `
+                    -Recurse).Count -gt 0)
+
+        $receiptNames = @(
+            Get-ChildItem -LiteralPath $state.paths.process_receipts -Force |
+                ForEach-Object { $_.Name }
+        )
+        [Array]::Sort($receiptNames, [StringComparer]::Ordinal)
+        Assert-CgceDeepEqual `
+            @("000-launch.json", "001-pid.json", "999-result.json") `
+            $receiptNames
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory `
+                -Root $state.paths.inactive_original)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory `
+                -Root $state.paths.backup_saved)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke tracks an allowlisted child and grandchild to one final result" {
+    $fixture = New-CgcePreparedFixture `
+        -Mode "grandchild" `
+        -IncludeSleeperInAllowlist $true `
+        -IncludeLauncherInAllowlist $true
+    try {
+        $result = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual 0 $result.ExitCode
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_OK CAPTURED $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        $rootReceipt = Read-CgceJsonObject `
+            -Path (Join-Path $state.paths.process_receipts "001-pid.json")
+        $childReceipt = Read-CgceJsonObject `
+            -Path (Join-Path $state.paths.process_receipts "002-pid.json")
+        $grandchildReceipt = Read-CgceJsonObject `
+            -Path (Join-Path $state.paths.process_receipts "003-pid.json")
+        Assert-CgceEqual 0 $rootReceipt.parent_pid
+        Assert-CgceEqual $rootReceipt.pid $childReceipt.parent_pid
+        Assert-CgceEqual $childReceipt.pid $grandchildReceipt.parent_pid
+        Assert-CgceEqualCanonicalPath `
+            -Expected $fixture.ServerExecutable `
+            -Actual $rootReceipt.executable_path
+        Assert-CgceEqualCanonicalPath `
+            -Expected $fixture.RuntimeLauncher `
+            -Actual $childReceipt.executable_path
+        Assert-CgceEqualCanonicalPath `
+            -Expected $fixture.RuntimeSleeper `
+            -Actual $grandchildReceipt.executable_path
+
+        $processResult = Read-CgceJsonObject `
+            -Path $state.paths.process_result_receipt
+        Assert-CgceEqual 3 @($processResult.pid_receipts).Count
+        Assert-CgceEqual 3 @($processResult.observed_processes).Count
+        Assert-CgceDeepEqual `
+            @(
+                "000-launch.json",
+                "001-pid.json",
+                "002-pid.json",
+                "003-pid.json",
+                "999-result.json"
+            ) `
+            @(
+                Get-ChildItem `
+                    -LiteralPath $state.paths.process_receipts `
+                    -Force |
+                    Sort-Object -Property Name |
+                    ForEach-Object { $_.Name }
+            )
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory `
+                -Root $state.paths.inactive_original)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke waits for a detached listening descendant before capture" {
+    $fixture = New-CgcePreparedFixture `
+        -Mode "detached-listener" `
+        -IncludeSleeperInAllowlist $true `
+        -IncludeListenerInAllowlist $true
+    try {
+        $result = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual 0 $result.ExitCode
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_OK CAPTURED $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+        Assert-CgceEqual `
+            $true `
+            (Test-Path `
+                -LiteralPath (Join-Path `
+                    $fixture.ServerRoot `
+                    "cgce-listener-exited.txt") `
+                -PathType Leaf)
+
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        $processResult = Read-CgceJsonObject `
+            -Path $state.paths.process_result_receipt
+        $listenerProcesses = @(
+            @($processResult.observed_processes) |
+                Where-Object {
+                    try {
+                        Assert-CgceEqualCanonicalPath `
+                            -Expected $fixture.RuntimeListener `
+                            -Actual $_.executable_path
+                        $true
+                    } catch {
+                        $false
+                    }
+                }
+        )
+        Assert-CgceEqual 1 $listenerProcesses.Count
+        Assert-CgceNoServerActivity `
+            -ExecutablePaths ([string[]]$state.server_process_paths) `
+            -Ports ([int[]]$state.listener_ports) `
+            -ReceiptRoot $state.paths.process_receipts
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory `
+                -Root $state.paths.inactive_original)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke bounds genesis and manifest reads before module import" {
+    $cases = @(
+        [pscustomobject]@{
+            Name = "oversized genesis"
+            Target = { param($Fixture) $Fixture.Paths.genesis_state }
+            RebindGenesis = $false
+        },
+        [pscustomobject]@{
+            Name = "oversized source manifest"
+            Target = { param($Fixture) $Fixture.SourceManifestPath }
+            RebindGenesis = $true
+        }
+    )
+    foreach ($case in $cases) {
+        $fixture = New-CgcePreparedFixture
+        try {
+            $stateChecksum = Get-CgceSha256 $fixture.Paths.state
+            $oversized = New-Object byte[] 1048577
+            [System.IO.File]::WriteAllBytes(
+                (& $case.Target $fixture),
+                $oversized
+            )
+            if ($case.RebindGenesis) {
+                $genesis = Read-CgceJsonObject `
+                    -Path $fixture.Paths.genesis_state
+                $genesis.source_manifest_checksum = Get-CgceSha256 `
+                    $fixture.SourceManifestPath
+                Write-CgceLifecycleUtf8 `
+                    -Path $fixture.Paths.genesis_state `
+                    -Text ($genesis | ConvertTo-Json -Depth 20)
+            }
+
+            $result = Invoke-CgceInvokeChild -Fixture $fixture
+            Assert-CgceEqual $true ($result.ExitCode -ne 0)
+            Assert-CgceEqual 1 @($result.Stdout).Count
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($fixture.RunId)" `
+                $result.Stdout[0]
+            Assert-CgceEqual "" $result.Stderr
+            Assert-CgceEqual `
+                $stateChecksum `
+                (Get-CgceSha256 $fixture.Paths.state)
+            Assert-CgceEqual `
+                0 `
+                @(Get-ChildItem `
+                    -LiteralPath $fixture.Paths.process_receipts `
+                    -Force).Count
+            Compare-CgceInventory `
+                -Expected $fixture.OriginalInventory `
+                -Actual @(Get-CgceTreeInventory `
+                    -Root $fixture.Paths.inactive_original)
+        } catch {
+            throw "CGCE-TEST $($case.Name): $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "invoke rejects a re-signed handoff before importing its changed module" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $sentinel = Join-Path $fixture.Base "drifted-module-loaded.txt"
+        $contract = Join-Path `
+            $fixture.HandoffRoot `
+            "tools\windows-discovery\modules\CgceDiscovery.Contract.psm1"
+        $text = [System.IO.File]::ReadAllText($contract)
+        $sideEffect = '[System.IO.File]::WriteAllText(' +
+            (ConvertTo-CgceLifecycleSingleQuoted $sentinel) +
+            ", 'loaded')"
+        Write-CgceLifecycleUtf8 `
+            -Path $contract `
+            -Text ($text + "`r`n" + $sideEffect + "`r`n")
+        Update-CgceLifecycleHandoffManifest -Fixture $fixture
+
+        $stateBefore = Get-CgceSha256 $fixture.Paths.state
+        $result = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual $true ($result.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($result.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+        Assert-CgceEqual $false (Test-Path -LiteralPath $sentinel)
+        Assert-CgceEqual $stateBefore (Get-CgceSha256 $fixture.Paths.state)
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem `
+                -LiteralPath $fixture.Paths.process_receipts `
+                -Force).Count
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke rejects plain handoff payload drift before process evidence" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $runtime = Join-Path `
+            $fixture.HandoffRoot `
+            "tools\windows-discovery\modules\CgceDiscovery.Runtime.psm1"
+        $text = [System.IO.File]::ReadAllText($runtime)
+        Write-CgceLifecycleUtf8 `
+            -Path $runtime `
+            -Text ($text + "`r`n# synthetic payload drift`r`n")
+        $stateBefore = Get-CgceSha256 $fixture.Paths.state
+
+        $result = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual $true ($result.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($result.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+        Assert-CgceEqual $stateBefore (Get-CgceSha256 $fixture.Paths.state)
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem `
+                -LiteralPath $fixture.Paths.process_receipts `
+                -Force).Count
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke rejects handoff and run-root overlap before import" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $preparedRunRoot = $fixture.RunRoot
+        $stateBefore = Get-CgceSha256 $fixture.Paths.state
+        $fixture.RunRoot = $fixture.HandoffRoot
+
+        $result = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual $true ($result.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($result.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PATH-OVERLAP $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+        Assert-CgceEqual `
+            $stateBefore `
+            (Get-CgceSha256 `
+                (Join-Path `
+                    (Join-Path $preparedRunRoot $fixture.RunId) `
+                    "run-state.json"))
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem `
+                -LiteralPath $fixture.Paths.process_receipts `
+                -Force).Count
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke failures block once without touching the inactive original" {
+    $cases = @(
+        [pscustomobject]@{
+            Name = "secret argument"
+            Mode = "success"
+            Code = "CGCE-OPS-ARGUMENT"
+            Setup = {
+                param($Fixture)
+                Write-CgceLifecycleUtf8 `
+                    -Path $Fixture.ArgumentsPath `
+                    -Text '["-publiclobby"]'
+            }
+            ExpectedPhase = "PROBE_STAGED"
+        },
+        [pscustomobject]@{
+            Name = "non-array argument JSON"
+            Mode = "success"
+            Code = "CGCE-OPS-JSON"
+            Setup = {
+                param($Fixture)
+                Write-CgceLifecycleUtf8 `
+                    -Path $Fixture.ArgumentsPath `
+                    -Text '{"argument":"not-an-array"}'
+            }
+            ExpectedPhase = "PROBE_STAGED"
+        },
+        [pscustomobject]@{
+            Name = "PalServer checksum drift"
+            Mode = "success"
+            Code = "CGCE-OPS-CHECKSUM"
+            Setup = {
+                param($Fixture)
+                Write-CgceLifecycleUtf8 `
+                    -Path $Fixture.ServerExecutable `
+                    -Text "drifted-executable"
+            }
+            ExpectedPhase = "PROBE_STAGED"
+        },
+        [pscustomobject]@{
+            Name = "PalServer executable path drift"
+            Mode = "success"
+            Code = "CGCE-OPS-PATH"
+            Setup = {
+                param($Fixture)
+                $otherExecutable = Join-Path `
+                    $Fixture.ServerRoot `
+                    "OtherPalServer.exe"
+                [System.IO.File]::Copy(
+                    $Fixture.ServerExecutable,
+                    $otherExecutable,
+                    $false
+                )
+                $Fixture.ServerExecutable = $otherExecutable
+            }
+            ExpectedPhase = "PROBE_STAGED"
+        },
+        [pscustomobject]@{
+            Name = "UE4SS checksum drift"
+            Mode = "success"
+            Code = "CGCE-OPS-CHECKSUM"
+            Setup = {
+                param($Fixture)
+                Write-CgceLifecycleUtf8 `
+                    -Path $Fixture.Paths.ue4ss_dll `
+                    -Text "drifted-ue4ss"
+            }
+            ExpectedPhase = "PROBE_STAGED"
+        },
+        [pscustomobject]@{
+            Name = "nonzero exit"
+            Mode = "nonzero"
+            Code = "CGCE-OPS-PROCESS-EXIT"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+        },
+        [pscustomobject]@{
+            Name = "empty object"
+            Mode = "empty-object"
+            Code = "CGCE-OPS-CAPTURE-MISSING"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+        },
+        [pscustomobject]@{
+            Name = "missing object"
+            Mode = "missing-object"
+            Code = "CGCE-OPS-CAPTURE-MISSING"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+        },
+        [pscustomobject]@{
+            Name = "missing header"
+            Mode = "missing-header"
+            Code = "CGCE-OPS-CAPTURE-MISSING"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+        },
+        [pscustomobject]@{
+            Name = "missing completion"
+            Mode = "missing-completion"
+            Code = "CGCE-OPS-CAPTURE-MISSING"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+        },
+        [pscustomobject]@{
+            Name = "duplicate completion"
+            Mode = "duplicate-completion"
+            Code = "CGCE-OPS-CAPTURE-MISSING"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+        },
+        [pscustomobject]@{
+            Name = "blocked probe log"
+            Mode = "blocked"
+            Code = "CGCE-OPS-CAPTURE-MISSING"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+        },
+        [pscustomobject]@{
+            Name = "bounded timeout"
+            Mode = "timeout"
+            Code = "CGCE-OPS-PROCESS-TIMEOUT"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+            IncludeSleeper = $true
+            TimeoutSeconds = 1
+            WaitForInactive = $true
+        },
+        [pscustomobject]@{
+            Name = "observed unlisted child"
+            Mode = "unlisted-child"
+            Code = "CGCE-OPS-PROCESS-UNLISTED"
+            Setup = { param($Ignored) }
+            ExpectedPhase = "RUNNING"
+            WaitForInactive = $true
+        }
+    )
+    foreach ($case in $cases) {
+        $includeSleeper = (
+            $null -ne $case.PSObject.Properties["IncludeSleeper"] -and
+            [bool]$case.IncludeSleeper
+        )
+        $timeout = if (
+            $null -ne $case.PSObject.Properties["TimeoutSeconds"]
+        ) {
+            [int]$case.TimeoutSeconds
+        } else {
+            30
+        }
+        $fixture = New-CgcePreparedFixture `
+            -Mode $case.Mode `
+            -IncludeSleeperInAllowlist $includeSleeper
+        try {
+            $null = & $case.Setup $fixture
+            $result = Invoke-CgceInvokeChild `
+                -Fixture $fixture `
+                -TimeoutSeconds $timeout
+            if (
+                $null -ne $case.PSObject.Properties["WaitForInactive"] -and
+                [bool]$case.WaitForInactive
+            ) {
+                Wait-CgceLifecycleServerInactive -Fixture $fixture
+            }
+            Assert-CgceEqual $true ($result.ExitCode -ne 0)
+            Assert-CgceEqual 1 @($result.Stdout).Count
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED $($case.Code) $($fixture.RunId)" `
+                $result.Stdout[0]
+            Assert-CgceEqual "" $result.Stderr
+            $state = Read-CgceRunState `
+                -RunRoot $fixture.RunRoot `
+                -RunId $fixture.RunId
+            Assert-CgceEqual $case.ExpectedPhase $state.phase
+            Assert-CgceEqual "BLOCKED" $state.outcome
+            Assert-CgceEqual $case.Code $state.errors[-1].code
+            Compare-CgceInventory `
+                -Expected $fixture.OriginalInventory `
+                -Actual @(Get-CgceTreeInventory `
+                    -Root $state.paths.inactive_original)
+            Assert-CgceEqual `
+                0 `
+                @(Get-ChildItem `
+                    -LiteralPath $state.paths.capture `
+                    -Force).Count
+        } catch {
+            throw "CGCE-TEST $($case.Name): $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "invoke replay never launches a second child or rewrites evidence" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $first = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual 0 $first.ExitCode
+        $stateChecksum = Get-CgceSha256 $fixture.Paths.state
+        $launchChecksum = Get-CgceSha256 `
+            $fixture.Paths.process_launch_receipt
+        $resultChecksum = Get-CgceSha256 `
+            $fixture.Paths.process_result_receipt
+        $capture = @(Get-CgceTreeInventory -Root $fixture.Paths.capture)
+
+        $second = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual $true ($second.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($second.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PHASE $($fixture.RunId)" `
+            $second.Stdout[0]
+        Assert-CgceEqual "" $second.Stderr
+        Assert-CgceEqual $stateChecksum (Get-CgceSha256 $fixture.Paths.state)
+        Assert-CgceEqual `
+            $launchChecksum `
+            (Get-CgceSha256 $fixture.Paths.process_launch_receipt)
+        Assert-CgceEqual `
+            $resultChecksum `
+            (Get-CgceSha256 $fixture.Paths.process_result_receipt)
+        Compare-CgceInventory `
+            -Expected $capture `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.Paths.capture)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke RUNNING failure is a one-launch replay barrier" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $moduleSetup = @'
+function global:Invoke-CgceChildProcess {
+    throw "CGCE-OPS-PROCESS-QUERY synthetic pre-launch failure"
+}
+'@
+        $first = Invoke-CgceInvokeChild `
+            -Fixture $fixture `
+            -ModuleSetup $moduleSetup
+        Assert-CgceEqual $true ($first.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($first.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PROCESS-QUERY $($fixture.RunId)" `
+            $first.Stdout[0]
+        Assert-CgceEqual "" $first.Stderr
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        Assert-CgceEqual "RUNNING" $state.phase
+        Assert-CgceEqual "BLOCKED" $state.outcome
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem `
+                -LiteralPath $state.paths.process_receipts `
+                -Force).Count
+        $stateChecksum = Get-CgceSha256 $state.paths.state
+
+        $second = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual $true ($second.ExitCode -ne 0)
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PHASE $($fixture.RunId)" `
+            $second.Stdout[0]
+        Assert-CgceEqual "" $second.Stderr
+        Assert-CgceEqual $stateChecksum (Get-CgceSha256 $state.paths.state)
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem `
+                -LiteralPath $state.paths.process_receipts `
+                -Force).Count
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke launch intent is a durable no-relaunch crash barrier" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $moduleSetup = @'
+& $runtimeModule {
+    $script:CgceTestLaunchReceiptSeam = {
+        param([string]$Path)
+        throw "CGCE-OPS-PROCESS-RECEIPT synthetic crash after launch intent"
+    }
+}
+'@
+        $first = Invoke-CgceInvokeChild `
+            -Fixture $fixture `
+            -ModuleSetup $moduleSetup
+        Assert-CgceEqual $true ($first.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($first.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PROCESS-RECEIPT $($fixture.RunId)" `
+            $first.Stdout[0]
+        Assert-CgceEqual "" $first.Stderr
+
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        Assert-CgceEqual "RUNNING" $state.phase
+        Assert-CgceEqual "BLOCKED" $state.outcome
+        $receiptNames = @(
+            Get-ChildItem -LiteralPath $state.paths.process_receipts -Force |
+                ForEach-Object { $_.Name }
+        )
+        Assert-CgceDeepEqual @("000-launch.json") $receiptNames
+        $launchChecksum = Get-CgceSha256 `
+            $state.paths.process_launch_receipt
+        $stateChecksum = Get-CgceSha256 $state.paths.state
+
+        $second = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual $true ($second.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($second.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PHASE $($fixture.RunId)" `
+            $second.Stdout[0]
+        Assert-CgceEqual "" $second.Stderr
+        Assert-CgceEqual $stateChecksum (Get-CgceSha256 $state.paths.state)
+        Assert-CgceEqual `
+            $launchChecksum `
+            (Get-CgceSha256 $state.paths.process_launch_receipt)
+        Assert-CgceEqual `
+            $false `
+            (Test-Path -LiteralPath $state.paths.process_result_receipt)
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem `
+                -LiteralPath $state.paths.capture `
+                -Force).Count
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory `
+                -Root $state.paths.inactive_original)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke pre-launch callback blocks late authority drift before PID evidence" {
+    $cases = @(
+        [pscustomobject]@{
+            Name = "probe staged matrix drift"
+            Kind = "probe-residue"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Target = { param($Fixture) $Fixture.Paths.object_dump }
+        },
+        [pscustomobject]@{
+            Name = "UE4SS executable authority drift"
+            Kind = "ue4ss-drift"
+            Code = "CGCE-OPS-CHECKSUM"
+            Target = { param($Fixture) $Fixture.Paths.ue4ss_dll }
+        }
+    )
+    foreach ($case in $cases) {
+        $fixture = New-CgcePreparedFixture
+        try {
+            $target = & $case.Target $fixture
+            $moduleSetup = New-CgceInvokeLaunchDriftSetup `
+                -Kind $case.Kind `
+                -Target $target
+            $first = Invoke-CgceInvokeChild `
+                -Fixture $fixture `
+                -ModuleSetup $moduleSetup
+            Assert-CgceEqual $true ($first.ExitCode -ne 0)
+            Assert-CgceEqual 1 @($first.Stdout).Count
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED $($case.Code) $($fixture.RunId)" `
+                $first.Stdout[0]
+            Assert-CgceEqual "" $first.Stderr
+
+            $state = Read-CgceRunState `
+                -RunRoot $fixture.RunRoot `
+                -RunId $fixture.RunId
+            Assert-CgceEqual "RUNNING" $state.phase
+            Assert-CgceEqual "BLOCKED" $state.outcome
+            Assert-CgceDeepEqual `
+                @("000-launch.json") `
+                @(
+                    Get-ChildItem `
+                        -LiteralPath $state.paths.process_receipts `
+                        -Force |
+                        ForEach-Object { $_.Name }
+                )
+            Assert-CgceEqual `
+                $false `
+                (Test-Path -LiteralPath $state.paths.process_result_receipt)
+            Assert-CgceEqual `
+                0 `
+                @(Get-ChildItem `
+                    -LiteralPath $state.paths.capture `
+                    -Force).Count
+
+            $stateChecksum = Get-CgceSha256 $state.paths.state
+            $launchChecksum = Get-CgceSha256 `
+                $state.paths.process_launch_receipt
+            $second = Invoke-CgceInvokeChild -Fixture $fixture
+            Assert-CgceEqual $true ($second.ExitCode -ne 0)
+            Assert-CgceEqual 1 @($second.Stdout).Count
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PHASE $($fixture.RunId)" `
+                $second.Stdout[0]
+            Assert-CgceEqual "" $second.Stderr
+            Assert-CgceEqual `
+                $stateChecksum `
+                (Get-CgceSha256 $state.paths.state)
+            Assert-CgceEqual `
+                $launchChecksum `
+                (Get-CgceSha256 $state.paths.process_launch_receipt)
+            Compare-CgceInventory `
+                -Expected $fixture.OriginalInventory `
+                -Actual @(Get-CgceTreeInventory `
+                    -Root $state.paths.inactive_original)
+        } catch {
+            throw "CGCE-TEST $($case.Name): $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "invoke process crash boundaries preserve partial receipts and forbid relaunch" {
+    $cases = @(
+        [pscustomobject]@{
+            Point = "after-process-start"
+            PidCount = 0
+        },
+        [pscustomobject]@{
+            Point = "after-pid-1"
+            PidCount = 1
+        },
+        [pscustomobject]@{
+            Point = "after-pid-2"
+            PidCount = 2
+        },
+        [pscustomobject]@{
+            Point = "after-pid-3"
+            PidCount = 3
+        },
+        [pscustomobject]@{
+            Point = "before-result"
+            PidCount = 3
+        }
+    )
+    foreach ($case in $cases) {
+        $fixture = New-CgcePreparedFixture `
+            -Mode "grandchild" `
+            -IncludeSleeperInAllowlist $true `
+            -IncludeLauncherInAllowlist $true
+        try {
+            $moduleSetup = New-CgceInvokeProcessCrashSetup `
+                -CrashPoint $case.Point
+            $first = Invoke-CgceInvokeChild `
+                -Fixture $fixture `
+                -ModuleSetup $moduleSetup
+            Wait-CgceLifecycleServerInactive -Fixture $fixture
+            Assert-CgceEqual $true ($first.ExitCode -ne 0)
+            Assert-CgceEqual 1 @($first.Stdout).Count
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PROCESS-QUERY $($fixture.RunId)" `
+                $first.Stdout[0]
+            Assert-CgceEqual "" $first.Stderr
+
+            $state = Read-CgceRunState `
+                -RunRoot $fixture.RunRoot `
+                -RunId $fixture.RunId
+            Assert-CgceEqual "RUNNING" $state.phase
+            Assert-CgceEqual "BLOCKED" $state.outcome
+            $expectedReceiptNames = @("000-launch.json")
+            for (
+                $sequence = 1;
+                $sequence -le $case.PidCount;
+                $sequence += 1
+            ) {
+                $expectedReceiptNames += (
+                    $sequence.ToString("000") + "-pid.json"
+                )
+            }
+            $actualReceiptNames = @(
+                Get-ChildItem `
+                    -LiteralPath $state.paths.process_receipts `
+                    -Force |
+                    Sort-Object -Property Name |
+                    ForEach-Object { $_.Name }
+            )
+            Assert-CgceDeepEqual `
+                $expectedReceiptNames `
+                $actualReceiptNames
+            Assert-CgceEqual `
+                $false `
+                (Test-Path -LiteralPath $state.paths.process_result_receipt)
+
+            $stateChecksum = Get-CgceSha256 $state.paths.state
+            $receiptInventory = @(
+                Get-CgceTreeInventory -Root $state.paths.process_receipts
+            )
+            $second = Invoke-CgceInvokeChild -Fixture $fixture
+            Assert-CgceEqual $true ($second.ExitCode -ne 0)
+            Assert-CgceEqual 1 @($second.Stdout).Count
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PHASE $($fixture.RunId)" `
+                $second.Stdout[0]
+            Assert-CgceEqual "" $second.Stderr
+            Assert-CgceEqual `
+                $stateChecksum `
+                (Get-CgceSha256 $state.paths.state)
+            Compare-CgceInventory `
+                -Expected $receiptInventory `
+                -Actual @(Get-CgceTreeInventory `
+                    -Root $state.paths.process_receipts)
+            Assert-CgceEqual `
+                0 `
+                @(Get-ChildItem `
+                    -LiteralPath $state.paths.capture `
+                    -Force).Count
+            Compare-CgceInventory `
+                -Expected $fixture.OriginalInventory `
+                -Actual @(Get-CgceTreeInventory `
+                    -Root $state.paths.inactive_original)
+        } catch {
+            throw "CGCE-TEST $($case.Point): $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "invoke root PID receipt survives a post-creation crash without relaunch" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $moduleSetup = @'
+& $runtimeModule {
+    $script:CgceTestRootProcessRecordSeam = {
+        param($Process, [string]$CanonicalPath)
+        throw "CGCE-OPS-PROCESS-QUERY synthetic crash after process creation"
+    }
+}
+'@
+        $first = Invoke-CgceInvokeChild `
+            -Fixture $fixture `
+            -ModuleSetup $moduleSetup
+        Wait-CgceLifecycleServerInactive -Fixture $fixture
+        Assert-CgceEqual $true ($first.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($first.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PROCESS-QUERY $($fixture.RunId)" `
+            $first.Stdout[0]
+        Assert-CgceEqual "" $first.Stderr
+
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        Assert-CgceEqual "RUNNING" $state.phase
+        Assert-CgceEqual "BLOCKED" $state.outcome
+        $receiptNames = @(
+            Get-ChildItem -LiteralPath $state.paths.process_receipts -Force |
+                ForEach-Object { $_.Name }
+        )
+        [Array]::Sort($receiptNames, [StringComparer]::Ordinal)
+        Assert-CgceDeepEqual `
+            @("000-launch.json", "001-pid.json") `
+            $receiptNames
+        $launchChecksum = Get-CgceSha256 `
+            $state.paths.process_launch_receipt
+        $pidChecksum = Get-CgceSha256 `
+            (Join-Path $state.paths.process_receipts "001-pid.json")
+        $stateChecksum = Get-CgceSha256 $state.paths.state
+
+        $second = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual $true ($second.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($second.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PHASE $($fixture.RunId)" `
+            $second.Stdout[0]
+        Assert-CgceEqual "" $second.Stderr
+        Assert-CgceEqual $stateChecksum (Get-CgceSha256 $state.paths.state)
+        Assert-CgceEqual `
+            $launchChecksum `
+            (Get-CgceSha256 $state.paths.process_launch_receipt)
+        Assert-CgceEqual `
+            $pidChecksum `
+            (Get-CgceSha256 `
+                (Join-Path $state.paths.process_receipts "001-pid.json"))
+        Assert-CgceEqual `
+            $false `
+            (Test-Path -LiteralPath $state.paths.process_result_receipt)
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem `
+                -LiteralPath $state.paths.capture `
+                -Force).Count
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory `
+                -Root $state.paths.inactive_original)
     } finally {
         Remove-Item -LiteralPath $fixture.Base -Recurse -Force
     }

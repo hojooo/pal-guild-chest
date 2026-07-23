@@ -40,6 +40,7 @@ $script:CgceStateKeys = @(
     "updated_at_utc",
     "bundle_checksum",
     "control_evidence_checksum",
+    "source_manifest_checksum",
     "palserver_executable",
     "palserver_executable_checksum",
     "ue4ss_version",
@@ -669,7 +670,11 @@ function Get-CgceHandoffRelativeFiles([string]$HandoffRoot) {
     return ,$files.ToArray()
 }
 
-function Assert-CgceHandoffSource([string]$HandoffRoot, [string]$ManifestPath) {
+function Assert-CgceHandoffSource(
+    [string]$HandoffRoot,
+    [string]$ManifestPath,
+    [string]$ExpectedManifestChecksum
+) {
     if (-not (Test-Path -LiteralPath $HandoffRoot -PathType Container) -or
         -not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
         throw "CGCE-OPS-CHECKSUM handoff source is missing"
@@ -684,6 +689,11 @@ function Assert-CgceHandoffSource([string]$HandoffRoot, [string]$ManifestPath) {
         [StringComparison]::OrdinalIgnoreCase
     )) {
         throw "CGCE-OPS-CHECKSUM manifest path drift"
+    }
+    if (-not (Test-CgceChecksum $ExpectedManifestChecksum) -or
+        (Get-CgceSha256 -Path $ManifestPath) -cne
+        $ExpectedManifestChecksum) {
+        throw "CGCE-OPS-CHECKSUM source manifest authority drift"
     }
     $bytes = [System.IO.File]::ReadAllBytes($ManifestPath)
     if ([Array]::IndexOf($bytes, [byte]0x0d) -ge 0) {
@@ -751,6 +761,10 @@ function Assert-CgceHandoffSource([string]$HandoffRoot, [string]$ManifestPath) {
             throw "CGCE-OPS-CHECKSUM unallowlisted handoff payload"
         }
     }
+    if ((Get-CgceSha256 -Path $ManifestPath) -cne
+        $ExpectedManifestChecksum) {
+        throw "CGCE-OPS-CHECKSUM source manifest authority drift"
+    }
 }
 
 function Assert-CgceStateShape($State) {
@@ -794,6 +808,9 @@ function Assert-CgceStateShape($State) {
         if ($null -ne $State.$field -and -not (Test-CgceChecksum $State.$field)) {
             throw "CGCE-OPS-CHECKSUM invalid run-state checksum"
         }
+    }
+    if (-not (Test-CgceChecksum $State.source_manifest_checksum)) {
+        throw "CGCE-OPS-CHECKSUM invalid source manifest checksum"
     }
     foreach ($field in @("palserver_executable")) {
         if ($null -ne $State.$field -and
@@ -1122,6 +1139,7 @@ function New-CgceRunState([string]$RunId, [string]$MaintenanceId, $Paths) {
         updated_at_utc = $now
         bundle_checksum = $null
         control_evidence_checksum = $null
+        source_manifest_checksum = $null
         palserver_executable = $null
         palserver_executable_checksum = $null
         ue4ss_version = $null
@@ -1156,6 +1174,7 @@ function Assert-CgceStateIdentity($Genesis, $Current) {
         "created_at_utc",
         "bundle_checksum",
         "control_evidence_checksum",
+        "source_manifest_checksum",
         "palserver_executable",
         "palserver_executable_checksum",
         "ue4ss_version",
@@ -1340,6 +1359,7 @@ function Write-CgceRunState(
         "created_at_utc",
         "bundle_checksum",
         "control_evidence_checksum",
+        "source_manifest_checksum",
         "palserver_executable",
         "palserver_executable_checksum",
         "ue4ss_version",
