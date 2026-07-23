@@ -2,6 +2,14 @@ local constants = require("CrossplayGuildChestExpander.Scripts.constants")
 local json = require("CrossplayGuildChestExpander.Scripts.json")
 
 local config = {}
+local config_version = constants.versions.config
+local deployment_profile = constants.deployment_profile
+local required_clients = {}
+for index, client in ipairs(constants.required_clients) do
+    required_clients[index] = client
+end
+local json_decode = json.decode
+local json_encode = json.encode
 
 local fields = {
     "config_version",
@@ -42,14 +50,14 @@ local function fail(code, field, detail)
 end
 
 local function parse_json(text)
-    local ok, value = pcall(json.decode, text)
+    local ok, value = pcall(json_decode, text)
     if not ok then
         fail("CGCE-CFG-JSON", nil, "configuration is not valid JSON")
     end
     if type(value) ~= "table" then
         fail("CGCE-CFG-TYPE", nil, "configuration root must be an object")
     end
-    if json.encode(value):sub(1, 1) ~= "{" then
+    if json_encode(value):sub(1, 1) ~= "{" then
         fail("CGCE-CFG-TYPE", nil, "configuration root must be an object")
     end
     return value
@@ -65,7 +73,7 @@ local function array_length(value, field)
     if type(value) ~= "table" then
         fail("CGCE-CFG-TYPE", field, field .. " must be an array")
     end
-    if next(value) == nil and json.encode(value) ~= "[]" then
+    if next(value) == nil and json_encode(value) ~= "[]" then
         fail("CGCE-CFG-TYPE", field, field .. " must be an array")
     end
 
@@ -135,10 +143,10 @@ function config.parse(text)
     local value = parse_json(text)
     validate_schema(value)
 
-    if value.config_version ~= constants.versions.config then
+    if value.config_version ~= config_version then
         fail("CGCE-CFG-VERSION", "config_version", "unsupported configuration version")
     end
-    if value.deployment_profile ~= constants.deployment_profile then
+    if value.deployment_profile ~= deployment_profile then
         fail("CGCE-CFG-PROFILE", "deployment_profile", "unsupported deployment profile")
     end
 
@@ -174,7 +182,7 @@ function config.parse(text)
         fail("CGCE-CFG-LOCAL-CERTIFICATION", "requested_target_slots", "target is not locally enabled")
     end
 
-    if not equal_array(value.required_clients, constants.required_clients) then
+    if not equal_array(value.required_clients, required_clients) then
         fail("CGCE-CFG-REQUIRED-CLIENTS", "required_clients", "required clients must match the canonical ordered list")
     end
 

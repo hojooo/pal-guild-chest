@@ -3,6 +3,11 @@ local json = require("CrossplayGuildChestExpander.Scripts.json")
 local sha256 = require("CrossplayGuildChestExpander.Scripts.sha256")
 
 local audit = {}
+local fingerprint_compute = fingerprint.compute
+local json_array = json.array
+local json_decode = json.decode
+local json_encode = json.encode
+local sha256_hex = sha256.hex
 
 local captured = setmetatable({}, { __mode = "k" })
 
@@ -73,7 +78,7 @@ local function is_json_string(value, allow_empty)
     if type(value) ~= "string" or (not allow_empty and #value == 0) then
         return false
     end
-    return pcall(json.encode, value)
+    return pcall(json_encode, value)
 end
 
 local function is_integer(value, minimum)
@@ -140,7 +145,7 @@ local function validate_filter(context, field)
     end
 
     local seen = {}
-    local result = json.array()
+    local result = json_array()
     for index = 1, length do
         local guild_id = rawget(source, index)
         if not is_json_string(guild_id, false) or seen[guild_id] then
@@ -339,8 +344,8 @@ local function project_snapshot(value, expected_container_id, expected_owner_gui
         return nil
     end
 
-    local projected_slots = json.array()
-    local occupied_records = json.array()
+    local projected_slots = json_array()
+    local occupied_records = json_array()
     local computed_quantity = 0
     for index = 1, slot_count do
         local record, quantity = project_snapshot_slot(rawget(source_slots, index), index)
@@ -357,7 +362,7 @@ local function project_snapshot(value, expected_container_id, expected_owner_gui
         end
     end
 
-    local ok, computed_fingerprint = pcall(fingerprint.compute, occupied_records)
+    local ok, computed_fingerprint = pcall(fingerprint_compute, occupied_records)
     if not ok
         or #occupied_records ~= occupied_count
         or computed_quantity ~= total_quantity
@@ -399,17 +404,17 @@ local function add_guild_error(record, blocking_errors, index, code, field, deta
 end
 
 local function finalize(unsigned)
-    local ok, unsigned_json = pcall(json.encode, unsigned)
+    local ok, unsigned_json = pcall(json_encode, unsigned)
     if not ok then
         fail("CGCE-AUD-CHECKSUM", "audit", "canonical audit encoding failed")
     end
-    local checksum_ok, checksum = pcall(sha256.hex, unsigned_json)
+    local checksum_ok, checksum = pcall(sha256_hex, unsigned_json)
     if not checksum_ok then
         fail("CGCE-AUD-CHECKSUM", "audit", "canonical audit checksum failed")
     end
 
     unsigned.checksum = checksum
-    local signed_ok, canonical = pcall(json.encode, unsigned)
+    local signed_ok, canonical = pcall(json_encode, unsigned)
     if not signed_ok then
         fail("CGCE-AUD-CHECKSUM", "audit", "canonical audit encoding failed")
     end
@@ -424,7 +429,7 @@ end
 
 function audit.capture(context)
     local input = validate_context(context)
-    local blocking_errors = json.array()
+    local blocking_errors = json_array()
     local has_filter_overlap = false
     for guild_id in pairs(input.include_set) do
         if input.exclude_set[guild_id] then
@@ -459,14 +464,14 @@ function audit.capture(context)
         end
     end
 
-    local records = json.array()
+    local records = json_array()
     for index, value in ipairs(guilds) do
         local record = {
             guild_id = value.guild_id,
             guild_name = value.guild_name,
             status = "not_initialized",
             eligible_action = "none",
-            errors = json.array(),
+            errors = json_array(),
         }
         if value.chest_container_id ~= nil then
             record.chest_container_id = value.chest_container_id
@@ -604,7 +609,7 @@ end
 
 function audit.to_table(value)
     local trusted = require_captured(value)
-    local ok, detached = pcall(json.decode, trusted.canonical)
+    local ok, detached = pcall(json_decode, trusted.canonical)
     if not ok then
         fail("CGCE-AUD-CHECKSUM", "audit", "cached canonical audit could not be decoded")
     end

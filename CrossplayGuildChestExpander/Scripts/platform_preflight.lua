@@ -1,6 +1,7 @@
 local json = require("CrossplayGuildChestExpander.Scripts.json")
 
 local platform_preflight = {}
+local json_array = json.array
 
 local required_platforms = { "Steam", "PS5", "Mac" }
 local allowed_platforms = {
@@ -420,7 +421,7 @@ local function failure_report(finding)
             required_platforms = { Steam = false, PS5 = false, Mac = false },
             xbox = false,
         },
-        findings = json.array({ finding }),
+        findings = json_array({ finding }),
     }
 end
 
@@ -445,7 +446,7 @@ function platform_preflight.check(args, option_settings)
     local platforms = parsed_options.platforms
     local client_mod_entry = parsed_options.by_key.ballowclientmod
     local log_format_entry = parsed_options.by_key.logformattype
-    local findings = json.array({})
+    local findings = json_array({})
     local client_mod_allowed = nil
     if client_mod_entry ~= nil then
         if client_mod_entry.value == "True" then

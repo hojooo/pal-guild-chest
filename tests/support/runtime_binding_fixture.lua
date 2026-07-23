@@ -199,6 +199,7 @@ function runtime_binding_fixture.new(options)
     local guild_sequence = 0
     local guild_chest_sequence = 0
     local general_container_sequence = 0
+    local slot_sequence = 0
     local function publish_guild_list()
         fake.set_property_value(
             guild_manager,
@@ -378,10 +379,55 @@ function runtime_binding_fixture.new(options)
             descriptors.guild_chest_container_manager_property.member_name,
             chest_options.manager or container_manager
         )
+        fake.set_property_value(
+            value,
+            descriptors.slot_array_property.member_name,
+            fake.array(chest_options.slots or {})
+        )
         if chest_options.loaded ~= false then
             fake.add_loaded(raw_descriptors.guild_chest_class, value)
         end
         return value
+    end
+
+    function runtime:set_slot_item(slot, item)
+        local occupied = item ~= nil
+        fake.set_property_value(
+            slot,
+            descriptors.slot_occupancy_discriminator_property.member_name,
+            occupied
+        )
+        for logical_name, field in pairs({
+            item_static_id_property = "static_id",
+            item_dynamic_guid_property = "dynamic_guid",
+            item_quantity_property = "quantity",
+            item_durability_property = "durability",
+            item_metadata_hash_inputs_property = "instance_metadata_hash",
+        }) do
+            fake.set_property_value(
+                slot,
+                descriptors[logical_name].member_name,
+                occupied and item[field] or nil
+            )
+        end
+    end
+
+    function runtime:add_slot(item)
+        slot_sequence = slot_sequence + 1
+        local slot = fake.add_object({
+            path = "/Runtime/CGCETest/Slot/" .. slot_sequence,
+            type_signature = "Object<CGCETestSlot>",
+        })
+        runtime:set_slot_item(slot, item)
+        return slot
+    end
+
+    function runtime:set_container_slots(value, slots)
+        fake.set_property_value(
+            value,
+            descriptors.slot_array_property.member_name,
+            fake.array(slots)
+        )
     end
 
     function runtime:add_general_container(container_id, owner_guild_id, container_options)

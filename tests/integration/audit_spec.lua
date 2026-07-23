@@ -1,6 +1,7 @@
 local a = require("tests.support.assertions")
 local audit = require("CrossplayGuildChestExpander.Scripts.audit")
 local fake_adapter = require("tests.support.fake_adapter")
+local fingerprint = require("CrossplayGuildChestExpander.Scripts.fingerprint")
 local json = require("CrossplayGuildChestExpander.Scripts.json")
 local sha256 = require("CrossplayGuildChestExpander.Scripts.sha256")
 local snapshot = require("CrossplayGuildChestExpander.Scripts.snapshot")
@@ -586,6 +587,38 @@ describe("read-only discovery audit", function()
         a.equal(false, forged_ok)
         a.equal("CGCE-AUD-CHECKSUM", forged_error.code)
         a.equal("audit", forged_error.field)
+    end)
+
+    it("captures and decodes audits through module-load trust-path references", function()
+        local capture = audit.capture
+        local to_table = audit.to_table
+        local originals = {
+            json_array = json.array,
+            json_decode = json.decode,
+            json_encode = json.encode,
+            fingerprint_compute = fingerprint.compute,
+            sha256_hex = sha256.hex,
+        }
+        json.array = function() error("mutable json.array slot used") end
+        json.decode = function() error("mutable json.decode slot used") end
+        json.encode = function() error("mutable json.encode slot used") end
+        fingerprint.compute = function() error("mutable fingerprint slot used") end
+        sha256.hex = function() error("mutable sha256 slot used") end
+
+        local ok, value = xpcall(function()
+            return to_table(capture(fixture({}, {})))
+        end, debug.traceback)
+
+        json.array = originals.json_array
+        json.decode = originals.json_decode
+        json.encode = originals.json_encode
+        fingerprint.compute = originals.fingerprint_compute
+        sha256.hex = originals.sha256_hex
+        if not ok then
+            error(value, 0)
+        end
+        a.equal("world/test", value.world_id)
+        a.deep_equal({}, value.guilds)
     end)
 
     it("uses deterministic fields for unknown context keys without address leakage", function()

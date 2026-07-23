@@ -588,7 +588,7 @@ describe("migration ledger", function()
         end
     end)
 
-    it("returns no fresh audit handle when capture or trusted validation fails", function()
+    it("returns no fresh handle on capture failure and ignores mutable checksum slots", function()
         local capture_result, capture_handle = ledger.verify(
             filesystem_with(),
             ROOT,
@@ -612,8 +612,9 @@ describe("migration ledger", function()
         sha256.hex = original_hex
 
         a.equal(true, ok)
-        a.equal("AUDIT_BLOCKED", trusted_result.status)
-        a.equal(nil, trusted_handle)
+        a.equal("MISSING", trusted_result.status)
+        a.equal("function", type(trusted_handle))
+        a.equal(trusted_result.fresh_audit_checksum, audit.checksum(trusted_handle))
     end)
 
     it("reports a ledger guild missing from the fresh audit deterministically", function()

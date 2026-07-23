@@ -38,6 +38,7 @@ local resolver_problem_codes = {
     ["CGCE-CRES-OWNER-MISMATCH"] = true,
     ["CGCE-CRES-RELATION-CHANGED"] = true,
     ["CGCE-CRES-TOKEN"] = true,
+    ["CGCE-CRES-SNAPSHOT"] = true,
 }
 
 local token_records = setmetatable({}, { __mode = "k" })
@@ -498,6 +499,7 @@ local function revoke(record)
     end
     record.revoked = true
     record.validation_in_progress = false
+    record.snapshot_in_progress = false
 end
 
 function container_resolver.resolve(
@@ -547,6 +549,7 @@ function container_resolver.resolve(
         authorized = authorized,
         revoked = false,
         validation_in_progress = false,
+        snapshot_in_progress = false,
         generation = function() end,
     })
     return {
@@ -557,7 +560,7 @@ function container_resolver.resolve(
     }
 end
 
-function container_resolver.assert_current(
+local function assert_current(
     token,
     adapter,
     binding_session,
@@ -571,7 +574,7 @@ function container_resolver.assert_current(
             "container token is invalid or revoked"
         )
     end
-    if record.validation_in_progress then
+    if record.validation_in_progress or record.snapshot_in_progress then
         revoke(record)
         fail(
             "CGCE-CRES-TOKEN",
@@ -671,6 +674,63 @@ function container_resolver.assert_current(
         )
     end
     return true
+end
+
+container_resolver.assert_current = assert_current
+
+function container_resolver.capture_snapshot(
+    token,
+    adapter,
+    binding_session,
+    world_epoch,
+    projector
+)
+    if type(projector) ~= "function" then
+        fail(
+            "CGCE-CRES-SNAPSHOT",
+            "projector",
+            "snapshot projector must be a read-only function"
+        )
+    end
+    assert_current(token, adapter, binding_session, world_epoch)
+    local record = token_records[token]
+    local generation = record.generation
+    record.snapshot_in_progress = true
+    local values = table.pack(pcall(
+        projector,
+        record.candidate,
+        adapter,
+        binding_session,
+        world_epoch
+    ))
+    local projection_owned = record.snapshot_in_progress == true
+    record.snapshot_in_progress = false
+    if not values[1]
+        or values.n ~= 2
+        or type(values[2]) ~= "table"
+        or getmetatable(values[2]) ~= nil
+        or not projection_owned
+        or record.revoked
+        or not rawequal(record.generation, generation) then
+        revoke(record)
+        fail(
+            "CGCE-CRES-SNAPSHOT",
+            "snapshot",
+            "snapshot projector failed or invalidated its container authority"
+        )
+    end
+    local projected = values[2]
+    if rawget(projected, "container_id") ~= record.container_id
+        or rawget(projected, "owner_guild_id") ~= record.owner_guild_id then
+        revoke(record)
+        fail(
+            "CGCE-CRES-SNAPSHOT",
+            "snapshot",
+            "snapshot identity does not match the resolved guild chest"
+        )
+    end
+    assert_current(token, adapter, binding_session, world_epoch)
+    return projected
 end
 
 return container_resolver

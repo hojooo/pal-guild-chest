@@ -72,6 +72,42 @@ describe("config.parse", function()
         a.equal(nil, constants.release_certification_checksum)
     end)
 
+    it("keeps the Mac-required product contract bound to module-load references", function()
+        local parse = config.parse
+        local exact_text = json.encode(valid_config())
+        local missing_mac_text = json.encode(valid_config({
+            required_clients = { "SteamWindows", "PS5" },
+        }))
+        local originals = {
+            versions = constants.versions,
+            deployment_profile = constants.deployment_profile,
+            required_clients = constants.required_clients,
+            decode = json.decode,
+            encode = json.encode,
+        }
+        constants.versions = { config = "forged" }
+        constants.deployment_profile = "forged"
+        constants.required_clients = { "SteamWindows", "PS5" }
+        json.decode = function() error("mutable json.decode slot used") end
+        json.encode = function() error("mutable json.encode slot used") end
+
+        local ok, failure = xpcall(function()
+            a.deep_equal({ "SteamWindows", "PS5", "Mac" }, parse(exact_text).required_clients)
+            expect_error("CGCE-CFG-REQUIRED-CLIENTS", "required_clients", function()
+                parse(missing_mac_text)
+            end)
+        end, debug.traceback)
+
+        constants.versions = originals.versions
+        constants.deployment_profile = originals.deployment_profile
+        constants.required_clients = originals.required_clients
+        json.decode = originals.decode
+        json.encode = originals.encode
+        if not ok then
+            error(failure, 0)
+        end
+    end)
+
     it("rejects unknown and missing keys", function()
         local unknown = valid_config({ oops = 1 })
         expect_error("CGCE-CFG-UNKNOWN-KEY", "oops", function()

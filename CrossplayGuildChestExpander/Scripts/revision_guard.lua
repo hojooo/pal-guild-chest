@@ -218,9 +218,10 @@ function revision_guard.check(context)
     current_validation_epoch = check_epoch
     local ports = capture_context(context)
 
-    local revision_ok, live_revision, revision_error = pcall(ports.read_revision)
-    if not revision_ok
-        or revision_error ~= nil
+    local revision_values = table.pack(pcall(ports.read_revision))
+    local live_revision = revision_values[2]
+    if not revision_values[1]
+        or revision_values.n ~= 2
         or type(live_revision) ~= "number"
         or math.type(live_revision) ~= "integer"
         or live_revision < 1 then
@@ -237,8 +238,9 @@ function revision_guard.check(context)
         )
     end
 
-    local load_ok, source, load_error = pcall(ports.load_manifest, live_revision)
-    if not load_ok or load_error ~= nil then
+    local load_values = table.pack(pcall(ports.load_manifest, live_revision))
+    local source = load_values[2]
+    if not load_values[1] or load_values.n ~= 2 then
         return outcome(
             "BLOCKED",
             live_revision,

@@ -441,6 +441,7 @@ describe("revision_guard.check", function()
             function() return nil end,
             function() return 0 end,
             function() return 1.5 end,
+            function() return 123456, nil end,
             function() error("secret live reader failure") end,
         }
         for _, reader in ipairs(readers) do
@@ -454,6 +455,21 @@ describe("revision_guard.check", function()
             a.equal(0, calls.load)
             a.equal(0, calls.inspect)
         end
+    end)
+
+    it("blocks excess manifest loader return values", function()
+        local _, runtime_text = manifest("runtime")
+        local context, calls = exact_context(runtime_text)
+        context.load_manifest = function()
+            calls.load = calls.load + 1
+            return runtime_text, nil
+        end
+
+        local result = revision_guard.check(context)
+
+        a.equal("BLOCKED", result.status)
+        a.equal("CGCE-REV-MANIFEST-LOAD", result.errors[1].code)
+        a.equal(0, calls.inspect)
     end)
 
     it("blocks duplicate, malformed, checksum-invalid, and MinRevision-bearing manifests", function()

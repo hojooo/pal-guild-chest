@@ -136,6 +136,138 @@ describe("container_resolver exact epoch-bound guild chest resolution", function
         assert_zero_forbidden(runtime)
     end)
 
+    it("projects snapshots only from the authenticated live container handle", function()
+        local runtime = runtime_binding_fixture.new()
+        runtime:add_guild_chest("container/a", "guild/a")
+        local detector, epoch = ready_epoch(runtime)
+        local resolved = resolve(runtime, epoch, "guild/a", "container/a")
+        local projected_container
+
+        local projected = container_resolver.capture_snapshot(
+            resolved.container,
+            runtime.adapter,
+            runtime.binding_session,
+            epoch,
+            function(container, adapter, binding_session, projected_epoch)
+                projected_container = container
+                a.equal(runtime.adapter, adapter)
+                a.equal(runtime.binding_session, binding_session)
+                a.equal(epoch, projected_epoch)
+                return {
+                    container_id = "container/a",
+                    owner_guild_id = "guild/a",
+                }
+            end
+        )
+
+        a.equal("function", type(projected_container))
+        a.equal(false, runtime.fake.is_raw(projected_container))
+        a.equal("container/a", projected.container_id)
+        a.equal("guild/a", projected.owner_guild_id)
+
+        a.equal(true, world_ready.close(detector))
+        assert_zero_forbidden(runtime)
+    end)
+
+    it("revokes snapshot authority on malformed, reentrant, or stale projection", function()
+        local cases = {
+            {
+                name = "wrong identity",
+                projector = function()
+                    return { container_id = "container/other", owner_guild_id = "guild/a" }
+                end,
+            },
+            {
+                name = "throw",
+                projector = function()
+                    error("projection failed")
+                end,
+            },
+            {
+                name = "extra return",
+                projector = function()
+                    return {
+                        container_id = "container/a",
+                        owner_guild_id = "guild/a",
+                    }, nil
+                end,
+            },
+            {
+                name = "metatable",
+                projector = function()
+                    return setmetatable({
+                        container_id = "container/a",
+                        owner_guild_id = "guild/a",
+                    }, {})
+                end,
+            },
+            {
+                name = "reentrant token use",
+                projector = function(runtime, token, epoch)
+                    local nested = pcall(
+                        container_resolver.capture_snapshot,
+                        token,
+                        runtime.adapter,
+                        runtime.binding_session,
+                        epoch,
+                        function()
+                            return {
+                                container_id = "container/a",
+                                owner_guild_id = "guild/a",
+                            }
+                        end
+                    )
+                    a.equal(false, nested)
+                    return {
+                        container_id = "container/a",
+                        owner_guild_id = "guild/a",
+                    }
+                end,
+            },
+            {
+                name = "stale epoch",
+                projector = function(runtime)
+                    runtime:fire_world_ready()
+                    return {
+                        container_id = "container/a",
+                        owner_guild_id = "guild/a",
+                    }
+                end,
+            },
+        }
+
+        for _, case in ipairs(cases) do
+            local runtime = runtime_binding_fixture.new()
+            runtime:add_guild_chest("container/a", "guild/a")
+            local detector, epoch = ready_epoch(runtime)
+            local token = resolve(runtime, epoch, "guild/a", "container/a").container
+
+            local ok, err = pcall(
+                container_resolver.capture_snapshot,
+                token,
+                runtime.adapter,
+                runtime.binding_session,
+                epoch,
+                function(...)
+                    return case.projector(runtime, token, epoch, ...)
+                end
+            )
+
+            a.equal(false, ok, case.name)
+            a.equal("table", type(err), case.name)
+            expect_problem("CGCE-CRES-TOKEN", "container", function()
+                container_resolver.assert_current(
+                    token,
+                    runtime.adapter,
+                    runtime.binding_session,
+                    epoch
+                )
+            end)
+            a.equal(true, world_ready.close(detector))
+            assert_zero_forbidden(runtime)
+        end
+    end)
+
     it("ignores same-ID general containers outside the exact guild-chest class", function()
         local general
         local general_reads = 0
@@ -623,7 +755,7 @@ describe("container_resolver exact epoch-bound guild chest resolution", function
             exports[#exports + 1] = name
         end
         table.sort(exports)
-        a.deep_equal({ "assert_current", "resolve" }, exports)
+        a.deep_equal({ "assert_current", "capture_snapshot", "resolve" }, exports)
         a.equal(nil, container_resolver.unwrap)
 
         a.equal(true, world_ready.close(detector))
@@ -634,8 +766,11 @@ describe("container_resolver exact epoch-bound guild chest resolution", function
         local runtime = runtime_binding_fixture.new()
         runtime:add_guild_chest("container/a", "guild/a")
         local detector, epoch = ready_epoch(runtime)
+        local resolver_assert_current = container_resolver.assert_current
+        local resolver_capture_snapshot = container_resolver.capture_snapshot
         local replaced = {}
         local replacements = {
+            { container_resolver, "assert_current" },
             { world_ready, "assert_current" },
             { world_ready, "assert_relation" },
             { revision_guard, "descriptor" },
@@ -659,12 +794,25 @@ describe("container_resolver exact epoch-bound guild chest resolution", function
 
         local ok, err = xpcall(function()
             local token = resolve(runtime, epoch, "guild/a", "container/a").container
-            a.equal(true, container_resolver.assert_current(
+            a.equal(true, resolver_assert_current(
                 token,
                 runtime.adapter,
                 runtime.binding_session,
                 epoch
             ))
+            local projected = resolver_capture_snapshot(
+                token,
+                runtime.adapter,
+                runtime.binding_session,
+                epoch,
+                function()
+                    return {
+                        container_id = "container/a",
+                        owner_guild_id = "guild/a",
+                    }
+                end
+            )
+            a.equal("container/a", projected.container_id)
         end, debug.traceback)
         for _, replacement in ipairs(replaced) do
             replacement[1][replacement[2]] = replacement[3]

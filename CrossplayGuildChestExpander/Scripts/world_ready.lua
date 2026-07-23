@@ -758,7 +758,7 @@ function world_ready.start(options)
     }, probe)
     record.controller = controller
 
-    if record.state ~= "PENDING" then
+    if record.state == "BLOCKED" then
         return detector
     end
 
@@ -796,6 +796,13 @@ function world_ready.start(options)
     if record.state == "BLOCKED" or record.close_requested then
         cleanup_observation(record)
         return detector
+    end
+
+    if record.state == "READY" and record.epoch ~= nil then
+        local current = pcall(validate_epoch, record.epoch)
+        if not current then
+            return detector
+        end
     end
 
     wake_pending(record)

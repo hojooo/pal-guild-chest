@@ -2,6 +2,9 @@ local fingerprint = require("CrossplayGuildChestExpander.Scripts.fingerprint")
 local json = require("CrossplayGuildChestExpander.Scripts.json")
 
 local snapshot = {}
+local fingerprint_compute = fingerprint.compute
+local json_array = json.array
+local json_encode = json.encode
 
 local item_fields = {
     static_id = true,
@@ -19,7 +22,7 @@ local function is_json_string(value, allow_empty)
     if type(value) ~= "string" or (not allow_empty and #value == 0) then
         return false
     end
-    return pcall(json.encode, value)
+    return pcall(json_encode, value)
 end
 
 local function require_adapter(adapter)
@@ -143,8 +146,8 @@ function snapshot.capture(adapter, container)
     )
     local adapter_slots = read_adapter(adapter, "slots", container, "CGCE-SNAP-SLOTS", "slots")
     local slot_count = array_length(adapter_slots)
-    local records = json.array()
-    local occupied_records = json.array()
+    local records = json_array()
+    local occupied_records = json_array()
     local total_quantity = 0
 
     for index = 1, slot_count do
@@ -173,7 +176,7 @@ function snapshot.capture(adapter, container)
         occupied_slot_count = #occupied_records,
         total_item_quantity = total_quantity,
         slots = records,
-        item_fingerprint = fingerprint.compute(occupied_records),
+        item_fingerprint = fingerprint_compute(occupied_records),
     }
 end
 
