@@ -6,3 +6,9 @@ third_party/lua-5.4.8/src/luac
 
 # Advisory local knowledge graph; regenerate with the Understand Anything workflow.
 .understand-anything/
+
+# Raw discovery/Gate A evidence contains private world and container IDs.
+/private-artifacts/
+
+# Reproducible release archives are generated artifacts.
+/dist/

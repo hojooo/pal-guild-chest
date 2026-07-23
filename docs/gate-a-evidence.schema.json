@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/cgce/gate-a-evidence.schema.json",
+  "title": "CGCE private Gate A review request",
+  "description": "Private, canonical, self-checksummed review input. Schema validity alone never grants Gate A acceptance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evidence_version",
+    "kind",
+    "scope",
+    "mutation_capability",
+    "release_eligible",
+    "game_revision",
+    "world_id",
+    "deployment_profile",
+    "ue4ss_version",
+    "reviewer",
+    "reviewed_at",
+    "artifacts",
+    "review_attestation",
+    "checksum"
+  ],
+  "properties": {
+    "evidence_version": {
+      "const": "1.0"
+    },
+    "kind": {
+      "const": "gate_a_review_request"
+    },
+    "scope": {
+      "const": "prd32_items_1_16_plus_fatal"
+    },
+    "mutation_capability": {
+      "const": false
+    },
+    "release_eligible": {
+      "const": false
+    },
+    "game_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "world_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "deployment_profile": {
+      "const": "windows-dedicated-ps5-macos-required"
+    },
+    "ue4ss_version": {
+      "const": "3.0.1"
+    },
+    "reviewer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "reviewed_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe_request",
+        "discovery_observation",
+        "operational_report",
+        "runtime_manifest",
+        "revision_source",
+        "projection_contract",
+        "projector_implementation",
+        "capture_source",
+        "durability_codec",
+        "metadata_codec",
+        "metadata_ordered_input_contract",
+        "fatal_behavior_proof",
+        "fatal_harness",
+        "fatal_execution_transcript"
+      ],
+      "properties": {
+        "probe_request": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "discovery_observation": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "operational_report": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "runtime_manifest": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "revision_source": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "projection_contract": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "projector_implementation": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "capture_source": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "durability_codec": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "metadata_codec": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "metadata_ordered_input_contract": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "fatal_behavior_proof": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "fatal_harness": {
+          "$ref": "#/$defs/artifactLink"
+        },
+        "fatal_execution_transcript": {
+          "$ref": "#/$defs/artifactLink"
+        }
+      }
+    },
+    "review_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision_authority_verified",
+        "all_symbols_reviewed",
+        "snapshot_runtime_mapping_verified",
+        "fatal_behavior_independently_reviewed",
+        "ownership_exclusion_verified"
+      ],
+      "properties": {
+        "revision_authority_verified": {
+          "const": true
+        },
+        "all_symbols_reviewed": {
+          "const": true
+        },
+        "snapshot_runtime_mapping_verified": {
+          "const": true
+        },
+        "fatal_behavior_independently_reviewed": {
+          "const": true
+        },
+        "ownership_exclusion_verified": {
+          "const": true
+        }
+      }
+    },
+    "checksum": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifactLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "checksum"
+      ],
+      "properties": {
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/\\\\:][^\\\\:]*$"
+        },
+        "checksum": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

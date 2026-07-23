@@ -27,20 +27,29 @@ Keep the following files in ignored, access-controlled local storage. Do not
 commit raw world IDs, guild IDs, container IDs, player data, credentials, or
 server logs to the public repository.
 
-1. `discovery-probe-request.json` — owner-authored exact candidates,
+1. `probe-request.json` — owner-authored exact candidates,
    self-checksummed and explicitly non-authoritative.
 2. `discovery-observation.json` — read-only observation of every candidate,
    self-checksummed and bound to the request checksum and live revision.
-3. `audit-report.json` — the durable operational report for the same run.
+3. `operational-report.json` — the canonical operational report for the same
+   run.
+   `revision-source.log` is canonical JSON despite its operational filename;
+   it binds the world, game revision, UE4SS version, exact revision source, and
+   source signature.
 4. `binding-manifest.json` — a private review candidate containing only
    uniquely matched exact symbols. Its `source_audit_checksum` binds the same
-   run's trusted audit checksum; the later Gate A artifact separately binds
+   run's trusted audit checksum; the Gate A review request separately binds
    both the manifest and observation checksums. After Gate A review, its
    world-, guild-, and container-ID-free runtime descriptor data may be
    promoted to `Scripts/bindings/<revision>.json`; the raw capture remains
    private.
-5. `gate-a-acceptance.json` — produced later by the read-only Gate A validator,
-   never handwritten.
+5. `gate-a-evidence.json` — canonical private review request linking every
+   actual artifact byte checksum and the independent attestations.
+6. `gate-a-acceptance.json` — produced by the read-only Gate A validator,
+   never handwritten, and re-verified against the actual inputs before use.
+7. `fatal-execution-transcript.json` — canonical ordered harness events proving
+   invariant detection, isolated invocation, blocked normal/autosave attempts,
+   and either an active no-save guard or process exit without save.
 
 The trust direction is checksum-bound and converges at Gate A:
 
@@ -51,6 +60,12 @@ trusted audit -> runtime manifest ---------------->
 
 Every arrow is an exact checksum comparison. A valid shape or a 64-character
 checksum string is not sufficient.
+
+The validator reads the review request and every linked artifact from its
+declared path through a trusted no-follow filesystem port. An independent
+approval channel pins the exact review-request checksum, reviewer identity,
+timestamp, and reviewer-authorization checksum. The receipt provides integrity
+and review binding; it does not create reviewer authenticity by itself.
 
 ## Preparation
 
@@ -94,7 +109,7 @@ checksum string is not sufficient.
    audit and representative snapshot. Review the unique matches, then author a
    self-checksummed runtime manifest whose `source_audit_checksum` equals that
    audit. This manual boundary does not make the observation authoritative; the
-   later Gate A validator must cross-check all linked bytes.
+   Gate A validator cross-checks all linked bytes.
 4. Close every bootstrap observation handle and timer. Start a fresh normal
    Discovery Build epoch with the exact runtime manifest. It reads the live
    revision once again for the new binding epoch and rejects checksum,
@@ -165,7 +180,7 @@ prove this behavior blocks Gate A.
 
 The non-authoritative observation may bind the claimed mode, selected candidate
 index, behavior-proof artifact checksum, and harness implementation checksum.
-It must keep `behavior_verified=false`; only the later Gate A validator may
+It must keep `behavior_verified=false`; only the Gate A validator may
 validate those linked bytes and issue an acceptance receipt.
 
 ## Review and acceptance
@@ -181,15 +196,17 @@ validate those linked bytes and issue an acceptance receipt.
 3. Author the runtime manifest separately from the observation. Its symbol set
    must equal the unique matched set, and its `source_audit_checksum` must equal
    the trusted audit checksum embedded in the same run's operational report.
-   The later Gate A artifact must bind the observation checksum separately.
+   The Gate A review request binds the observation checksum separately.
 4. Confirm the operational report, manifest, observation, 54-slot snapshot,
    fatal-safety evidence, reviewer, timestamp, world, revision, and UE4SS
    version all refer to the same run.
 5. Treat `manifest_readiness` only as permission to author a runtime-manifest
    candidate. It is not Gate A eligibility or authority.
 6. Run the Gate A validator over the actual linked artifacts. A receipt remains
-   non-mutating; it is only a future prerequisite for implementing the isolated
-   post-Gate-A mutation layer.
+   non-mutating and `behavior_authorized=false`. Items 9–12 record reviewed
+   candidate/type identities, not proof that calling those functions is safe.
+   The receipt is only a future prerequisite for the isolated post-Gate-A
+   behavior work and cannot independently authorize apply.
 
 Do not promote an artifact if a required symbol lacks exactly one full
 `MATCHED` record, an alternative candidate is not a full `MISMATCH`, or any

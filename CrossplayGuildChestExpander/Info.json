@@ -1,0 +1,26 @@
+{
+  "ModName": "Crossplay Guild Chest Expander — Discovery Build",
+  "PackageName": "CrossplayGuildChestExpander",
+  "Thumbnail": "thumbnail.png",
+  "Version": "1.1.0-discovery",
+  "DebugMode": false,
+  "MinRevision": 0,
+  "Author": "TBD",
+  "Dependencies": [
+    "UE4SS"
+  ],
+  "Tags": [
+    "UE4SS",
+    "Utilities",
+    "Discovery"
+  ],
+  "InstallRule": [
+    {
+      "Type": "Lua",
+      "IsServer": true,
+      "Targets": [
+        "./Scripts"
+      ]
+    }
+  ]
+}

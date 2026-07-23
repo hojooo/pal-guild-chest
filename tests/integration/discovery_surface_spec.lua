@@ -26,6 +26,7 @@ local production_names = {
     "discovery_evidence",
     "discovery_probe",
     "fingerprint",
+    "gate_a_evidence",
     "guild_repository",
     "json",
     "ledger",
