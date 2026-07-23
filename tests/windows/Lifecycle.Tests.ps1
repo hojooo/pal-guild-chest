@@ -127,16 +127,59 @@ function New-CgceSyntheticFixture {
         BundleSha = $bundleSha
         Paths = $paths
         OriginalInventory = @(Get-CgceTreeInventory -Root $savedPath)
-        PrepareScript = (Join-Path $repositoryRoot "tools\windows-discovery\Prepare-CgceDiscovery.ps1")
+        PrepareScript = (Join-Path `
+            $handoffRoot `
+            "tools\windows-discovery\Prepare-CgceDiscovery.ps1")
+        RepositoryPrepareScript = (Join-Path `
+            $repositoryRoot `
+            "tools\windows-discovery\Prepare-CgceDiscovery.ps1")
     }
 }
 
-function Invoke-CgcePrepareChild($Fixture) {
+function ConvertTo-CgceLifecycleSingleQuoted([string]$Value) {
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Invoke-CgcePrepareChild(
+    $Fixture,
+    [string]$ModuleSetup = ""
+) {
     $stderrPath = Join-Path $Fixture.Base ("prepare-stderr-" + [guid]::NewGuid().ToString("N"))
+    $entryScript = $Fixture.PrepareScript
+    if (-not [string]::IsNullOrWhiteSpace($ModuleSetup)) {
+        $entryScript = Join-Path $Fixture.Base (
+            "prepare-wrapper-" + [guid]::NewGuid().ToString("N") + ".ps1"
+        )
+        $toolRoot = Join-Path $Fixture.HandoffRoot "tools\windows-discovery"
+        $wrapper = @(
+            '$ErrorActionPreference = "Stop"'
+            ('$commonModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "CgceDiscovery.Common.psm1"
+                )) + ' -Global -PassThru')
+            ('$contractModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Contract.psm1"
+                )) + ' -Global -PassThru')
+            ('$filesModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Files.psm1"
+                )) + ' -Global -PassThru')
+            ('$runtimeModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Runtime.psm1"
+                )) + ' -Global -PassThru')
+            $ModuleSetup
+            ('& ' + (ConvertTo-CgceLifecycleSingleQuoted $Fixture.PrepareScript) +
+                ' @args')
+            'exit $LASTEXITCODE'
+        ) -join "`r`n"
+        Write-CgceLifecycleUtf8 -Path $entryScript -Text ($wrapper + "`r`n")
+    }
     $arguments = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
-        "-File", $Fixture.PrepareScript,
+        "-File", $entryScript,
         "-ServerRoot", $Fixture.ServerRoot,
         "-SavedPath", $Fixture.SavedPath,
         "-Ue4ssRoot", $Fixture.Ue4ssRoot,
@@ -192,6 +235,187 @@ function Assert-CgcePreparePreGenesisBlocked(
     Compare-CgceInventory `
         -Expected $Fixture.OriginalInventory `
         -Actual @(Get-CgceTreeInventory -Root $Fixture.Paths.active_saved)
+}
+
+function New-CgcePersistenceFaultSetup(
+    $Fixture,
+    [bool]$FailAfterBackupState,
+    [bool]$FailBlockedPersistence
+) {
+    $template = @'
+& $contractModule {
+    param(
+        [string]$serverRoot,
+        [string]$lockEvidence,
+        [bool]$failAfterBackupState,
+        [bool]$failBlockedPersistence
+    )
+    $stateFaultFired = $false
+    $script:CgceTestStatePersistenceSeam = {
+        param([string]$phase, $context)
+        if ($failAfterBackupState -and -not $stateFaultFired -and
+            $phase -ceq "after-state-replace" -and
+            $context.candidate.phase -ceq "BACKUP_VERIFIED" -and
+            $context.candidate.outcome -ceq "ACTIVE") {
+            $stateFaultFired = $true
+            throw "CGCE-OPS-CHECKSUM injected state read-back fault"
+        }
+        if ($phase -ceq "before-state-replace" -and
+            $context.candidate.outcome -ceq "BLOCKED") {
+            $contended = $false
+            try {
+                $otherLock = Enter-CgceExclusiveLock `
+                    -ServerRoot $serverRoot `
+                    -RunId $context.candidate.run_id
+                $otherLock.Dispose()
+            } catch {
+                $contended = $true
+            }
+            if (-not $contended) {
+                throw "CGCE-TEST Prepare lock was not held during blocking"
+            }
+            [System.IO.File]::WriteAllText(
+                $lockEvidence,
+                "held",
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+            if ($failBlockedPersistence) {
+                throw "CGCE-OPS-CHECKSUM injected blocked persistence fault"
+            }
+        }
+    }.GetNewClosure()
+} __SERVER_ROOT__ __LOCK_EVIDENCE__ __FAIL_STATE__ __FAIL_BLOCK__
+'@
+    $result = $template.Replace(
+        "__SERVER_ROOT__",
+        (ConvertTo-CgceLifecycleSingleQuoted $Fixture.ServerRoot)
+    )
+    $result = $result.Replace(
+        "__LOCK_EVIDENCE__",
+        (ConvertTo-CgceLifecycleSingleQuoted (
+            Join-Path $Fixture.Base "lock-held.txt"
+        ))
+    )
+    $result = $result.Replace(
+        "__FAIL_STATE__",
+        $(if ($FailAfterBackupState) { '$true' } else { '$false' })
+    )
+    $result = $result.Replace(
+        "__FAIL_BLOCK__",
+        $(if ($FailBlockedPersistence) { '$true' } else { '$false' })
+    )
+    return $result
+}
+
+function New-CgceFileFaultSetup(
+    [string]$Kind,
+    [string]$Target,
+    [string]$MutationPath = ""
+) {
+    $template = @'
+& $filesModule {
+    param([string]$kind, [string]$target, [string]$mutationPath)
+    $script:CgceTestPublishSeam = {
+        param([string]$phase, $context)
+        if ($kind -ceq "tree-before" -and
+            $phase -ceq "tree-before-publish" -and
+            $context.destination -ceq $target) {
+            throw "CGCE-OPS-COPY injected tree publication fault"
+        }
+        if ($kind -ceq "move-before" -and
+            $phase -ceq "move-before-publish" -and
+            $context.destination -ceq $target) {
+            throw "CGCE-OPS-COPY injected rename fault"
+        }
+        if ($kind -ceq "tree-after-mutate" -and
+            $phase -ceq "tree-after-publish" -and
+            $context.destination -ceq $target) {
+            [System.IO.File]::AppendAllText(
+                $mutationPath,
+                "drift",
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+        }
+    }.GetNewClosure()
+} __KIND__ __TARGET__ __MUTATION__
+'@
+    $result = $template.Replace(
+        "__KIND__",
+        (ConvertTo-CgceLifecycleSingleQuoted $Kind)
+    )
+    $result = $result.Replace(
+        "__TARGET__",
+        (ConvertTo-CgceLifecycleSingleQuoted $Target)
+    )
+    $result = $result.Replace(
+        "__MUTATION__",
+        (ConvertTo-CgceLifecycleSingleQuoted $MutationPath)
+    )
+    return $result
+}
+
+function New-CgceProbeFaultSetup {
+    return @'
+& $runtimeModule {
+    $script:CgceTestProbeCrashSeam = {
+        param([string]$point)
+        if ($point -ceq "before-receipt-999") {
+            throw "CGCE-OPS-PROBE-RECEIPT injected final receipt fault"
+        }
+    }
+}
+'@
+}
+
+function New-CgceActivityDriftSetup(
+    $Fixture,
+    [ValidateSet("process", "listener")]
+    [string]$Kind
+) {
+    $template = @'
+& $runtimeModule {
+    param([string]$kind, [string]$serverExecutable)
+    $calls = 0
+    $script:CgceTestActivitySnapshotSeam = {
+        $calls += 1
+        $processes = [object[]]@()
+        $tcp = [object[]]@()
+        if ($calls -ge 2 -and $kind -ceq "process") {
+            $processes = [object[]]@(
+                [pscustomobject]@{
+                    ProcessId = 4242
+                    ExecutablePath = $serverExecutable
+                }
+            )
+        }
+        if ($calls -ge 2 -and $kind -ceq "listener") {
+            $tcp = [object[]]@(
+                [pscustomobject]@{
+                    LocalPort = 65534
+                    State = "Listen"
+                }
+            )
+        }
+        return [pscustomobject]@{
+            cim_available = $true
+            tcp_available = $true
+            udp_available = $true
+            processes = $processes
+            tcp = $tcp
+            udp = [object[]]@()
+        }
+    }.GetNewClosure()
+} __KIND__ __SERVER_EXECUTABLE__
+'@
+    $result = $template.Replace(
+        "__KIND__",
+        (ConvertTo-CgceLifecycleSingleQuoted $Kind)
+    )
+    $result = $result.Replace(
+        "__SERVER_EXECUTABLE__",
+        (ConvertTo-CgceLifecycleSingleQuoted $Fixture.ServerExecutable)
+    )
+    return $result
 }
 
 Invoke-CgceTest "prepare pre-genesis failure matrix preserves active Saved bytes" {
@@ -321,6 +545,515 @@ Invoke-CgceTest "prepare pre-genesis failure matrix preserves active Saved bytes
             Assert-CgcePreparePreGenesisBlocked `
                 -Fixture $fixture `
                 -ExpectedCode $case.Code
+        } catch {
+            throw "CGCE-TEST $($case.Name): $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "prepare post-genesis fault matrix blocks under the held lock" {
+    $cases = @(
+        [pscustomobject]@{
+            Name = "backup publication"
+            Code = "CGCE-OPS-BACKUP"
+            Phase = "CREATED"
+            OriginalLocation = "active"
+            ActiveExpected = $true
+            BackupDisk = $false
+            BackupInventoryDisk = $false
+            BackupRecorded = $false
+            InactiveExpected = $false
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = "backup"
+            FailState = $false
+            FailBlock = $false
+            Fault = {
+                param($Fixture)
+                New-CgceFileFaultSetup `
+                    -Kind "tree-before" `
+                    -Target $Fixture.Paths.backup_saved
+            }
+        },
+        [pscustomobject]@{
+            Name = "state replace/read-back"
+            Code = "CGCE-OPS-BACKUP"
+            Phase = "BACKUP_VERIFIED"
+            OriginalLocation = "active"
+            ActiveExpected = $true
+            BackupDisk = $true
+            BackupInventoryDisk = $true
+            BackupRecorded = $true
+            InactiveExpected = $false
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = ""
+            FailState = $true
+            FailBlock = $false
+            Fault = { param($Fixture) "" }
+        },
+        [pscustomobject]@{
+            Name = "original rename"
+            Code = "CGCE-OPS-COPY"
+            Phase = "BACKUP_VERIFIED"
+            OriginalLocation = "active"
+            ActiveExpected = $true
+            BackupDisk = $true
+            BackupInventoryDisk = $true
+            BackupRecorded = $true
+            InactiveExpected = $false
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = ""
+            FailState = $false
+            FailBlock = $false
+            Fault = {
+                param($Fixture)
+                New-CgceFileFaultSetup `
+                    -Kind "move-before" `
+                    -Target $Fixture.Paths.inactive_original
+            }
+        },
+        [pscustomobject]@{
+            Name = "clone publication"
+            Code = "CGCE-OPS-CLONE"
+            Phase = "ORIGINAL_DEACTIVATED"
+            OriginalLocation = "inactive"
+            ActiveExpected = $false
+            BackupDisk = $true
+            BackupInventoryDisk = $true
+            BackupRecorded = $true
+            InactiveExpected = $true
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = "active"
+            FailState = $false
+            FailBlock = $false
+            Fault = {
+                param($Fixture)
+                New-CgceFileFaultSetup `
+                    -Kind "tree-before" `
+                    -Target $Fixture.Paths.active_saved
+            }
+        },
+        [pscustomobject]@{
+            Name = "probe final receipt"
+            Code = "CGCE-OPS-PROBE-RECEIPT"
+            Phase = "CLONE_ACTIVE"
+            OriginalLocation = "inactive"
+            ActiveExpected = $true
+            BackupDisk = $true
+            BackupInventoryDisk = $true
+            BackupRecorded = $true
+            InactiveExpected = $true
+            CloneRecorded = $true
+            ProbePrefixExpected = $true
+            StagingTarget = ""
+            FailState = $false
+            FailBlock = $false
+            Fault = { param($Fixture) New-CgceProbeFaultSetup }
+        },
+        [pscustomobject]@{
+            Name = "blocked-state persistence"
+            Code = "CGCE-OPS-BACKUP"
+            Phase = "CREATED"
+            OriginalLocation = "active"
+            ActiveExpected = $true
+            BackupDisk = $false
+            BackupInventoryDisk = $false
+            BackupRecorded = $false
+            InactiveExpected = $false
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = "backup"
+            FailState = $false
+            FailBlock = $true
+            Fault = {
+                param($Fixture)
+                New-CgceFileFaultSetup `
+                    -Kind "tree-before" `
+                    -Target $Fixture.Paths.backup_saved
+            }
+        },
+        [pscustomobject]@{
+            Name = "PalServer drift"
+            Code = "CGCE-OPS-BACKUP"
+            Phase = "CREATED"
+            OriginalLocation = "active"
+            ActiveExpected = $true
+            BackupDisk = $true
+            BackupInventoryDisk = $true
+            BackupRecorded = $false
+            InactiveExpected = $false
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = ""
+            FailState = $false
+            FailBlock = $false
+            Fault = {
+                param($Fixture)
+                New-CgceFileFaultSetup `
+                    -Kind "tree-after-mutate" `
+                    -Target $Fixture.Paths.backup_saved `
+                    -MutationPath $Fixture.ServerExecutable
+            }
+        },
+        [pscustomobject]@{
+            Name = "UE4SS drift"
+            Code = "CGCE-OPS-BACKUP"
+            Phase = "CREATED"
+            OriginalLocation = "active"
+            ActiveExpected = $true
+            BackupDisk = $true
+            BackupInventoryDisk = $true
+            BackupRecorded = $false
+            InactiveExpected = $false
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = ""
+            FailState = $false
+            FailBlock = $false
+            Fault = {
+                param($Fixture)
+                New-CgceFileFaultSetup `
+                    -Kind "tree-after-mutate" `
+                    -Target $Fixture.Paths.backup_saved `
+                    -MutationPath $Fixture.Paths.ue4ss_dll
+            }
+        },
+        [pscustomobject]@{
+            Name = "process drift"
+            Code = "CGCE-OPS-PROCESS-ACTIVE"
+            Phase = "CREATED"
+            OriginalLocation = "active"
+            ActiveExpected = $true
+            BackupDisk = $false
+            BackupInventoryDisk = $false
+            BackupRecorded = $false
+            InactiveExpected = $false
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = ""
+            FailState = $false
+            FailBlock = $false
+            Fault = {
+                param($Fixture)
+                New-CgceActivityDriftSetup `
+                    -Fixture $Fixture `
+                    -Kind "process"
+            }
+        },
+        [pscustomobject]@{
+            Name = "listener drift"
+            Code = "CGCE-OPS-PORT-ACTIVE"
+            Phase = "CREATED"
+            OriginalLocation = "active"
+            ActiveExpected = $true
+            BackupDisk = $false
+            BackupInventoryDisk = $false
+            BackupRecorded = $false
+            InactiveExpected = $false
+            CloneRecorded = $false
+            ProbePrefixExpected = $false
+            StagingTarget = ""
+            FailState = $false
+            FailBlock = $false
+            Fault = {
+                param($Fixture)
+                New-CgceActivityDriftSetup `
+                    -Fixture $Fixture `
+                    -Kind "listener"
+            }
+        }
+    )
+    foreach ($case in $cases) {
+        $fixture = New-CgceSyntheticFixture
+        try {
+            $moduleSetup = (& $case.Fault $fixture) + "`r`n" +
+                (New-CgcePersistenceFaultSetup `
+                    -Fixture $fixture `
+                    -FailAfterBackupState $case.FailState `
+                    -FailBlockedPersistence $case.FailBlock)
+            $result = Invoke-CgcePrepareChild `
+                -Fixture $fixture `
+                -ModuleSetup $moduleSetup
+            Assert-CgceEqual $true ($result.ExitCode -ne 0)
+            Assert-CgceEqual 1 @($result.Stdout).Count
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED $($case.Code) $($fixture.RunId)" `
+                $result.Stdout[0]
+            Assert-CgceEqual "" $result.Stderr
+            Assert-CgceEqual `
+                $true `
+                (Test-Path -LiteralPath (
+                    Join-Path $fixture.Base "lock-held.txt"
+                ) -PathType Leaf)
+            $state = Read-CgceRunState `
+                -RunRoot $fixture.RunRoot `
+                -RunId $fixture.RunId
+            Assert-CgceEqual $case.Phase $state.phase
+            Assert-CgceEqual `
+                $(if ($case.FailBlock) { "ACTIVE" } else { "BLOCKED" }) `
+                $state.outcome
+            if (-not $case.FailBlock) {
+                Assert-CgceEqual $case.Code $state.errors[-1].code
+            }
+            Assert-CgceEqual `
+                $case.ActiveExpected `
+                (Test-Path -LiteralPath $fixture.Paths.active_saved -PathType Container)
+            Assert-CgceEqual `
+                $case.InactiveExpected `
+                (Test-Path `
+                    -LiteralPath $fixture.Paths.inactive_original `
+                    -PathType Container)
+            Assert-CgceEqual `
+                $case.BackupDisk `
+                (Test-Path `
+                    -LiteralPath $fixture.Paths.backup_saved `
+                    -PathType Container)
+            Assert-CgceEqual `
+                $case.BackupInventoryDisk `
+                (Test-Path `
+                    -LiteralPath $fixture.Paths.backup_inventory `
+                    -PathType Leaf)
+            Assert-CgceEqual `
+                $case.BackupRecorded `
+                ($null -ne $state.inventory_checksums.backup)
+            Assert-CgceEqual `
+                $case.CloneRecorded `
+                ($null -ne $state.inventory_checksums.clone)
+            Assert-CgceEqual `
+                $case.CloneRecorded `
+                (Test-Path `
+                    -LiteralPath $fixture.Paths.clone_inventory `
+                    -PathType Leaf)
+            Assert-CgceEqual `
+                $false `
+                ($null -ne $state.probe_receipt_checksum)
+            Assert-CgceEqual `
+                $false `
+                (Test-Path `
+                    -LiteralPath $fixture.Paths.probe_receipt `
+                    -PathType Leaf)
+            $probePrefixCount = if (Test-Path `
+                    -LiteralPath $fixture.Paths.probe_receipts `
+                    -PathType Container) {
+                @(Get-ChildItem `
+                    -LiteralPath $fixture.Paths.probe_receipts `
+                    -Force).Count
+            } else {
+                0
+            }
+            Assert-CgceEqual `
+                $case.ProbePrefixExpected `
+                ($probePrefixCount -gt 0)
+            if ($case.BackupDisk) {
+                Compare-CgceInventory `
+                    -Expected $fixture.OriginalInventory `
+                    -Actual @(Get-CgceTreeInventory `
+                        -Root $fixture.Paths.backup_saved)
+            }
+            if ($case.CloneRecorded) {
+                Compare-CgceInventory `
+                    -Expected $fixture.OriginalInventory `
+                    -Actual @(Get-CgceTreeInventory `
+                        -Root $fixture.Paths.active_saved)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($case.StagingTarget)) {
+                $stagingDestination = if ($case.StagingTarget -ceq "backup") {
+                    $fixture.Paths.backup_saved
+                } else {
+                    $fixture.Paths.active_saved
+                }
+                $stagingParent = Split-Path -Parent $stagingDestination
+                $stagingLeaf = Split-Path -Leaf $stagingDestination
+                $stagingEvidence = @(Get-ChildItem `
+                        -LiteralPath $stagingParent `
+                        -Filter ".$stagingLeaf.cgce-stage-tree-*" `
+                        -Directory `
+                        -Force)
+                Assert-CgceEqual 1 $stagingEvidence.Count
+                Compare-CgceInventory `
+                    -Expected $fixture.OriginalInventory `
+                    -Actual @(Get-CgceTreeInventory `
+                        -Root $stagingEvidence[0].FullName)
+            }
+            $originalPath = if ($case.OriginalLocation -ceq "active") {
+                $fixture.Paths.active_saved
+            } else {
+                $fixture.Paths.inactive_original
+            }
+            Compare-CgceInventory `
+                -Expected $fixture.OriginalInventory `
+                -Actual @(Get-CgceTreeInventory -Root $originalPath)
+            Assert-CgceEqual `
+                $fixture.SourceManifestSha `
+                (Get-CgceSha256 $fixture.SourceManifestPath)
+        } catch {
+            throw "CGCE-TEST $($case.Name): $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "prepare rejects a script executed outside the bound handoff tree with one line" {
+    $fixture = New-CgceSyntheticFixture
+    try {
+        $fixture.PrepareScript = $fixture.RepositoryPrepareScript
+        $result = Invoke-CgcePrepareChild $fixture
+        Assert-CgceEqual $true ($result.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($result.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+        Assert-CgceEqual $false (Test-Path -LiteralPath $fixture.Paths.state)
+        Assert-CgceEqual $false (Test-Path -LiteralPath $fixture.Paths.genesis_state)
+        Assert-CgceEqual $false (Test-Path -LiteralPath $fixture.Paths.active_run_marker)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "prepare keeps one terminal line when catch-path inspection throws" {
+    $fixture = New-CgceSyntheticFixture
+    try {
+        $fileFault = New-CgceFileFaultSetup `
+            -Kind "tree-before" `
+            -Target $fixture.Paths.backup_saved
+        $testPathFault = @'
+$global:CgceThrowStatePathProbe = $false
+& $filesModule {
+    $prior = $script:CgceTestPublishSeam
+    $script:CgceTestPublishSeam = {
+        param([string]$phase, $context)
+        try {
+            $null = & $prior $phase $context
+        } catch {
+            $global:CgceThrowStatePathProbe = $true
+            throw
+        }
+    }.GetNewClosure()
+}
+function global:Test-Path {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath,
+        [Microsoft.PowerShell.Commands.TestPathType]$PathType =
+            [Microsoft.PowerShell.Commands.TestPathType]::Any
+    )
+    if ($global:CgceThrowStatePathProbe -and
+        $LiteralPath.EndsWith(
+            "run-state.json",
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "CGCE-TEST injected catch Test-Path fault"
+    }
+    return Microsoft.PowerShell.Management\Test-Path @PSBoundParameters
+}
+'@
+        $result = Invoke-CgcePrepareChild `
+            -Fixture $fixture `
+            -ModuleSetup ($fileFault + "`r`n" + $testPathFault)
+        Assert-CgceEqual $true ($result.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($result.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-BACKUP $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        Assert-CgceEqual "CREATED" $state.phase
+        Assert-CgceEqual "ACTIVE" $state.outcome
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "prepare keeps one blocked line when lock disposal throws" {
+    $fixture = New-CgceSyntheticFixture
+    try {
+        $moduleSetup = @'
+$global:CgceRealEnterLock = Get-Command `
+    -Name "Enter-CgceExclusiveLock" `
+    -CommandType Function
+function global:Enter-CgceExclusiveLock {
+    param([string]$ServerRoot, [string]$RunId)
+    $inner = & $global:CgceRealEnterLock `
+        -ServerRoot $ServerRoot `
+        -RunId $RunId
+    $fake = [pscustomobject]@{ Inner = $inner }
+    $fake | Add-Member `
+        -MemberType ScriptMethod `
+        -Name "Dispose" `
+        -Value {
+            $this.Inner.Dispose()
+            throw "CGCE-TEST injected Dispose fault"
+        }
+    return $fake
+}
+'@
+        $result = Invoke-CgcePrepareChild `
+            -Fixture $fixture `
+            -ModuleSetup $moduleSetup
+        Assert-CgceEqual $true ($result.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($result.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-LOCK $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        Assert-CgceEqual "PROBE_STAGED" $state.phase
+        Assert-CgceEqual "ACTIVE" $state.outcome
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.Paths.inactive_original)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "prepare rejects exact executable leaf reparse points before genesis" {
+    $cases = @(
+        [pscustomobject]@{
+            Name = "PalServer executable"
+            SelectPath = { param($Fixture) $Fixture.ServerExecutable }
+        },
+        [pscustomobject]@{
+            Name = "UE4SS DLL"
+            SelectPath = { param($Fixture) $Fixture.Paths.ue4ss_dll }
+        }
+    )
+    foreach ($case in $cases) {
+        $fixture = New-CgceSyntheticFixture
+        try {
+            $leaf = & $case.SelectPath $fixture
+            $target = Join-Path `
+                $fixture.Base `
+                ("same-bytes-" + [guid]::NewGuid().ToString("N"))
+            [System.IO.File]::Copy($leaf, $target, $false)
+            Remove-Item -LiteralPath $leaf -Force
+            New-Item `
+                -ItemType SymbolicLink `
+                -Path $leaf `
+                -Target $target |
+                Out-Null
+            Assert-CgcePreparePreGenesisBlocked `
+                -Fixture $fixture `
+                -ExpectedCode "CGCE-OPS-REPARSE"
         } catch {
             throw "CGCE-TEST $($case.Name): $($_.Exception.Message)"
         } finally {

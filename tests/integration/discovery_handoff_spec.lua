@@ -90,11 +90,18 @@ end
         for _, required in ipairs({
             "#Requires -Version 5.1",
             "#Requires -RunAsAdministrator",
+            "Assert-CgceBootstrapTree",
+            "Assert-CgceBootstrapLeaf",
+            "Import-CgceVerifiedBootstrapModule",
             "Initialize-CgceRunLayout",
             "Assert-CgceDiscoveryDiskCapacity",
             "Write-CgceActiveRunMarker",
             "Block-CgceRunState",
             "Enable-CgceInventoryProbe",
+            "Invoke-CgceSafeBlockAttempt",
+            "Close-CgcePrepareLock",
+            "Assert-CgceNoReparseInPath -Path $ServerExecutable",
+            "Assert-CgceNoReparseInPath -Path $paths.ue4ss_dll",
             "'^\\s*(CGCE-OPS-[A-Z0-9-]+)(?![A-Za-z0-9-])'",
             "return $match.Groups[1].Value",
             "CGCE_WINDOWS_DISCOVERY_OK",
@@ -110,6 +117,40 @@ end
             "(?<![A-Za-z0-9-])CGCE-OPS-",
         }) do
             a.equal(nil, source:find(forbidden, 1, true))
+        end
+
+        local files = read(
+            "tools/windows-discovery/modules/CgceDiscovery.Files.psm1"
+        )
+        for _, required in ipairs({
+            ".cgce-stage-layout-",
+            '"before-claim"',
+            "Assert-CgceExactPublishedRunLayout",
+        }) do
+            a.equal(true, files:find(required, 1, true) ~= nil)
+        end
+
+        local contract = read(
+            "tools/windows-discovery/modules/CgceDiscovery.Contract.psm1"
+        )
+        for _, required in ipairs({
+            "Assert-CgceGenesisState",
+            "Test-CgceRecoverySourceEvidence",
+            "Assert-CgceRecoveryCheckpointEvidence",
+        }) do
+            a.equal(true, contract:find(required, 1, true) ~= nil)
+        end
+
+        local state_schema = read(
+            "tools/windows-discovery/schemas/run-state.schema.json"
+        )
+        for _, required in ipairs({
+            '"recoverySourceCreatedEvidence"',
+            '"recoverySourceBackupEvidence"',
+            '"recoverySourceRunningEvidence"',
+            '"recoverySourceCapturedEvidence"',
+        }) do
+            a.equal(true, state_schema:find(required, 1, true) ~= nil)
         end
     end)
 end)

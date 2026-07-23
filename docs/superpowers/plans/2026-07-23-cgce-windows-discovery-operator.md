@@ -1208,6 +1208,57 @@ deactivation과 clone activation을 state-bound operation으로 만든다.
   return and incidental success-stream value is suppressed so the child
   `powershell.exe` process emits exactly one stdout terminal line.
 
+#### Task 4 reviewer correction round
+
+- [x] **RED — bind execution to the verified handoff tree.** Extend
+  `tests/windows/Lifecycle.Tests.ps1` so the synthetic fixture executes its
+  copied `tools\windows-discovery\Prepare-CgceDiscovery.ps1`. Add a wrong-tree
+  child invocation that passes a different `HandoffRoot` and requires one
+  `CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM <run-id>` line with no
+  state, marker, or Saved mutation. Before importing any module, Prepare must
+  compare canonical `$PSScriptRoot` with
+  `<HandoffRoot>\tools\windows-discovery`, reject every reparse component, and
+  verify the exact Common/Contract/Files/Runtime leaves. A preloaded module is
+  reusable only when its canonical `Path` is the verified leaf.
+- [x] **RED — atomically claim fixed layout staging.** Extend
+  `tests/windows/Files.Tests.ps1` with a `before-claim` race seam. Build the
+  exact empty layout under a unique same-parent directory, atomically rename
+  unique to the fixed `.<run-id>.cgce-stage-layout` claim, preserve both the
+  losing unique evidence and competing fixed directory on collision, then
+  revalidate exact directory shape and reparses before and after the final
+  rename.
+- [x] **RED — make genesis immutable and recovery evidence source-bound.**
+  Extend `tests/windows/Contract.Tests.ps1` with marker negatives for genesis
+  phase, revision, outcome, errors, later inventory/receipt evidence, and
+  current/genesis byte/value drift. Replace linear RESTORING/RESTORED evidence
+  requirements with exact legal source-prefix profiles for CREATED,
+  BACKUP_VERIFIED/ORIGINAL_DEACTIVATED, CLONE_ACTIVE, PROBE_STAGED, RUNNING,
+  and CAPTURED. RESTORING requires restored null; RESTORED requires restored;
+  EXPORTED retains the full normal-chain evidence. Mirror the profiles in
+  `run-state.schema.json`.
+- [x] **RED — exercise post-genesis failure boundaries without a production
+  bypass.** A child test wrapper may preload only the exact fixture handoff
+  modules and set their existing module-private test seams before invoking the
+  verified fixture entry point. Cover backup publication, state CAS/read-back,
+  original rename, clone publication, probe receipt staging, and blocked-state
+  persistence, plus PalServer/UE4SS and process/listener drift after genesis.
+  Each case asserts one terminal line, held-lock blocked persistence where
+  possible, unchanged next boundary, authoritative state/evidence, and Saved
+  safety.
+- [x] **RED — close terminal and leaf-reparse exception paths.** Make outer
+  catch probing and lock disposal non-throwing. A dispose failure converts an
+  otherwise successful result to one blocked terminal line. Reparse-check the
+  exact PalServer executable and UE4SS DLL leaves before genesis and in every
+  later authority check.
+- [x] **GREEN and verify.** Run
+  `./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua`,
+  `./scripts/run-tests.sh`, `./scripts/verify-package.sh discovery`,
+  `jq empty tools/windows-discovery/schemas/*.json`, `git diff --check`, and
+  the PowerShell lexical/forbidden-API scans. On this macOS host also run and
+  truthfully record the unavailable
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  .\tests\windows\Run-CgceDiscoveryTests.ps1` gate.
+
 - [ ] **Step 1: Write a failing synthetic prepare test**
 
 ```powershell

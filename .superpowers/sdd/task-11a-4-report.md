@@ -86,7 +86,7 @@ zsh:1: command not found: powershell.exe
 ```
 
 The new Windows tests are executable PowerShell 5.1 tests but were not run on
-this macOS host. Static counting finds `89` `Invoke-CgceTest` cases in the
+this macOS host. Static counting finds `97` `Invoke-CgceTest` cases in the
 Windows suite. A real elevated Windows PowerShell 5.1 run remains mandatory.
 
 ## Failure matrix
@@ -134,3 +134,66 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\windows\Run-Cgce
 ```
 
 Task 11A.4 must not be treated as Windows-verified until that command passes.
+
+## Reviewer correction round
+
+The correction round covers handoff execution-tree binding, atomic fixed
+staging claim, immutable genesis, source-prefix recovery checkpoints,
+post-genesis failure injection, terminal exception containment, and exact
+PalServer/UE4SS leaf reparse checks.
+
+Portable RED command:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+```
+
+Result: pending execution after the correction tests are added.
+
+Executed result: exit `1`, with the existing two handoff tests passing and
+`defines a fail-closed Windows prepare entry point` failing at the first new
+required bootstrap binding assertion (`expected true, got false`). This is the
+intended RED because the current Prepare script imports Common before binding
+its execution tree.
+
+Correction portable focused GREEN:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+```
+
+Result: exit `0`; `3` passed.
+
+Correction full portable and artifact checks:
+
+```text
+./scripts/run-tests.sh
+./scripts/verify-package.sh discovery
+jq empty tools/windows-discovery/schemas/control-evidence.schema.json \
+  tools/windows-discovery/schemas/run-state.schema.json
+git diff --check
+```
+
+Result: all exit `0`; the package verifier printed
+`DISCOVERY_PACKAGE_VERIFIED`.
+
+The corrected Windows suite contains `97` static `Invoke-CgceTest` cases.
+The correction adds exact handoff/wrong-tree execution, fixed-staging races,
+pristine byte-identical genesis, recovery source-prefix signatures,
+post-genesis backup/state/rename/clone/probe/block persistence faults,
+PalServer/UE4SS/process/listener drift, catch/finally terminal faults, and exact
+executable-leaf reparse cases. The lifecycle fault matrix asserts state fields,
+original/backup/clone inventories, inactive/active boundaries, preserved copy
+staging or probe receipt prefixes, no final probe receipt, and lock contention
+while the entry point persists `BLOCKED`.
+
+The documented Windows command was rerun:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+  .\tests\windows\Run-CgceDiscoveryTests.ps1
+```
+
+Result: exit `127` because `powershell.exe` is not installed on this macOS
+host. Elevated Windows PowerShell 5.1 execution remains the mandatory residual
+gate.

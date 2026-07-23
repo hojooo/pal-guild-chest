@@ -370,6 +370,102 @@ Invoke-CgceTest "run layout rejects fixed staging and preserves staging on publi
     }
 }
 
+Invoke-CgceTest "run layout atomically claims fixed staging without merge and preserves race evidence" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $serverRoot = Join-Path $root "server"
+        $savedPath = Join-Path $serverRoot "Pal\Saved"
+        $ue4ssRoot = Join-Path $serverRoot "Pal\Binaries\Win64"
+        $runRoot = Join-Path $root "runs"
+        New-Item -ItemType Directory -Path $savedPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $ue4ssRoot -Force | Out-Null
+        New-Item -ItemType Directory -Path $runRoot | Out-Null
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $paths = New-CgceRunPaths `
+            -ServerRoot $serverRoot -SavedPath $savedPath `
+            -Ue4ssRoot $ue4ssRoot -RunRoot $runRoot -RunId $runId
+        $fixed = Join-Path $runRoot ".$runId.cgce-stage-layout"
+        Set-CgceFilesTestLayoutSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "before-claim") {
+                $null = [System.IO.Directory]::CreateDirectory(
+                    $Context.fixed_staging
+                )
+                [System.IO.File]::WriteAllText(
+                    (Join-Path $Context.fixed_staging "competitor.txt"),
+                    "competitor",
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-STATE-EXISTS" {
+            Initialize-CgceRunLayout -Paths $paths
+        }
+        Assert-CgceEqual `
+            "competitor" `
+            ([System.IO.File]::ReadAllText(
+                (Join-Path $fixed "competitor.txt")
+            ))
+        Assert-CgceEqual $false (Test-Path -LiteralPath $paths.run_directory)
+        $losing = @(
+            Get-ChildItem `
+                -LiteralPath $runRoot `
+                -Directory `
+                -Filter ".$runId.cgce-stage-layout-*"
+        )
+        Assert-CgceEqual 1 $losing.Count
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath (
+                Join-Path $losing[0].FullName "receipts\restore"
+            ))
+
+        Remove-Item -LiteralPath $fixed -Recurse -Force
+        Remove-Item -LiteralPath $losing[0].FullName -Recurse -Force
+        Set-CgceFilesTestLayoutSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "after-claim") {
+                [System.IO.File]::WriteAllText(
+                    (Join-Path $Context.fixed_staging "unexpected.txt"),
+                    "preserve",
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-BLOCKED" {
+            Initialize-CgceRunLayout -Paths $paths
+        }
+        Assert-CgceEqual `
+            "preserve" `
+            ([System.IO.File]::ReadAllText(
+                (Join-Path $fixed "unexpected.txt")
+            ))
+        Assert-CgceEqual $false (Test-Path -LiteralPath $paths.run_directory)
+
+        Remove-Item -LiteralPath $fixed -Recurse -Force
+        Set-CgceFilesTestLayoutSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "before-publish") {
+                [System.IO.File]::WriteAllText(
+                    (Join-Path $Context.fixed_staging "late.txt"),
+                    "late",
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-BLOCKED" {
+            Initialize-CgceRunLayout -Paths $paths
+        }
+        Assert-CgceEqual `
+            "late" `
+            ([System.IO.File]::ReadAllText((Join-Path $fixed "late.txt")))
+        Assert-CgceEqual $false (Test-Path -LiteralPath $paths.run_directory)
+    } finally {
+        Set-CgceFilesTestLayoutSeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
 Invoke-CgceTest "disk capacity aggregates checked inventory bytes by canonical volume" {
     $entries = @(
         [pscustomobject]@{ relative_path = "a"; length = [int64]7; sha256 = ("a" * 64) },

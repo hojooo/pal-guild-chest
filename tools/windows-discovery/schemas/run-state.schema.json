@@ -358,8 +358,6 @@
               "PROBE_STAGED",
               "RUNNING",
               "CAPTURED",
-              "RESTORING",
-              "RESTORED",
               "EXPORTED"
             ]
           }
@@ -386,8 +384,6 @@
               "PROBE_STAGED",
               "RUNNING",
               "CAPTURED",
-              "RESTORING",
-              "RESTORED",
               "EXPORTED"
             ]
           }
@@ -413,8 +409,6 @@
               "PROBE_STAGED",
               "RUNNING",
               "CAPTURED",
-              "RESTORING",
-              "RESTORED",
               "EXPORTED"
             ]
           }
@@ -434,8 +428,6 @@
           "phase": {
             "enum": [
               "CAPTURED",
-              "RESTORING",
-              "RESTORED",
               "EXPORTED"
             ]
           }
@@ -460,7 +452,6 @@
         "properties": {
           "phase": {
             "enum": [
-              "RESTORED",
               "EXPORTED"
             ]
           }
@@ -476,6 +467,92 @@
             }
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "RESTORING"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "inventory_checksums": {
+                "properties": {
+                  "restored": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/recoverySourceCreatedEvidence"
+              },
+              {
+                "$ref": "#/definitions/recoverySourceBackupEvidence"
+              },
+              {
+                "$ref": "#/definitions/recoverySourceCloneEvidence"
+              },
+              {
+                "$ref": "#/definitions/recoverySourceRunningEvidence"
+              },
+              {
+                "$ref": "#/definitions/recoverySourceCapturedEvidence"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "RESTORED"
+          }
+        }
+      },
+      "then": {
+        "allOf": [
+          {
+            "properties": {
+              "inventory_checksums": {
+                "properties": {
+                  "restored": {
+                    "$ref": "#/definitions/checksum"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/recoverySourceCreatedEvidence"
+              },
+              {
+                "$ref": "#/definitions/recoverySourceBackupEvidence"
+              },
+              {
+                "$ref": "#/definitions/recoverySourceCloneEvidence"
+              },
+              {
+                "$ref": "#/definitions/recoverySourceRunningEvidence"
+              },
+              {
+                "$ref": "#/definitions/recoverySourceCapturedEvidence"
+              }
+            ]
+          }
+        ]
       }
     },
     {
@@ -544,6 +621,9 @@
       },
       "then": {
         "properties": {
+          "process_launch_receipt_checksum": {
+            "type": "null"
+          },
           "process_result_receipt_checksum": {
             "type": "null"
           },
@@ -615,8 +695,7 @@
               "CLONE_ACTIVE",
               "PROBE_STAGED",
               "RUNNING",
-              "CAPTURED",
-              "RESTORING"
+              "CAPTURED"
             ]
           }
         }
@@ -698,6 +777,136 @@
     "checksum": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "recoverySourceCreatedEvidence": {
+      "properties": {
+        "inventory_checksums": {
+          "properties": {
+            "backup": {
+              "type": "null"
+            },
+            "clone": {
+              "type": "null"
+            }
+          }
+        },
+        "probe_receipt_checksum": {
+          "type": "null"
+        },
+        "process_launch_receipt_checksum": {
+          "type": "null"
+        },
+        "process_result_receipt_checksum": {
+          "type": "null"
+        },
+        "capture_inventory_checksum": {
+          "type": "null"
+        }
+      }
+    },
+    "recoverySourceBackupEvidence": {
+      "properties": {
+        "inventory_checksums": {
+          "properties": {
+            "backup": {
+              "$ref": "#/definitions/checksum"
+            },
+            "clone": {
+              "type": "null"
+            }
+          }
+        },
+        "probe_receipt_checksum": {
+          "type": "null"
+        },
+        "process_launch_receipt_checksum": {
+          "type": "null"
+        },
+        "process_result_receipt_checksum": {
+          "type": "null"
+        },
+        "capture_inventory_checksum": {
+          "type": "null"
+        }
+      }
+    },
+    "recoverySourceCloneEvidence": {
+      "properties": {
+        "inventory_checksums": {
+          "properties": {
+            "backup": {
+              "$ref": "#/definitions/checksum"
+            },
+            "clone": {
+              "$ref": "#/definitions/checksum"
+            }
+          }
+        },
+        "probe_receipt_checksum": {
+          "type": "null"
+        },
+        "process_launch_receipt_checksum": {
+          "type": "null"
+        },
+        "process_result_receipt_checksum": {
+          "type": "null"
+        },
+        "capture_inventory_checksum": {
+          "type": "null"
+        }
+      }
+    },
+    "recoverySourceRunningEvidence": {
+      "properties": {
+        "inventory_checksums": {
+          "properties": {
+            "backup": {
+              "$ref": "#/definitions/checksum"
+            },
+            "clone": {
+              "$ref": "#/definitions/checksum"
+            }
+          }
+        },
+        "probe_receipt_checksum": {
+          "$ref": "#/definitions/checksum"
+        },
+        "process_launch_receipt_checksum": {
+          "type": "null"
+        },
+        "process_result_receipt_checksum": {
+          "type": "null"
+        },
+        "capture_inventory_checksum": {
+          "type": "null"
+        }
+      }
+    },
+    "recoverySourceCapturedEvidence": {
+      "properties": {
+        "inventory_checksums": {
+          "properties": {
+            "backup": {
+              "$ref": "#/definitions/checksum"
+            },
+            "clone": {
+              "$ref": "#/definitions/checksum"
+            }
+          }
+        },
+        "probe_receipt_checksum": {
+          "$ref": "#/definitions/checksum"
+        },
+        "process_launch_receipt_checksum": {
+          "$ref": "#/definitions/checksum"
+        },
+        "process_result_receipt_checksum": {
+          "$ref": "#/definitions/checksum"
+        },
+        "capture_inventory_checksum": {
+          "$ref": "#/definitions/checksum"
+        }
+      }
     }
   }
 }

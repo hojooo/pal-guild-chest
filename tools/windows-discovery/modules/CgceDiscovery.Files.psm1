@@ -539,6 +539,36 @@ function Assert-CgceExactRunPaths($Paths) {
     }
 }
 
+function Assert-CgceExactPublishedRunLayout([string]$Root) {
+    Assert-CgceNoReparseInPath -Path $Root
+    Assert-CgceTreeHasNoReparsePoints -Root $Root
+    $expected = @(
+        "backup",
+        "before",
+        "capture",
+        "inventories",
+        "receipts",
+        "receipts\probe",
+        "receipts\process",
+        "receipts\restore"
+    )
+    [Array]::Sort($expected, [StringComparer]::Ordinal)
+    $actual = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Force -Recurse)) {
+        if (-not $item.PSIsContainer) {
+            throw "CGCE-OPS-BLOCKED run layout contains an unexpected file"
+        }
+        $relative = $item.FullName.Substring($Root.Length).TrimStart('\', '/')
+        $null = $actual.Add($relative)
+    }
+    $actualValues = $actual.ToArray()
+    [Array]::Sort($actualValues, [StringComparer]::Ordinal)
+    if ([string]::Join("`n", $expected) -cne
+        [string]::Join("`n", $actualValues)) {
+        throw "CGCE-OPS-BLOCKED run layout directory shape drift"
+    }
+}
+
 function Initialize-CgceRunLayout($Paths) {
     Assert-CgceExactRunPaths $Paths
     $runRoot = Resolve-CgceCanonicalPath -Path $Paths.run_root -MustExist $true
@@ -550,13 +580,19 @@ function Initialize-CgceRunLayout($Paths) {
     }
     Assert-CgceNoReparseInPath -Path $runRoot
     $runId = [System.IO.Path]::GetFileName($runDirectory)
-    $staging = Join-Path $runRoot ".$runId.cgce-stage-layout"
+    $fixedStaging = Join-Path $runRoot ".$runId.cgce-stage-layout"
     if ((Test-Path -LiteralPath $runDirectory) -or
-        (Test-Path -LiteralPath $staging)) {
+        (Test-Path -LiteralPath $fixedStaging)) {
         throw "CGCE-OPS-STATE-EXISTS run layout already exists"
     }
+    $uniqueStaging = Join-Path `
+        $runRoot `
+        (".$runId.cgce-stage-layout-" + [guid]::NewGuid().ToString("N"))
+    if (Test-Path -LiteralPath $uniqueStaging) {
+        throw "CGCE-OPS-STATE-EXISTS unique layout staging exists"
+    }
     try {
-        $null = [System.IO.Directory]::CreateDirectory($staging)
+        $null = [System.IO.Directory]::CreateDirectory($uniqueStaging)
         foreach ($relative in @(
             "backup",
             "inventories",
@@ -567,30 +603,48 @@ function Initialize-CgceRunLayout($Paths) {
             "receipts\restore"
         )) {
             $null = [System.IO.Directory]::CreateDirectory(
-                (Join-Path $staging $relative)
+                (Join-Path $uniqueStaging $relative)
             )
         }
-        Assert-CgceNoReparseInPath -Path $staging
-        Assert-CgceTreeHasNoReparsePoints -Root $staging
+        Assert-CgceExactPublishedRunLayout -Root $uniqueStaging
+        $context = [pscustomobject]@{
+            unique_staging = $uniqueStaging
+            fixed_staging = $fixedStaging
+            destination = $runDirectory
+        }
         if ($null -ne $script:CgceTestLayoutSeam) {
-            $context = [pscustomobject]@{
-                staging = $staging
-                destination = $runDirectory
+            $null = & $script:CgceTestLayoutSeam "before-claim" $context
+        }
+        try {
+            [System.IO.Directory]::Move($uniqueStaging, $fixedStaging)
+        } catch {
+            if (Test-Path -LiteralPath $fixedStaging) {
+                throw "CGCE-OPS-STATE-EXISTS fixed layout staging was claimed"
             }
+            throw "CGCE-OPS-BLOCKED fixed layout staging claim failed"
+        }
+        if ($null -ne $script:CgceTestLayoutSeam) {
+            $null = & $script:CgceTestLayoutSeam "after-claim" $context
+        }
+        Assert-CgceExactPublishedRunLayout -Root $fixedStaging
+        if ($null -ne $script:CgceTestLayoutSeam) {
             $null = & $script:CgceTestLayoutSeam "before-publish" $context
         }
+        Assert-CgceExactPublishedRunLayout -Root $fixedStaging
         if (Test-Path -LiteralPath $runDirectory) {
             throw "CGCE-OPS-STATE-EXISTS final run directory appeared"
         }
-        [System.IO.Directory]::Move($staging, $runDirectory)
+        [System.IO.Directory]::Move($fixedStaging, $runDirectory)
     } catch {
         if ($_.Exception.Message -like "CGCE-OPS-STATE-EXISTS*") {
             throw
         }
+        if ($_.Exception.Message -like "CGCE-OPS-BLOCKED*") {
+            throw
+        }
         throw "CGCE-OPS-BLOCKED run layout publication failed"
     }
-    Assert-CgceNoReparseInPath -Path $runDirectory
-    Assert-CgceTreeHasNoReparsePoints -Root $runDirectory
+    Assert-CgceExactPublishedRunLayout -Root $runDirectory
 }
 
 function Add-CgceCheckedInt64([int64]$Left, [int64]$Right) {

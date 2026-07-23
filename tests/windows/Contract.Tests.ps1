@@ -94,6 +94,42 @@ function Set-CgceContractCreatedEvidence($State) {
     $State.inventory_checksums.original = ("1" * 64)
 }
 
+function Set-CgceContractSourceEvidence($State, [string]$SourcePhase) {
+    Set-CgceContractCreatedEvidence $State
+    if (@(
+            "BACKUP_VERIFIED",
+            "ORIGINAL_DEACTIVATED",
+            "CLONE_ACTIVE",
+            "PROBE_STAGED",
+            "RUNNING",
+            "CAPTURED"
+        ) -contains $SourcePhase) {
+        $State.inventory_checksums.backup = ("2" * 64)
+    }
+    if (@(
+            "CLONE_ACTIVE",
+            "PROBE_STAGED",
+            "RUNNING",
+            "CAPTURED"
+        ) -contains $SourcePhase) {
+        $State.inventory_checksums.clone = ("3" * 64)
+    }
+    if (@(
+            "PROBE_STAGED",
+            "RUNNING",
+            "CAPTURED"
+        ) -contains $SourcePhase) {
+        $State.probe_receipt_checksum = ("4" * 64)
+    }
+    if ($SourcePhase -ceq "CAPTURED") {
+        $State.process_launch_receipt_checksum = ("5" * 64)
+    }
+    if ($SourcePhase -ceq "CAPTURED") {
+        $State.process_result_receipt_checksum = ("6" * 64)
+        $State.capture_inventory_checksum = ("7" * 64)
+    }
+}
+
 function New-CgceContractTestMarkerFixture([string]$Root) {
     $paths = New-CgceContractTestPaths $Root
     New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
@@ -667,6 +703,109 @@ Invoke-CgceTest "committed states require the exact checkpoint evidence table" {
     }
 }
 
+Invoke-CgceTest "recovery checkpoints accept only exact committed source evidence prefixes" {
+    $sourcePhases = @(
+        "CREATED",
+        "BACKUP_VERIFIED",
+        "ORIGINAL_DEACTIVATED",
+        "CLONE_ACTIVE",
+        "PROBE_STAGED",
+        "RUNNING",
+        "CAPTURED"
+    )
+    foreach ($sourcePhase in $sourcePhases) {
+        $root = New-CgceContractTestRoot
+        try {
+            $paths = New-CgceContractTestPaths $root
+            New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
+            New-Item -ItemType Directory -Path $paths.server_root | Out-Null
+            $genesis = New-CgceRunState `
+                -RunId "r-0123456789abcdef0123456789abcdef" `
+                -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+                -Paths $paths
+            Set-CgceContractCreatedEvidence $genesis
+            Write-CgceJsonAtomic $genesis $paths.genesis_state
+
+            $restoring = Read-CgceJsonObject $paths.genesis_state
+            Set-CgceContractSourceEvidence $restoring $sourcePhase
+            $restoring.phase = "RESTORING"
+            $restoring.revision = 7
+            Write-CgceContractTestUtf8 `
+                $paths.state `
+                ($restoring | ConvertTo-Json -Depth 12)
+            Assert-CgceEqual `
+                "RESTORING" `
+                (Read-CgceRunState $root $restoring.run_id).phase
+
+            $restored = Read-CgceJsonObject $paths.state
+            $restored.phase = "RESTORED"
+            $restored.revision = 8
+            $restored.inventory_checksums.restored = ("8" * 64)
+            Write-CgceContractTestUtf8 `
+                $paths.state `
+                ($restored | ConvertTo-Json -Depth 12)
+            Assert-CgceEqual `
+                "RESTORED" `
+                (Read-CgceRunState $root $restored.run_id).phase
+        } catch {
+            throw "CGCE-TEST source phase $sourcePhase: $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
+    }
+
+    $invalidMutations = @(
+        {
+            param($State)
+            $State.inventory_checksums.clone = ("3" * 64)
+        },
+        {
+            param($State)
+            $State.inventory_checksums.backup = ("2" * 64)
+            $State.probe_receipt_checksum = ("4" * 64)
+        },
+        {
+            param($State)
+            $State.inventory_checksums.backup = ("2" * 64)
+            $State.inventory_checksums.clone = ("3" * 64)
+            $State.process_launch_receipt_checksum = ("5" * 64)
+        },
+        {
+            param($State)
+            $State.inventory_checksums.backup = ("2" * 64)
+            $State.inventory_checksums.clone = ("3" * 64)
+            $State.probe_receipt_checksum = ("4" * 64)
+            $State.process_result_receipt_checksum = ("6" * 64)
+        }
+    )
+    foreach ($mutation in $invalidMutations) {
+        $root = New-CgceContractTestRoot
+        try {
+            $paths = New-CgceContractTestPaths $root
+            New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
+            New-Item -ItemType Directory -Path $paths.server_root | Out-Null
+            $genesis = New-CgceRunState `
+                -RunId "r-0123456789abcdef0123456789abcdef" `
+                -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+                -Paths $paths
+            Set-CgceContractCreatedEvidence $genesis
+            Write-CgceJsonAtomic $genesis $paths.genesis_state
+            $invalid = Read-CgceJsonObject $paths.genesis_state
+            $invalid.phase = "RESTORING"
+            $invalid.revision = 7
+            $null = & $mutation $invalid
+            Write-CgceContractTestUtf8 `
+                $paths.state `
+                ($invalid | ConvertTo-Json -Depth 12)
+            Assert-CgceThrows "CGCE-OPS-PHASE" {
+                Read-CgceRunState $root $invalid.run_id
+            }
+        } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
+    }
+}
+
 Invoke-CgceTest "normal state writer preserves every previously non-null checksum" {
     $root = New-CgceContractTestRoot
     try {
@@ -882,6 +1021,93 @@ Invoke-CgceTest "run marker binds the immutable genesis and has exactly one loca
         Write-CgceContractTestUtf8 $paths.genesis_state "{}"
         Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
             Assert-CgceRunMarker -State $state -AllowCompleted
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "active marker accepts only byte-identical pristine CREATED genesis" {
+    $mutations = @(
+        {
+            param($State)
+            $State.phase = "BACKUP_VERIFIED"
+            $State.revision = 1
+            $State.inventory_checksums.backup = ("2" * 64)
+        },
+        {
+            param($State)
+            $State.revision = 1
+        },
+        {
+            param($State)
+            $State.outcome = "BLOCKED"
+            $State.errors = @(
+                [pscustomobject]@{
+                    code = "CGCE-OPS-BLOCKED"
+                    at_utc = "2026-07-23T00:00:00Z"
+                }
+            )
+        },
+        {
+            param($State)
+            $State.errors = @(
+                [pscustomobject]@{
+                    code = "CGCE-OPS-BLOCKED"
+                    at_utc = "2026-07-23T00:00:00Z"
+                }
+            )
+        },
+        {
+            param($State)
+            $State.inventory_checksums.backup = ("2" * 64)
+        },
+        {
+            param($State)
+            $State.probe_receipt_checksum = ("4" * 64)
+        }
+    )
+    foreach ($mutation in $mutations) {
+        $root = New-CgceContractTestRoot
+        try {
+            $fixture = New-CgceContractTestMarkerFixture $root
+            Remove-Item -LiteralPath $fixture.paths.active_run_marker
+            $candidate = Read-CgceJsonObject $fixture.paths.genesis_state
+            $null = & $mutation $candidate
+            Write-CgceContractTestUtf8 `
+                $fixture.paths.genesis_state `
+                ($candidate | ConvertTo-Json -Depth 12)
+            Write-CgceContractTestUtf8 `
+                $fixture.paths.state `
+                ($candidate | ConvertTo-Json -Depth 12)
+            Assert-CgceThrows "CGCE-OPS-PHASE" {
+                Write-CgceActiveRunMarker `
+                    -State $candidate `
+                    -GenesisStateChecksum (
+                        Get-CgceSha256 $fixture.paths.genesis_state
+                    ) `
+                    -Path $fixture.paths.active_run_marker
+            }
+        } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
+    }
+
+    $root = New-CgceContractTestRoot
+    try {
+        $fixture = New-CgceContractTestMarkerFixture $root
+        Remove-Item -LiteralPath $fixture.paths.active_run_marker
+        $current = Read-CgceJsonObject $fixture.paths.state
+        Write-CgceContractTestUtf8 `
+            $fixture.paths.state `
+            (($current | ConvertTo-Json -Depth 12) + " ")
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Write-CgceActiveRunMarker `
+                -State $current `
+                -GenesisStateChecksum (
+                    Get-CgceSha256 $fixture.paths.genesis_state
+                ) `
+                -Path $fixture.paths.active_run_marker
         }
     } finally {
         Remove-Item -LiteralPath $root -Recurse -Force

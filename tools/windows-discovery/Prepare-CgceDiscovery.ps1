@@ -41,6 +41,174 @@ function Get-CgcePrepareErrorCode([string]$Message) {
     return "CGCE-OPS-BLOCKED"
 }
 
+function Invoke-CgceSafeBlockAttempt(
+    [bool]$StateAuthorityCreated,
+    $Paths,
+    [string]$Code
+) {
+    try {
+        if (-not $StateAuthorityCreated -or $null -eq $Paths) {
+            return
+        }
+        if (-not (Test-Path -LiteralPath $Paths.state -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $Paths.genesis_state -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $Paths.active_run_marker -PathType Leaf)) {
+            return
+        }
+        $null = Block-CgceRunState `
+            -StatePath $Paths.state `
+            -Code $Code
+    } catch {
+        # Preserve invalid authority for manual recovery without masking the
+        # single terminal protocol line.
+    }
+}
+
+function Close-CgcePrepareLock($Lock) {
+    if ($null -eq $Lock) {
+        return $true
+    }
+    try {
+        $Lock.Dispose()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-CgceBootstrapCanonicalPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "CGCE-OPS-CHECKSUM bootstrap path is required"
+    }
+    try {
+        return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    } catch {
+        throw "CGCE-OPS-CHECKSUM invalid bootstrap path"
+    }
+}
+
+function Assert-CgceBootstrapNoReparse([string]$Path) {
+    $current = Get-CgceBootstrapCanonicalPath $Path
+    $volumeRoot = [System.IO.Path]::GetPathRoot($current).TrimEnd('\', '/')
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        if ($current.Equals(
+                $volumeRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            break
+        }
+        try {
+            $item = Get-Item -LiteralPath $current -Force
+        } catch {
+            throw "CGCE-OPS-CHECKSUM bootstrap path is missing"
+        }
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "CGCE-OPS-CHECKSUM bootstrap reparse point is forbidden"
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrWhiteSpace($parent) -or
+            $parent.Equals($current, [StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $current = $parent.TrimEnd('\', '/')
+    }
+}
+
+function Assert-CgceBootstrapTree(
+    [string]$ScriptRoot,
+    [string]$ScriptPath,
+    [string]$BoundHandoffRoot
+) {
+    $handoff = Get-CgceBootstrapCanonicalPath $BoundHandoffRoot
+    $expected = Get-CgceBootstrapCanonicalPath (
+        Join-Path $handoff "tools\windows-discovery"
+    )
+    $actual = Get-CgceBootstrapCanonicalPath $ScriptRoot
+    if (-not $actual.Equals(
+            $expected,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "CGCE-OPS-CHECKSUM prepare script is outside handoff tree"
+    }
+    $expectedScript = Get-CgceBootstrapCanonicalPath (
+        Join-Path $expected "Prepare-CgceDiscovery.ps1"
+    )
+    $actualScript = Get-CgceBootstrapCanonicalPath $ScriptPath
+    if (-not $actualScript.Equals(
+            $expectedScript,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "CGCE-OPS-CHECKSUM prepare script leaf identity drift"
+    }
+    Assert-CgceBootstrapNoReparse $handoff
+    Assert-CgceBootstrapNoReparse $actual
+    Assert-CgceBootstrapNoReparse $actualScript
+    return [pscustomobject]@{
+        handoff_root = $handoff
+        script_root = $actual
+        script_path = $actualScript
+    }
+}
+
+function Assert-CgceBootstrapLeaf(
+    [string]$VerifiedScriptRoot,
+    [string]$RelativePath
+) {
+    $leaf = Get-CgceBootstrapCanonicalPath (
+        Join-Path $VerifiedScriptRoot $RelativePath
+    )
+    $prefix = $VerifiedScriptRoot.TrimEnd('\', '/') + "\"
+    if (-not $leaf.StartsWith(
+            $prefix,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "CGCE-OPS-CHECKSUM bootstrap leaf escapes handoff tree"
+    }
+    try {
+        $isLeaf = Test-Path -LiteralPath $leaf -PathType Leaf
+    } catch {
+        throw "CGCE-OPS-CHECKSUM cannot inspect bootstrap leaf"
+    }
+    if (-not $isLeaf) {
+        throw "CGCE-OPS-CHECKSUM bootstrap module is missing"
+    }
+    Assert-CgceBootstrapNoReparse $leaf
+    return $leaf
+}
+
+function Import-CgceVerifiedBootstrapModule(
+    [string]$Path,
+    [string]$Name
+) {
+    $expected = Get-CgceBootstrapCanonicalPath $Path
+    $matching = $null
+    foreach ($module in @(Get-Module -Name $Name -All)) {
+        $actual = Get-CgceBootstrapCanonicalPath $module.Path
+        if (-not $actual.Equals(
+                $expected,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "CGCE-OPS-CHECKSUM preloaded module origin drift"
+        }
+        $matching = $module
+    }
+    if ($null -eq $matching) {
+        Import-Module $expected -Scope Global | Out-Null
+    }
+    $loaded = @(
+        Get-Module -Name $Name -All |
+            Where-Object {
+                (Get-CgceBootstrapCanonicalPath $_.Path).Equals(
+                    $expected,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($loaded.Count -ne 1) {
+        throw "CGCE-OPS-CHECKSUM verified module did not load exactly once"
+    }
+}
+
 function Assert-CgcePrepareControlBinding($State, $Control) {
     if ($Control.run_id -cne $State.run_id -or
         $Control.maintenance_id -cne $State.maintenance_id -or
@@ -92,6 +260,8 @@ function Get-CgcePrepareAuthority(
     Assert-CgceNoServerActivity `
         -ExecutablePaths ([string[]]@($state.server_process_paths)) `
         -Ports ([int[]]@($state.listener_ports))
+    Assert-CgceNoReparseInPath -Path $state.palserver_executable
+    Assert-CgceNoReparseInPath -Path $state.paths.ue4ss_dll
     if ((Get-CgceSha256 -Path $state.palserver_executable) -cne
         $state.palserver_executable_checksum) {
         throw "CGCE-OPS-CHECKSUM PalServer executable drift"
@@ -192,8 +362,37 @@ $terminalRunId = "INVALID_RUN_ID"
 $exitCode = 1
 
 try {
-    $commonModule = Join-Path $PSScriptRoot "CgceDiscovery.Common.psm1"
-    Import-Module $commonModule -Force | Out-Null
+    if ($RunId -cmatch '^r-[0-9a-f]{32}$') {
+        $terminalRunId = $RunId
+    }
+    $bootstrap = Assert-CgceBootstrapTree `
+        -ScriptRoot $PSScriptRoot `
+        -ScriptPath $MyInvocation.MyCommand.Path `
+        -BoundHandoffRoot $HandoffRoot
+    $commonModule = Assert-CgceBootstrapLeaf `
+        -VerifiedScriptRoot $bootstrap.script_root `
+        -RelativePath "CgceDiscovery.Common.psm1"
+    $contractModule = Assert-CgceBootstrapLeaf `
+        -VerifiedScriptRoot $bootstrap.script_root `
+        -RelativePath "modules\CgceDiscovery.Contract.psm1"
+    $filesModule = Assert-CgceBootstrapLeaf `
+        -VerifiedScriptRoot $bootstrap.script_root `
+        -RelativePath "modules\CgceDiscovery.Files.psm1"
+    $runtimeModule = Assert-CgceBootstrapLeaf `
+        -VerifiedScriptRoot $bootstrap.script_root `
+        -RelativePath "modules\CgceDiscovery.Runtime.psm1"
+    Import-CgceVerifiedBootstrapModule `
+        -Path $commonModule `
+        -Name "CgceDiscovery.Common"
+    Import-CgceVerifiedBootstrapModule `
+        -Path $contractModule `
+        -Name "CgceDiscovery.Contract"
+    Import-CgceVerifiedBootstrapModule `
+        -Path $filesModule `
+        -Name "CgceDiscovery.Files"
+    Import-CgceVerifiedBootstrapModule `
+        -Path $runtimeModule `
+        -Name "CgceDiscovery.Runtime"
     if (-not (Test-CgceRunId $RunId)) {
         throw "CGCE-OPS-ID invalid run identifier"
     }
@@ -250,6 +449,8 @@ try {
     if (Test-Path -LiteralPath $paths.run_directory) {
         throw "CGCE-OPS-STATE-EXISTS final run directory exists"
     }
+    Assert-CgceNoReparseInPath -Path $ServerExecutable
+    Assert-CgceNoReparseInPath -Path $paths.ue4ss_dll
     $palserverChecksum = Get-CgceSha256 -Path $ServerExecutable
     if ((Get-CgceSha256 -Path $paths.ue4ss_dll) -cne
         $validated.ue4ss_dll_sha256) {
@@ -467,22 +668,16 @@ try {
     $exitCode = 0
 } catch {
     $terminalCode = Get-CgcePrepareErrorCode $_.Exception.Message
-    if ($stateAuthorityCreated -and
-        $null -ne $paths -and
-        (Test-Path -LiteralPath $paths.state -PathType Leaf) -and
-        (Test-Path -LiteralPath $paths.genesis_state -PathType Leaf) -and
-        (Test-Path -LiteralPath $paths.active_run_marker -PathType Leaf)) {
-        try {
-            $null = Block-CgceRunState `
-                -StatePath $paths.state `
-                -Code $terminalCode
-        } catch {
-            # Invalid authority is preserved for manual recovery; never overwrite it.
-        }
-    }
+    Invoke-CgceSafeBlockAttempt `
+        -StateAuthorityCreated $stateAuthorityCreated `
+        -Paths $paths `
+        -Code $terminalCode
 } finally {
-    if ($null -ne $lock) {
-        $lock.Dispose()
+    if (-not (Close-CgcePrepareLock -Lock $lock)) {
+        $exitCode = 1
+        if ([string]::IsNullOrWhiteSpace($terminalCode)) {
+            $terminalCode = "CGCE-OPS-LOCK"
+        }
     }
 }
 
