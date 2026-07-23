@@ -159,11 +159,25 @@ Invoke-CgceTest "server arguments reject public secret and native parsing hazard
         "pipe|value",
         "redirect>value",
         "@response.txt",
-        "line`nbreak"
+        "line`nbreak",
+        "-port=8211`n",
+        "-port=8211`r`n"
     )) {
         Assert-CgceThrows "CGCE-OPS-ARGUMENT" {
             Assert-CgceServerArguments -Arguments @($argument)
         }
+    }
+}
+
+Invoke-CgceTest "runtime checksum rejects valid prefixes followed by line endings" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    foreach ($suffix in @("`n", "`r`n")) {
+        Assert-CgceEqual `
+            $false `
+            (& $module {
+                param($Value)
+                Test-CgceRuntimeChecksum $Value
+            } (("a" * 64) + $suffix))
     }
 }
 

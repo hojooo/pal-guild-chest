@@ -170,6 +170,96 @@ Invoke-CgceTest "accepts only fixed run ids" {
     Assert-CgceEqual $true (Test-CgceRunId "r-0123456789abcdef0123456789abcdef")
     Assert-CgceEqual $false (Test-CgceRunId "r-0123456789ABCDEF0123456789abcdef")
     Assert-CgceEqual $false (Test-CgceRunId "..\escape")
+    foreach ($suffix in @("`n", "`r`n")) {
+        Assert-CgceEqual `
+            $false `
+            (Test-CgceRunId (
+                "r-0123456789abcdef0123456789abcdef" + $suffix
+            ))
+    }
+}
+
+Invoke-CgceTest "contract scalar validators reject valid prefixes followed by line endings" {
+    foreach ($suffix in @("`n", "`r`n")) {
+        $root = New-CgceContractTestRoot
+        try {
+            $paths = New-CgceContractTestPaths $root
+            Assert-CgceThrows "CGCE-OPS-ID" {
+                New-CgceRunState `
+                    -RunId "r-0123456789abcdef0123456789abcdef" `
+                    -MaintenanceId (
+                        "m-0123456789abcdef0123456789abcdef" + $suffix
+                    ) `
+                    -Paths $paths
+            }
+
+            New-Item -ItemType Directory -Path $paths.run_directory |
+                Out-Null
+            New-Item -ItemType Directory -Path $paths.server_root |
+                Out-Null
+            $controlPath = Join-Path $root "control.json"
+            foreach ($case in @(
+                [pscustomobject]@{
+                    Code = "CGCE-OPS-ID"
+                    Mutate = {
+                        param($Value)
+                        $Value.maintenance_id += $suffix
+                    }
+                },
+                [pscustomobject]@{
+                    Code = "CGCE-OPS-CONTROL"
+                    Mutate = {
+                        param($Value)
+                        $Value.ue4ss_dll_sha256 += $suffix
+                    }
+                },
+                [pscustomobject]@{
+                    Code = "CGCE-OPS-CONTROL"
+                    Mutate = {
+                        param($Value)
+                        $Value.verified_at_utc += $suffix
+                    }
+                }
+            )) {
+                $control = New-CgceContractTestControl
+                $null = & $case.Mutate $control
+                Write-CgceContractTestControl $controlPath $control
+                Assert-CgceThrows $case.Code {
+                    Assert-CgceControlEvidence `
+                        -EvidencePath $controlPath `
+                        -ExpectedFileChecksum (Get-CgceSha256 $controlPath) `
+                        -ExpectedBundleChecksum ("a" * 64) `
+                        -NowUtc ([DateTime]"2026-07-23T00:30:00Z")
+                }
+            }
+
+            $state = New-CgceRunState `
+                -RunId "r-0123456789abcdef0123456789abcdef" `
+                -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+                -Paths $paths
+            Set-CgceContractCreatedEvidence $state
+            Write-CgceJsonAtomic $state $paths.genesis_state
+            $state.outcome = "BLOCKED"
+            $state.revision = 1
+            $state.errors = [object[]]@(
+                [pscustomobject][ordered]@{
+                    code = "CGCE-OPS-BLOCKED" + $suffix
+                    at_utc = "2026-07-23T00:00:00Z"
+                }
+            )
+            Write-CgceJsonAtomic $state $paths.state
+            Assert-CgceThrows "CGCE-OPS-JSON" {
+                Read-CgceRunState $root $state.run_id
+            }
+            Assert-CgceThrows "CGCE-OPS-BLOCKED" {
+                Block-CgceRunState `
+                    -StatePath $paths.state `
+                    -Code ("CGCE-OPS-BLOCKED" + $suffix)
+            }
+        } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
+    }
 }
 
 Invoke-CgceTest "rejects skipped phases" {
@@ -703,7 +793,7 @@ Invoke-CgceTest "committed states require the exact checkpoint evidence table" {
     }
 }
 
-Invoke-CgceTest "recovery checkpoints accept only exact committed source evidence prefixes" {
+Invoke-CgceTest "recovery checkpoint validator accepts exact source profiles without persistence authority" {
     $sourcePhases = @(
         "CREATED",
         "BACKUP_VERIFIED",

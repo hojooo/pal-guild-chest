@@ -362,7 +362,7 @@ $terminalRunId = "INVALID_RUN_ID"
 $exitCode = 1
 
 try {
-    if ($RunId -cmatch '^r-[0-9a-f]{32}$') {
+    if ($RunId -cmatch '^r-[0-9a-f]{32}\z') {
         $terminalRunId = $RunId
     }
     $bootstrap = Assert-CgceBootstrapTree `

@@ -197,3 +197,69 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
 Result: exit `127` because `powershell.exe` is not installed on this macOS
 host. Elevated Windows PowerShell 5.1 execution remains the mandatory residual
 gate.
+
+## Independent-review correction round
+
+This round covers .NET true-end scalar validation, Draft-07 fixed-length and
+CR/LF hardening, direct wrong-origin preloaded-module rejection, and a Task 6
+design gate for the deferred intent-bound recovery CAS writer.
+
+Focused portable RED:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+```
+
+Result: exit `1`. The first two existing tests passed. The static Prepare
+contract failed at the new true-end RunId assertion (`expected true, got
+false`), proving the production validator still used .NET `$` and accepted a
+valid prefix followed by a final LF.
+
+Focused portable GREEN:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+```
+
+Result: exit `0`; `3` passed.
+
+Full portable and artifact verification:
+
+```text
+./scripts/run-tests.sh
+./scripts/verify-package.sh discovery
+jq empty tools/windows-discovery/schemas/control-evidence.schema.json \
+  tools/windows-discovery/schemas/run-state.schema.json
+git diff --check
+```
+
+Result: all exit `0`; the package verifier printed
+`DISCOVERY_PACKAGE_VERIFIED`.
+
+Static correction scans found no remaining `$`-anchored .NET regex in the
+PowerShell production or Windows test files, no unsupported `\z` in either
+Draft-07 schema, and no recovery-state writer in production or tests. The
+Windows suite now contains `102` static `Invoke-CgceTest` cases.
+
+The existing direct recovery-checkpoint test was renamed to state explicitly
+that it validates source profiles without granting persistence authority. No
+recovery writer was implemented: Task 6 now has a blocking design/RED gate for
+the full exact restore-intent schema, all seven source phases under both
+`ACTIVE` and `BLOCKED`, fresh disk authority, the receipt-free initial CAS,
+strict read-back, and drift rejection. Its future initial and completion
+writers are fixed-purpose and output-free (`-> void`); the intent binds the
+exact source-state preimage, while completion derives the restored checksum
+from fresh final evidence. The gate also requires resumable no-overwrite
+restored-inventory and final-journal helpers before a state-only completion
+CAS. The normal phase DAG and writer remain unchanged.
+
+The documented Windows command was rerun:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+  .\tests\windows\Run-CgceDiscoveryTests.ps1
+```
+
+Result: exit `127` because `powershell.exe` is not installed on this macOS
+host. Elevated Windows PowerShell 5.1 execution remains the mandatory residual
+gate.

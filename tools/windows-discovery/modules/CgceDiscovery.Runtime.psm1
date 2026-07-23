@@ -45,7 +45,7 @@ function Assert-CgceRuntimeExactKeys(
 }
 
 function Test-CgceRuntimeChecksum($Value) {
-    return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}$'
+    return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}\z'
 }
 
 function Test-CgceRuntimeInteger(
@@ -208,7 +208,7 @@ function Assert-CgceServerArguments([string[]]$Arguments) {
     foreach ($argument in $Arguments) {
         if ($argument -isnot [string] -or
             [string]::IsNullOrEmpty($argument) -or
-            $argument -cnotmatch '^[-A-Za-z0-9_=.:/\\]+$') {
+            $argument -cnotmatch '^[-A-Za-z0-9_=.:/\\]+\z') {
             throw "CGCE-OPS-ARGUMENT unsafe native argument token"
         }
         foreach ($prefix in $blocked) {
@@ -339,7 +339,7 @@ function Assert-CgceProcessReceiptDirectory([string]$ReceiptRoot) {
     }
     foreach ($child in @(Get-ChildItem -LiteralPath $ReceiptRoot -Force)) {
         if ($child.PSIsContainer -or
-            $child.Name -cnotmatch '^(?:000-launch|[0-9]{3}-pid|999-result)\.json$') {
+            $child.Name -cnotmatch '^(?:000-launch|[0-9]{3}-pid|999-result)\.json\z') {
             throw "CGCE-OPS-PROCESS-RECEIPT unknown process receipt child"
         }
     }
@@ -737,7 +737,7 @@ function Assert-CgceNoForeignRunArtifacts(
     $modsTxt = Join-Path $mods "mods.txt"
     if (Test-Path -LiteralPath $modsTxt -PathType Leaf) {
         foreach ($line in [IO.File]::ReadAllLines($modsTxt)) {
-            if ($line -match '^\s*CGCEDiscoveryInventory\s*:\s*1(?:\s*(?:;.*)?)?$') {
+            if ($line -match '^\s*CGCEDiscoveryInventory\s*:\s*1(?:\s*(?:;.*)?)?\z') {
                 throw "CGCE-OPS-MODS-TXT inventory probe already enabled"
             }
         }
@@ -1080,7 +1080,7 @@ function Enable-CgceInventoryProbe(
         throw "CGCE-OPS-PROBE-EXISTS staged probe exists"
     }
     foreach ($line in [IO.File]::ReadAllLines($Paths.mods_txt)) {
-        if ($line -match '^\s*CGCEDiscoveryInventory\s*:\s*1(?:\s*(?:;.*)?)?$') {
+        if ($line -match '^\s*CGCEDiscoveryInventory\s*:\s*1(?:\s*(?:;.*)?)?\z') {
             throw "CGCE-OPS-MODS-TXT duplicate probe enablement"
         }
     }
@@ -2295,7 +2295,7 @@ function Assert-CgceNoProbeResidueWithoutIntent($Paths) {
     if (Test-Path -LiteralPath $Paths.mods_txt -PathType Leaf) {
         foreach ($line in [IO.File]::ReadAllLines($Paths.mods_txt)) {
             if ($line -match
-                '^\s*CGCEDiscoveryInventory\s*:\s*1(?:\s*(?:;.*)?)?$') {
+                '^\s*CGCEDiscoveryInventory\s*:\s*1(?:\s*(?:;.*)?)?\z') {
                 throw "CGCE-OPS-MANUAL-RECOVERY probe enablement without intent"
             }
         }

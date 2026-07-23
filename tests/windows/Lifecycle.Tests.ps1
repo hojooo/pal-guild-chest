@@ -921,6 +921,46 @@ Invoke-CgceTest "prepare rejects a script executed outside the bound handoff tre
     }
 }
 
+Invoke-CgceTest "prepare rejects a preloaded module from a different canonical path" {
+    $fixture = New-CgceSyntheticFixture
+    try {
+        $wrongRoot = Join-Path $fixture.Base "wrong-origin"
+        New-Item -ItemType Directory -Path $wrongRoot | Out-Null
+        $wrongContract = Join-Path `
+            $wrongRoot `
+            "CgceDiscovery.Contract.psm1"
+        [System.IO.File]::Copy(
+            (Join-Path `
+                $fixture.HandoffRoot `
+                "tools\windows-discovery\modules\CgceDiscovery.Contract.psm1"),
+            $wrongContract,
+            $false
+        )
+        $moduleSetup = '$wrongContractModule = Import-Module ' +
+            (ConvertTo-CgceLifecycleSingleQuoted $wrongContract) +
+            ' -Global -Force -PassThru'
+        $result = Invoke-CgcePrepareChild `
+            -Fixture $fixture `
+            -ModuleSetup $moduleSetup
+        Assert-CgceEqual $true ($result.ExitCode -ne 0)
+        Assert-CgceEqual 1 @($result.Stdout).Count
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($fixture.RunId)" `
+            $result.Stdout[0]
+        Assert-CgceEqual "" $result.Stderr
+        Assert-CgceEqual $false (Test-Path -LiteralPath $fixture.Paths.state)
+        Assert-CgceEqual $false (Test-Path -LiteralPath $fixture.Paths.genesis_state)
+        Assert-CgceEqual `
+            $false `
+            (Test-Path -LiteralPath $fixture.Paths.active_run_marker)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
 Invoke-CgceTest "prepare keeps one terminal line when catch-path inspection throws" {
     $fixture = New-CgceSyntheticFixture
     try {
@@ -1142,6 +1182,31 @@ Invoke-CgceTest "prepare renders a CRLF-bearing invalid run id as one safe termi
             -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
     } finally {
         Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "prepare rejects valid run-id prefixes with final line endings" {
+    foreach ($suffix in @("`n", "`r`n")) {
+        $fixture = New-CgceSyntheticFixture
+        try {
+            $fixture.RunId += $suffix
+            $result = Invoke-CgcePrepareChild $fixture
+            Assert-CgceEqual $true ($result.ExitCode -ne 0)
+            Assert-CgceEqual 1 @($result.Stdout).Count
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-ID INVALID_RUN_ID" `
+                $result.Stdout[0]
+            Assert-CgceEqual "" $result.Stderr
+            Assert-CgceEqual $false (Test-Path -LiteralPath $fixture.Paths.state)
+            Assert-CgceEqual `
+                $false `
+                (Test-Path -LiteralPath $fixture.Paths.active_run_marker)
+            Compare-CgceInventory `
+                -Expected $fixture.OriginalInventory `
+                -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
     }
 }
 

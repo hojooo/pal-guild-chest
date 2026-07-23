@@ -1,10 +1,17 @@
 local a = require("tests.support.assertions")
+local json = require("CrossplayGuildChestExpander.Scripts.json")
 
 local function read(path)
     local file = assert(io.open(path, "rb"))
     local content = file:read("*a")
     file:close()
     return content
+end
+
+local function assert_fixed_length(value, length, pattern)
+    a.equal(length, value.minLength)
+    a.equal(length, value.maxLength)
+    a.equal(pattern, value.pattern)
 end
 
 describe("Windows discovery handoff", function()
@@ -102,6 +109,7 @@ end
             "Close-CgcePrepareLock",
             "Assert-CgceNoReparseInPath -Path $ServerExecutable",
             "Assert-CgceNoReparseInPath -Path $paths.ue4ss_dll",
+            "'^r-[0-9a-f]{32}\\z'",
             "'^\\s*(CGCE-OPS-[A-Z0-9-]+)(?![A-Za-z0-9-])'",
             "return $match.Groups[1].Value",
             "CGCE_WINDOWS_DISCOVERY_OK",
@@ -137,11 +145,24 @@ end
             "Assert-CgceGenesisState",
             "Test-CgceRecoverySourceEvidence",
             "Assert-CgceRecoveryCheckpointEvidence",
+            "'^[0-9a-f]{64}\\z'",
         }) do
             a.equal(true, contract:find(required, 1, true) ~= nil)
         end
 
-        local state_schema = read(
+        a.equal(
+            true,
+            files:find("'^[0-9a-f]{64}\\z'", 1, true) ~= nil
+        )
+        local runtime = read(
+            "tools/windows-discovery/modules/CgceDiscovery.Runtime.psm1"
+        )
+        a.equal(
+            true,
+            runtime:find("'^[0-9a-f]{64}\\z'", 1, true) ~= nil
+        )
+
+        local state_schema_text = read(
             "tools/windows-discovery/schemas/run-state.schema.json"
         )
         for _, required in ipairs({
@@ -150,7 +171,83 @@ end
             '"recoverySourceRunningEvidence"',
             '"recoverySourceCapturedEvidence"',
         }) do
-            a.equal(true, state_schema:find(required, 1, true) ~= nil)
+            a.equal(
+                true,
+                state_schema_text:find(required, 1, true) ~= nil
+            )
         end
+
+        local state_schema = json.decode(state_schema_text)
+        assert_fixed_length(
+            state_schema.properties.run_id,
+            34,
+            "^r-[0-9a-f]{32}$"
+        )
+        assert_fixed_length(
+            state_schema.properties.maintenance_id,
+            34,
+            "^m-[0-9a-f]{32}$"
+        )
+        assert_fixed_length(
+            state_schema.definitions.checksum,
+            64,
+            "^[0-9a-f]{64}$"
+        )
+        assert_fixed_length(
+            state_schema.definitions.strictUtc,
+            20,
+            "^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+                .. "[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        )
+        local error_code = state_schema.properties.errors
+            .items.properties.code
+        a.equal(10, error_code.minLength)
+        a.equal("^CGCE-OPS-[A-Z0-9-]+$", error_code.pattern)
+        a.equal("[\\r\\n]", error_code["not"].pattern)
+
+        local control_schema = json.decode(read(
+            "tools/windows-discovery/schemas/control-evidence.schema.json"
+        ))
+        assert_fixed_length(
+            control_schema.properties.maintenance_id,
+            34,
+            "^m-[0-9a-f]{32}$"
+        )
+        assert_fixed_length(
+            control_schema.properties.run_id,
+            34,
+            "^r-[0-9a-f]{32}$"
+        )
+        for _, name in ipairs({
+            "ue4ss_dll_sha256",
+            "bundle_checksum",
+        }) do
+            assert_fixed_length(
+                control_schema.properties[name],
+                64,
+                "^[0-9a-f]{64}$"
+            )
+        end
+        for _, name in ipairs({
+            "verified_at_utc",
+            "valid_until_utc",
+        }) do
+            assert_fixed_length(
+                control_schema.properties[name],
+                20,
+                "^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+                    .. "[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+            )
+        end
+
+        local lifecycle = read("tests/windows/Lifecycle.Tests.ps1")
+        a.equal(
+            true,
+            lifecycle:find(
+                "preloaded module from a different canonical path",
+                1,
+                true
+            ) ~= nil
+        )
     end)
 end)

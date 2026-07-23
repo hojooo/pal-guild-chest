@@ -541,7 +541,7 @@ Invoke-CgceTest "inventory envelope round trips one entry and returns its checks
         )
         $checksum = Write-CgceInventory -Entries $entries -Path $path -Kind "original"
         Assert-CgceEqual (Get-CgceFilesTestSha256 $path) $checksum
-        Assert-CgceEqual $true ($checksum -cmatch '^[0-9a-f]{64}$')
+        Assert-CgceEqual $true ($checksum -cmatch '^[0-9a-f]{64}\z')
         $read = @(Read-CgceInventory -Path $path -ExpectedKind "original")
         Assert-CgceEqual 1 $read.Count
         Assert-CgceEqual "a.txt" $read[0].relative_path
@@ -552,6 +552,29 @@ Invoke-CgceTest "inventory envelope round trips one entry and returns its checks
         }
     } finally {
         Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "inventory checksum rejects valid prefixes followed by line endings" {
+    foreach ($suffix in @("`n", "`r`n")) {
+        $root = New-CgceFilesTestRoot
+        try {
+            $entries = @(
+                [pscustomobject][ordered]@{
+                    relative_path = "a.txt"
+                    length = [int64]3
+                    sha256 = ("a" * 64) + $suffix
+                }
+            )
+            Assert-CgceThrows "CGCE-OPS-INVENTORY" {
+                Write-CgceInventory `
+                    -Entries $entries `
+                    -Path (Join-Path $root "inventory.json") `
+                    -Kind "original"
+            }
+        } finally {
+            Remove-Item -LiteralPath $root -Recurse -Force
+        }
     }
 }
 

@@ -1259,6 +1259,38 @@ deactivation과 clone activation을 state-bound operation으로 만든다.
   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
   .\tests\windows\Run-CgceDiscoveryTests.ps1` gate.
 
+#### Task 4 independent-review correction round
+
+- [x] **RED — reject final-LF scalar bypasses.** Add valid-prefix-plus-LF and
+  CRLF tests for Prepare run IDs, Contract IDs/checksums/timestamps/error
+  codes, Files inventory checksums, and Runtime checksums/native arguments.
+  Whole-token .NET regexes use true-end `\z`; prefix extraction and JSON
+  number tokenization remain prefix matchers. Draft-07 schemas use exact
+  lengths for fixed identifiers/checksums/timestamps and explicit CR/LF
+  rejection for variable error codes instead of unsupported `\z`.
+- [x] **Design gate — defer recovery persistence to Task 6.** The Task 4
+  recovery profile tests validate schema/state shape only and grant no
+  persistence authority. Before Task 6 adds recovery writers, it must first
+  define and RED-test the full exact `000-restore-intent.json` matrix case,
+  expected path/layout, inventory/tree-digest, and receipt-chain schema. The
+  initial writer must derive fresh disk authority rather than accept a
+  caller-built state, bind the exact source-state preimage, preserve both
+  `ACTIVE` and `BLOCKED` across all seven source phases, require no operation
+  receipt before the first CAS, and strictly CAS/read back the exact
+  intent-bound transition. A separate fixed-purpose completion writer must
+  freshly validate the final intent/journal/inventories/tree, preserve either
+  outcome, introduce only the restored checksum, and CAS/read back
+  `RESTORED`. Both are output-free. The existing normal DAG and writer,
+  including `CAPTURED -> RESTORING`, remain unchanged.
+- [x] **RED — exercise preloaded wrong-origin modules.** Preload the same
+  module name from a different canonical path in the lifecycle child before
+  invoking the verified handoff Prepare copy. Require one checksum terminal
+  line and no state, marker, or Saved change.
+- [x] **GREEN and verify.** Run focused portable RED/GREEN, the full portable
+  suite, package verification, Draft-07 JSON parse, diff/static scans, and the
+  unavailable elevated Windows PowerShell 5.1 command. Record exact results in
+  `.superpowers/sdd/task-11a-4-report.md`.
+
 - [ ] **Step 1: Write a failing synthetic prepare test**
 
 ```powershell
@@ -1641,15 +1673,66 @@ PalServer가 멈춘 뒤 original을 active path로 복원한다.
 
 **Files:**
 - Create: `tools/windows-discovery/Restore-CgceProduction.ps1`
+- Modify: `tools/windows-discovery/modules/CgceDiscovery.Contract.psm1`
+- Modify: `tests/windows/Contract.Tests.ps1`
 - Modify: `tests/windows/Lifecycle.Tests.ps1`
 - Modify: `tools/windows-discovery/modules/CgceDiscovery.Files.psm1`
 
 **Interfaces:**
 - Consumes: phase `CREATED` through `RESTORED`, including
   `outcome=BLOCKED`; `RESTORING` is explicitly resumable.
+- Produces:
+  `Write-CgceRecoveryRunState -StatePath <string>
+  -RecoveryIntentPath <string> -> void`, which reads fresh authoritative state
+  itself and never accepts a caller-built state object.
+- Produces:
+  `Complete-CgceRecoveryRunState -StatePath <string>
+  -RecoveryIntentPath <string> -> void`, which derives the restored inventory
+  path and checksum from fresh state after validating the intent-bound
+  receipt/filesystem result. Neither helper emits success-stream output;
+  callers explicitly re-read persisted state after each helper's strict
+  read-back succeeds.
+- Private recovery helpers:
+  `Write-OrResume-CgceRestoredInventory -StatePath <string>
+  -RecoveryIntentPath <string> -> string` and
+  `Complete-CgceRecoveryJournal -StatePath <string>
+  -RecoveryIntentPath <string> -RestoredInventorySha256 <string> -> void`.
+  The first return value is always captured and used; it never leaks to the
+  entry-point success stream.
 - Produces: quarantined test clone/probe, exact restored original inventory,
   phase `RESTORED`; preserves `BLOCKED` outcome when the run failed.
 - Error code: `CGCE-OPS-MANUAL-RECOVERY`.
+
+- [ ] **Blocking gate: define and RED-test recovery persistence authority**
+
+  Before implementing the writer or first transition, define the full exact
+  `000-restore-intent.json` schema for matrix case, expected path/layout,
+  inventory/tree digests, and receipt-chain bindings. Test every authoritative
+  source evidence profile for
+  `CREATED,BACKUP_VERIFIED,ORIGINAL_DEACTIVATED,CLONE_ACTIVE,PROBE_STAGED,
+  RUNNING,CAPTURED` under both `ACTIVE` and `BLOCKED`. The writer must read the
+  fresh state from `StatePath`, bind the exact validated intent at
+  `RecoveryIntentPath`, require no operation receipt before the initial
+  transition, preserve outcome/errors/evidence, perform checksum CAS plus
+  strict reopen/read-back, and reject intent/source/evidence drift. The intent
+  must bind `source_state_sha256` plus the source phase, outcome, revision,
+  `updated_at_utc`, exact errors, genesis identity, and original-inventory
+  identity. A `RESTORING` resume reconstructs that source-state preimage and
+  verifies its checksum before trusting the intent. The completion writer must
+  freshly validate the `RESTORING` state, exact intent, full gapless final
+  journal, original/restored inventory files, and live restored tree; derive
+  rather than accept the restored checksum; preserve `ACTIVE` or `BLOCKED`,
+  errors, and every other checksum; introduce only the restored checksum; and
+  CAS/read back `RESTORED`. The restored-inventory helper must no-overwrite
+  create the exact inventory when missing, or accept an existing file only
+  after exact kind/entries/checksum read-back. The journal helper must
+  no-overwrite create the exact final receipt, or resume only after validating
+  the existing receipt and the full gapless prefix. The completion CAS creates
+  or moves no filesystem/journal artifact; it only revalidates authority and
+  writes state. The exact final receipt schema and crash tests across
+  inventory-created, receipt-created, and state-completed boundaries remain
+  part of this blocking design/RED gate. Keep the existing normal
+  DAG—including `CAPTURED -> RESTORING`—and `Write-CgceRunState` unchanged.
 
 - [ ] **Step 1: Write failing successful and blocked restore tests**
 
@@ -1707,6 +1790,9 @@ $provisional = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
 $lock = Enter-CgceExclusiveLock -ServerRoot $provisional.paths.server_root -RunId $RunId
 $state = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
 $statePath = $state.paths.state
+$recoveryIntentPath = Join-Path `
+    $state.paths.restore_receipts `
+    "000-restore-intent.json"
 $activeSaved = $state.paths.active_saved
 $inactiveOriginal = $state.paths.inactive_original
 $quarantinedClone = $state.paths.quarantined_clone
@@ -1738,10 +1824,10 @@ if ($null -eq $intent) {
     $intent = Write-CgceRecoveryIntent `
         -State $state -Matrix $matrix `
         -ReceiptRoot $state.paths.restore_receipts
-    $sourcePhase = $state.phase
-    $state.phase = "RESTORING"
-    Write-CgceRunState `
-        -State $state -StatePath $statePath -ExpectedPhase $sourcePhase
+    Write-CgceRecoveryRunState `
+        -StatePath $statePath `
+        -RecoveryIntentPath $recoveryIntentPath
+    $state = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
 } else {
     Assert-CgceRecoveryIntent -State $state -Intent $intent
     if ($state.phase -ne "RESTORING") {
@@ -1750,10 +1836,10 @@ if ($null -eq $intent) {
         }
         Assert-CgceNoRestoreOperationReceipt `
             -ReceiptRoot $state.paths.restore_receipts
-        $sourcePhase = $state.phase
-        $state.phase = "RESTORING"
-        Write-CgceRunState `
-            -State $state -StatePath $statePath -ExpectedPhase $sourcePhase
+        Write-CgceRecoveryRunState `
+            -StatePath $statePath `
+            -RecoveryIntentPath $recoveryIntentPath
+        $state = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
     }
     $matrix = Assert-CgceRecoveryMatrix -State $state -Intent $intent
 }
@@ -1792,23 +1878,37 @@ if ($null -ne $state.probe_receipt_checksum) {
         $state.probe_receipt_checksum
 }
 Restore-CgceInventoryProbe @probeRestore
-$state.inventory_checksums.restored = Write-CgceInventory `
-    -Entries $restored -Path $state.paths.restored_inventory -Kind "restored"
-$state.phase = "RESTORED"
-Write-CgceRunState -State $state -StatePath $statePath -ExpectedPhase "RESTORING"
+$restored = @(Get-CgceTreeInventory -Root $activeSaved)
+Compare-CgceInventory -Expected $original -Actual $restored
+$restoredInventorySha = Write-OrResume-CgceRestoredInventory `
+    -StatePath $statePath `
+    -RecoveryIntentPath $recoveryIntentPath
+Compare-CgceInventory `
+    -Expected $original `
+    -Actual @(Get-CgceTreeInventory -Root $activeSaved)
+Complete-CgceRecoveryJournal `
+    -StatePath $statePath `
+    -RecoveryIntentPath $recoveryIntentPath `
+    -RestoredInventorySha256 $restoredInventorySha
+Complete-CgceRecoveryRunState `
+    -StatePath $statePath `
+    -RecoveryIntentPath $recoveryIntentPath
+$state = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
 Complete-CgceRunMarker -State $state
 ```
 
 The helper names in this skeleton are private Task 6 helpers, not new entry
 points. `Write-CgceRecoveryIntent` atomically creates
 `000-restore-intent.json` before the first transition to `RESTORING` and records
-the source phase, selected matrix case, and expected layouts/checksums. A crash
-after intent creation but before the `RESTORING` state CAS resumes only when
-the current phase still equals `intent.source_phase` and no operation receipt
-exists. Once an intent exists, matrix evaluation is intent-bound rather than a
-fresh-layout decision; this makes `UNCHANGED_ORIGINAL` and
-`ORIGINAL_ALREADY_ACTIVE` resumable without weakening ambiguity checks. Do not
-reuse the normal transition helper for crash recovery from intermediate phases.
+the exact source-state checksum/preimage identity, selected matrix case, and
+expected layouts/checksums. A crash after intent creation but before the
+`RESTORING` state CAS resumes only when the current phase still equals
+`intent.source_phase`, its reconstructed preimage matches
+`intent.source_state_sha256`, and no operation receipt exists. Once an intent
+exists, matrix evaluation is intent-bound rather than a fresh-layout decision;
+this makes `UNCHANGED_ORIGINAL` and `ORIGINAL_ALREADY_ACTIVE` resumable without
+weakening ambiguity checks. Do not reuse or relax the normal transition helper
+for crash recovery from intermediate phases or blocked completion.
 After each
 completed move or verified comparison, atomically create one numbered,
 no-overwrite JSON receipt under `receipts\restore`.
@@ -1816,6 +1916,15 @@ no-overwrite JSON receipt under `receipts\restore`.
 filesystem state, prior receipt checksum, source/destination inventory, and
 intended step all agree. The Saved/probe/output quarantines are same-volume
 sibling paths; `RunRoot` may be on a different backup volume.
+`Write-OrResume-CgceRestoredInventory` derives the expected live entries and
+fixed inventory path from fresh state/intent. It either creates and strictly
+reads back the missing file or validates an existing byte/checksum-equivalent
+inventory, so a crash after inventory publication is resumable.
+`Complete-CgceRecoveryJournal` creates the final no-overwrite receipt only
+after probe cleanup, restored-inventory validation, and a final live-tree
+comparison; on resume it requires the exact full gapless journal instead.
+`Complete-CgceRecoveryRunState` never creates, moves, or repairs those
+artifacts.
 `Complete-CgceRunMarker` no-overwrite moves the active marker to
 `.cgce-discovery-completed-<run_id>.json` only after the RESTORED state
 read-back. A crash before that move is resumed by calling restore again.

@@ -23,7 +23,7 @@ $script:CgceTestFreeSpaceSeam = $null
 
 function Resolve-CgceCanonicalPath([string]$Path, [bool]$MustExist) {
     if ([string]::IsNullOrWhiteSpace($Path) -or
-        $Path -cnotmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {
+        $Path -cnotmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|\z))') {
         throw "CGCE-OPS-PATH absolute Windows path required"
     }
     try {
@@ -33,8 +33,8 @@ function Resolve-CgceCanonicalPath([string]$Path, [bool]$MustExist) {
         throw "CGCE-OPS-PATH invalid path"
     }
     if ([string]::IsNullOrWhiteSpace($volumeRoot) -or
-        ($volumeRoot -cnotmatch '^[A-Za-z]:[\\/]$' -and
-            $volumeRoot -cnotmatch '^\\\\[^\\/]+[\\/][^\\/]+[\\/]$')) {
+        ($volumeRoot -cnotmatch '^[A-Za-z]:[\\/]\z' -and
+            $volumeRoot -cnotmatch '^\\\\[^\\/]+[\\/][^\\/]+[\\/]\z')) {
         throw "CGCE-OPS-PATH absolute drive or UNC path required"
     }
 
@@ -341,7 +341,7 @@ function ConvertTo-CgceValidatedInventory([object[]]$Entries) {
         }
         $length = ConvertTo-CgceInventoryLength $entry.length
         if ($entry.sha256 -isnot [string] -or
-            $entry.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            $entry.sha256 -cnotmatch '^[0-9a-f]{64}\z') {
             throw "CGCE-OPS-INVENTORY invalid SHA-256"
         }
         $null = $validated.Add([pscustomobject][ordered]@{
@@ -659,7 +659,7 @@ function Get-CgceAvailableFreeSpace([string]$VolumeRoot) {
     if ($null -ne $script:CgceTestFreeSpaceSeam) {
         $value = & $script:CgceTestFreeSpaceSeam $VolumeRoot
     } else {
-        if ($VolumeRoot -cnotmatch '^[A-Za-z]:\\$') {
+        if ($VolumeRoot -cnotmatch '^[A-Za-z]:\\\z') {
             throw "CGCE-OPS-DISK unsupported volume"
         }
         try {

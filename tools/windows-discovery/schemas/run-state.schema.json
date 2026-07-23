@@ -42,10 +42,14 @@
     },
     "run_id": {
       "type": "string",
+      "minLength": 34,
+      "maxLength": 34,
       "pattern": "^r-[0-9a-f]{32}$"
     },
     "maintenance_id": {
       "type": "string",
+      "minLength": 34,
+      "maxLength": 34,
       "pattern": "^m-[0-9a-f]{32}$"
     },
     "phase": {
@@ -337,7 +341,11 @@
         "properties": {
           "code": {
             "type": "string",
-            "pattern": "^CGCE-OPS-[A-Z0-9-]+$"
+            "minLength": 10,
+            "pattern": "^CGCE-OPS-[A-Z0-9-]+$",
+            "not": {
+              "pattern": "[\\r\\n]"
+            }
           },
           "at_utc": {
             "$ref": "#/definitions/strictUtc"
@@ -748,6 +756,8 @@
   "definitions": {
     "strictUtc": {
       "type": "string",
+      "minLength": 20,
+      "maxLength": 20,
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
     },
     "nonEmptyString": {
@@ -776,6 +786,8 @@
     },
     "checksum": {
       "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
       "pattern": "^[0-9a-f]{64}$"
     },
     "recoverySourceCreatedEvidence": {

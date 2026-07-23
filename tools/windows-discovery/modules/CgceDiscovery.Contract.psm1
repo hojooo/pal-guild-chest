@@ -148,15 +148,15 @@ $script:CgceHandoffPaths = @(
 [Array]::Sort($script:CgceHandoffPaths, [StringComparer]::Ordinal)
 
 function Test-CgceRunId([string]$Value) {
-    return $Value -cmatch '^r-[0-9a-f]{32}$'
+    return $Value -cmatch '^r-[0-9a-f]{32}\z'
 }
 
 function Test-CgceMaintenanceId([string]$Value) {
-    return $Value -cmatch '^m-[0-9a-f]{32}$'
+    return $Value -cmatch '^m-[0-9a-f]{32}\z'
 }
 
 function Test-CgceChecksum($Value) {
-    return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}$'
+    return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}\z'
 }
 
 function Get-CgceSha256([string]$Path) {
@@ -213,7 +213,7 @@ function Read-CgceJsonStringToken($Parser) {
                         throw "CGCE-OPS-JSON incomplete unicode escape"
                     }
                     $hex = $Parser.Text.Substring($Parser.Position, 4)
-                    if ($hex -cnotmatch '^[0-9A-Fa-f]{4}$') {
+                    if ($hex -cnotmatch '^[0-9A-Fa-f]{4}\z') {
                         throw "CGCE-OPS-JSON invalid unicode escape"
                     }
                     $Parser.Position += 4
@@ -224,7 +224,7 @@ function Read-CgceJsonStringToken($Parser) {
                             throw "CGCE-OPS-JSON unpaired high surrogate"
                         }
                         $lowHex = $Parser.Text.Substring($Parser.Position + 2, 4)
-                        if ($lowHex -cnotmatch '^[0-9A-Fa-f]{4}$') {
+                        if ($lowHex -cnotmatch '^[0-9A-Fa-f]{4}\z') {
                             throw "CGCE-OPS-JSON invalid low surrogate"
                         }
                         $low = [Convert]::ToInt32($lowHex, 16)
@@ -497,7 +497,7 @@ function Assert-CgceExactKeys($Value, [string[]]$Expected, [string]$Code) {
 }
 
 function Assert-CgceStrictUtc([string]$Value, [string]$Code) {
-    if ($Value -cnotmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$') {
+    if ($Value -cnotmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\z') {
         throw "$Code timestamp must be strict UTC"
     }
     $parsed = [DateTime]::MinValue
@@ -707,7 +707,7 @@ function Assert-CgceHandoffSource([string]$HandoffRoot, [string]$ManifestPath) {
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::Ordinal)
     for ($index = 0; $index -lt $lines.Count; $index += 1) {
         $line = $lines[$index]
-        if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9._/-]+)$') {
+        if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9._/-]+)\z') {
             throw "CGCE-OPS-CHECKSUM malformed handoff manifest record"
         }
         $checksum = $Matches[1]
@@ -716,7 +716,7 @@ function Assert-CgceHandoffSource([string]$HandoffRoot, [string]$ManifestPath) {
             -not $seen.Add($relative) -or
             $relative.Contains('\') -or $relative.StartsWith('/') -or
             $relative.StartsWith('//') -or $relative -cmatch '^[A-Za-z]:' -or
-            $relative -cmatch '(^|/)\.{1,2}(/|$)' -or
+            $relative -cmatch '(^|/)\.{1,2}(?:/|\z)' -or
             $relative -cmatch '//') {
             throw "CGCE-OPS-CHECKSUM invalid, unknown, missing, duplicate, or unsorted handoff path"
         }
@@ -836,7 +836,7 @@ function Assert-CgceStateShape($State) {
     foreach ($errorRecord in @($State.errors)) {
         Assert-CgceExactKeys $errorRecord @("code", "at_utc") "CGCE-OPS-JSON"
         if ($errorRecord.code -isnot [string] -or
-            $errorRecord.code -cnotmatch '^CGCE-OPS-[A-Z0-9-]+$') {
+            $errorRecord.code -cnotmatch '^CGCE-OPS-[A-Z0-9-]+\z') {
             throw "CGCE-OPS-JSON invalid stable error code"
         }
         $null = Assert-CgceStrictUtc $errorRecord.at_utc "CGCE-OPS-JSON"
@@ -1502,7 +1502,7 @@ function Block-CgceRunState(
     [string]$StatePath,
     [string]$Code
 ) {
-    if ($Code -cnotmatch '^CGCE-OPS-[A-Z0-9-]+$') {
+    if ($Code -cnotmatch '^CGCE-OPS-[A-Z0-9-]+\z') {
         throw "CGCE-OPS-BLOCKED invalid stable error code"
     }
     $state = Read-CgceJsonObject -Path $StatePath
