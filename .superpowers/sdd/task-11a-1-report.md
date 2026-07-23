@@ -101,3 +101,42 @@ macOS host has no PowerShell runtime. The highest residual risk is a Windows
 PowerShell 5.1 syntax/runtime compatibility defect in the custom parser or
 filesystem semantics. Run the required Windows suite before Task 11A.2 relies
 on these interfaces or any real server workflow begins.
+
+## Review-fix evidence — 2026-07-23
+
+Three Important review findings were addressed in a separate scoped fix:
+
+1. `Assert-CgceStateShape` now accepts `ue4ss_version` only when it is `null`
+   or the exact case-sensitive string `3.0.1`. Regression coverage accepts
+   `3.0.1` and rejects `3.0.10`, `V3.0.1`, and `3.0.1 `.
+2. `Assert-CgceRunMarker` now invokes the existing full immutable
+   genesis/current identity comparison. Regression coverage independently
+   changes a bound checksum, one recorded path, and the process-image list.
+3. `Write-CgceRunState` post-replacement confirmation now reopens through a
+   private test seam. Behavior tests call the public writer, prove a successful
+   replacement/reopen with revision `1`, keep the pre-replacement file handle
+   readable while the path resolves the replacement, and inject a reopen
+   failure after replacement. The failure is surfaced while `run-state.json`
+   remains present, the new revision is readable after reimport, and no temp
+   path remains.
+
+Tests were written before these production changes. The required Windows RED
+and GREEN commands were each attempted:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\windows\Run-CgceDiscoveryTests.ps1
+zsh:1: command not found: powershell.exe
+exit 127
+```
+
+The suite now contains 22 PowerShell contract tests, but none can execute on
+this macOS host. Available post-fix verification:
+
+- `./scripts/run-tests.sh` — exit 0; full Lua suite passed.
+- `git diff --check` — exit 0.
+- `jq empty tools/windows-discovery/schemas/control-evidence.schema.json tools/windows-discovery/schemas/run-state.schema.json`
+  — exit 0.
+
+Residual risk remains unchanged: run the unchanged suite under Windows
+PowerShell 5.1 before another task consumes these contracts or any real-server
+operation begins.

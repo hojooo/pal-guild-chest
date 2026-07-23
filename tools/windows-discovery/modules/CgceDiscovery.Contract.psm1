@@ -796,11 +796,16 @@ function Assert-CgceStateShape($State) {
             throw "CGCE-OPS-CHECKSUM invalid run-state checksum"
         }
     }
-    foreach ($field in @("palserver_executable", "ue4ss_version")) {
+    foreach ($field in @("palserver_executable")) {
         if ($null -ne $State.$field -and
             ($State.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($State.$field))) {
             throw "CGCE-OPS-JSON invalid run-state string"
         }
+    }
+    if ($null -ne $State.ue4ss_version -and
+        ($State.ue4ss_version -isnot [string] -or
+            $State.ue4ss_version -cne "3.0.1")) {
+        throw "CGCE-OPS-JSON unsupported run-state UE4SS version"
     }
     Assert-CgceUniqueStrings $State.server_process_paths $true "CGCE-OPS-JSON"
     Assert-CgceDenseArray $State.listener_ports "CGCE-OPS-JSON"
@@ -1119,7 +1124,7 @@ function Confirm-CgceRunStateReadBack(
     [int64]$ExpectedRevision,
     [string]$ExpectedPhase
 ) {
-    $readBack = Read-CgceJsonObject -Path $StatePath
+    $readBack = Read-CgceRunStateAfterReplace -Path $StatePath
     Assert-CgceStateShape $readBack
     $actualChecksum = Get-CgceSha256 -Path $StatePath
     if ($actualChecksum -cne $expectedChecksum -or
@@ -1127,6 +1132,10 @@ function Confirm-CgceRunStateReadBack(
         $readBack.phase -cne $ExpectedPhase) {
         throw "CGCE-OPS-CHECKSUM run-state read-back mismatch"
     }
+}
+
+function Read-CgceRunStateAfterReplace([string]$Path) {
+    return Read-CgceJsonObject -Path $Path
 }
 
 function Get-CgceCanonicalForIdentity([string]$Path) {
@@ -1180,6 +1189,7 @@ function Assert-CgceRunMarker($State, [switch]$AllowCompleted) {
     }
     $genesis = Read-CgceJsonObject -Path $State.paths.genesis_state
     Assert-CgceStateShape $genesis
+    Assert-CgceStateIdentity $genesis $current
     if ($genesis.run_id -cne $State.run_id -or
         $genesis.maintenance_id -cne $State.maintenance_id) {
         throw "CGCE-OPS-ID marker/genesis/current identity mismatch"

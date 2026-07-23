@@ -90,6 +90,41 @@ function Write-CgceContractTestControl([string]$Path, $Value) {
     Write-CgceContractTestUtf8 -Path $Path -Text ($Value | ConvertTo-Json -Depth 8)
 }
 
+function New-CgceContractTestMarkerFixture([string]$Root) {
+    $paths = New-CgceContractTestPaths $Root
+    New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
+    New-Item -ItemType Directory -Path $paths.server_root | Out-Null
+    $state = New-CgceRunState `
+        -RunId "r-0123456789abcdef0123456789abcdef" `
+        -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+        -Paths $paths
+    $state.bundle_checksum = ("a" * 64)
+    $state.control_evidence_checksum = ("b" * 64)
+    $state.palserver_executable = (Join-Path $paths.server_root "PalServer.exe")
+    $state.palserver_executable_checksum = ("c" * 64)
+    $state.ue4ss_version = "3.0.1"
+    $state.server_process_paths = @(
+        (Join-Path $paths.server_root "PalServer.exe"),
+        (Join-Path $paths.server_root "Pal\Binaries\Win64\PalServer-Win64-Test-Cmd.exe")
+    )
+    $state.ue4ss_dll_checksum = ("d" * 64)
+    $state.listener_ports = @(8211, 27015)
+    Write-CgceJsonAtomic $state $paths.genesis_state
+    Write-CgceJsonAtomic $state $paths.state
+    $marker = [pscustomobject][ordered]@{
+        schema_version = "1.0"
+        kind = "cgce_windows_discovery_run_marker"
+        run_id = $state.run_id
+        run_root = $state.paths.run_root
+        genesis_state_checksum = (Get-CgceSha256 $paths.genesis_state)
+    }
+    Write-CgceJsonAtomic $marker $paths.active_run_marker
+    return [pscustomobject]@{
+        paths = $paths
+        state = $state
+    }
+}
+
 Invoke-CgceTest "accepts only fixed run ids" {
     Assert-CgceEqual $true (Test-CgceRunId "r-0123456789abcdef0123456789abcdef")
     Assert-CgceEqual $false (Test-CgceRunId "r-0123456789ABCDEF0123456789abcdef")
@@ -292,7 +327,49 @@ Invoke-CgceTest "new run state has every exact field and state replacement incre
     }
 }
 
-Invoke-CgceTest "run-state post-replace read-back rejects checksum drift" {
+Invoke-CgceTest "run-state replacement reopens new state while preserving the old file handle" {
+    $root = New-CgceContractTestRoot
+    $oldHandle = $null
+    try {
+        $paths = New-CgceContractTestPaths $root
+        New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
+        New-Item -ItemType Directory -Path $paths.server_root | Out-Null
+        $state = New-CgceRunState `
+            -RunId "r-0123456789abcdef0123456789abcdef" `
+            -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+            -Paths $paths
+        Write-CgceJsonAtomic $state $paths.genesis_state
+        Write-CgceJsonAtomic $state $paths.state
+        $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+        $oldHandle = [System.IO.File]::Open(
+            $paths.state,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            $share
+        )
+
+        $state = Set-CgceRunPhase $state "CREATED" "BACKUP_VERIFIED"
+        Write-CgceRunState -State $state -StatePath $paths.state -ExpectedPhase "CREATED"
+
+        Assert-CgceEqual $true (Test-Path -LiteralPath $paths.state -PathType Leaf)
+        Assert-CgceEqual $false (Test-Path -LiteralPath ($paths.state + ".tmp"))
+        $reopened = Read-CgceRunState -RunRoot $root -RunId $state.run_id
+        Assert-CgceEqual "BACKUP_VERIFIED" $reopened.phase
+        Assert-CgceEqual 1 $reopened.revision
+
+        $oldHandle.Position = 0
+        $oldBytes = New-Object byte[] $oldHandle.Length
+        $null = $oldHandle.Read($oldBytes, 0, $oldBytes.Length)
+        $oldText = ([System.Text.UTF8Encoding]::new($false, $true)).GetString($oldBytes)
+        Assert-CgceEqual $true $oldText.Contains("CREATED")
+        Assert-CgceEqual $false $oldText.Contains("BACKUP_VERIFIED")
+    } finally {
+        if ($null -ne $oldHandle) { $oldHandle.Dispose() }
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "run-state replacement surfaces an injected reopen failure without deleting state" {
     $root = New-CgceContractTestRoot
     try {
         $paths = New-CgceContractTestPaths $root
@@ -302,19 +379,29 @@ Invoke-CgceTest "run-state post-replace read-back rejects checksum drift" {
             -RunId "r-0123456789abcdef0123456789abcdef" `
             -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
             -Paths $paths
+        Write-CgceJsonAtomic $state $paths.genesis_state
         Write-CgceJsonAtomic $state $paths.state
+        $state = Set-CgceRunPhase $state "CREATED" "BACKUP_VERIFIED"
+
         $module = Get-Module "CgceDiscovery.Contract"
-        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
-            & $module {
-                param($StatePath)
-                Confirm-CgceRunStateReadBack `
-                    -StatePath $StatePath `
-                    -ExpectedChecksum ("f" * 64) `
-                    -ExpectedRevision 0 `
-                    -ExpectedPhase "CREATED"
-            } $paths.state
+        & $module {
+            Set-Item -Path Function:script:Read-CgceRunStateAfterReplace -Value {
+                param([string]$Path)
+                throw "CGCE-OPS-JSON injected read-back failure"
+            }
         }
+        Assert-CgceThrows "CGCE-OPS-JSON" {
+            Write-CgceRunState -State $state -StatePath $paths.state -ExpectedPhase "CREATED"
+        }
+        Assert-CgceEqual $true (Test-Path -LiteralPath $paths.state -PathType Leaf)
+        Assert-CgceEqual $false (Test-Path -LiteralPath ($paths.state + ".tmp"))
+
+        Import-Module "$PSScriptRoot\..\..\tools\windows-discovery\modules\CgceDiscovery.Contract.psm1" -Force
+        $persisted = Read-CgceRunState -RunRoot $root -RunId $state.run_id
+        Assert-CgceEqual "BACKUP_VERIFIED" $persisted.phase
+        Assert-CgceEqual 1 $persisted.revision
     } finally {
+        Import-Module "$PSScriptRoot\..\..\tools\windows-discovery\modules\CgceDiscovery.Contract.psm1" -Force
         Remove-Item -LiteralPath $root -Recurse -Force
     }
 }
@@ -382,6 +469,33 @@ Invoke-CgceTest "run-state rejects identity drift non-monotonic revision and ear
     }
 }
 
+Invoke-CgceTest "run-state accepts only null or exact UE4SS 3.0.1" {
+    $root = New-CgceContractTestRoot
+    try {
+        $paths = New-CgceContractTestPaths $root
+        New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
+        New-Item -ItemType Directory -Path $paths.server_root | Out-Null
+        $state = New-CgceRunState `
+            -RunId "r-0123456789abcdef0123456789abcdef" `
+            -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+            -Paths $paths
+        $state.ue4ss_version = "3.0.1"
+        Write-CgceJsonAtomic $state $paths.genesis_state
+        Write-CgceJsonAtomic $state $paths.state
+        Assert-CgceEqual "3.0.1" (Read-CgceRunState $root $state.run_id).ue4ss_version
+
+        foreach ($invalid in @("3.0.10", "V3.0.1", "3.0.1 ")) {
+            $state.ue4ss_version = $invalid
+            Write-CgceContractTestUtf8 $paths.state ($state | ConvertTo-Json -Depth 12)
+            Assert-CgceThrows "CGCE-OPS-JSON" {
+                Read-CgceRunState $root $state.run_id
+            }
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
 Invoke-CgceTest "run marker binds the immutable genesis and has exactly one location" {
     $root = New-CgceContractTestRoot
     try {
@@ -412,6 +526,51 @@ Invoke-CgceTest "run marker binds the immutable genesis and has exactly one loca
         Write-CgceContractTestUtf8 $paths.genesis_state "{}"
         Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
             Assert-CgceRunMarker -State $state -AllowCompleted
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "run marker rejects immutable checksum identity drift" {
+    $root = New-CgceContractTestRoot
+    try {
+        $fixture = New-CgceContractTestMarkerFixture $root
+        $fixture.state.bundle_checksum = ("e" * 64)
+        Write-CgceContractTestUtf8 $fixture.paths.state ($fixture.state | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Assert-CgceRunMarker -State $fixture.state
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "run marker rejects immutable path identity drift" {
+    $root = New-CgceContractTestRoot
+    try {
+        $fixture = New-CgceContractTestMarkerFixture $root
+        $fixture.state.paths.capture = (Join-Path $fixture.paths.run_directory "other-capture")
+        Write-CgceContractTestUtf8 $fixture.paths.state ($fixture.state | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Assert-CgceRunMarker -State $fixture.state
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "run marker rejects immutable process-list identity drift" {
+    $root = New-CgceContractTestRoot
+    try {
+        $fixture = New-CgceContractTestMarkerFixture $root
+        $fixture.state.server_process_paths = @(
+            $fixture.state.server_process_paths[0],
+            (Join-Path $fixture.paths.server_root "unexpected.exe")
+        )
+        Write-CgceContractTestUtf8 $fixture.paths.state ($fixture.state | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Assert-CgceRunMarker -State $fixture.state
         }
     } finally {
         Remove-Item -LiteralPath $root -Recurse -Force
