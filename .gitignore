@@ -12,3 +12,6 @@ third_party/lua-5.4.8/src/luac
 
 # Reproducible release archives are generated artifacts.
 /dist/
+
+# Local isolated implementation worktrees.
+/.worktrees/
