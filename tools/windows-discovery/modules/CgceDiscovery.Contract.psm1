@@ -12,8 +12,6 @@ $script:CgceNextPhase = @{
     CLONE_ACTIVE = "PROBE_STAGED"
     PROBE_STAGED = "RUNNING"
     RUNNING = "CAPTURED"
-    CAPTURED = "RESTORING"
-    RESTORING = "RESTORED"
     RESTORED = "EXPORTED"
 }
 
@@ -1075,8 +1073,6 @@ function Assert-CgceTransitionCheckpointFields(
         "CLONE_ACTIVE" { @("probe") }
         "PROBE_STAGED" { @() }
         "RUNNING" { @("process.launch", "process.result", "capture") }
-        "CAPTURED" { @() }
-        "RESTORING" { @("inventory.restored") }
         "RESTORED" { @() }
         default { throw "CGCE-OPS-PHASE unsupported normal transition" }
     }
@@ -1243,8 +1239,7 @@ function Get-CgceTextSha256([string]$Text) {
 
 function Write-CgceJsonAtomic(
     $Value,
-    [string]$Path,
-    [string]$ExpectedExistingSha256 = ""
+    [string]$Path
 ) {
     $parent = Split-Path -Parent $Path
     if ([string]::IsNullOrWhiteSpace($parent) -or
@@ -1255,43 +1250,61 @@ function Write-CgceJsonAtomic(
     if (Test-Path -LiteralPath $temp) {
         throw "CGCE-OPS-OUTPUT-EXISTS temp exists"
     }
-    $targetExists = Test-Path -LiteralPath $Path -PathType Leaf
-    if (-not $targetExists -and (Test-Path -LiteralPath $Path)) {
+    if (Test-Path -LiteralPath $Path) {
         throw "CGCE-OPS-OUTPUT-EXISTS destination exists"
-    }
-    if ($targetExists -and $ExpectedExistingSha256 -eq "") {
-        throw "CGCE-OPS-OUTPUT-EXISTS destination exists"
-    }
-    if ($ExpectedExistingSha256 -ne "") {
-        if ((Split-Path -Leaf $Path) -cne "run-state.json") {
-            throw "CGCE-OPS-CHECKSUM compare-and-swap is restricted to run-state.json"
-        }
-        if (-not (Test-CgceChecksum $ExpectedExistingSha256)) {
-            throw "CGCE-OPS-CHECKSUM invalid compare-and-swap checksum"
-        }
-        if (-not $targetExists) {
-            throw "CGCE-OPS-CHECKSUM expected existing file"
-        }
-        if ((Get-CgceSha256 -Path $Path) -cne $ExpectedExistingSha256) {
-            throw "CGCE-OPS-CHECKSUM compare-and-swap mismatch"
-        }
-        $existingState = Read-CgceJsonObject -Path $Path
-        Assert-CgceStateShape $existingState
-        Assert-CgceStateShape $Value
-        Assert-CgceCheckpointEvidence $existingState
-        Assert-CgceCheckpointEvidence $Value
     }
     $json = ConvertTo-CgceJsonText $Value
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($temp, $json, $utf8NoBom)
-    if ($targetExists) {
-        if ((Get-CgceSha256 -Path $Path) -cne $ExpectedExistingSha256) {
-            throw "CGCE-OPS-CHECKSUM compare-and-swap mismatch"
-        }
-        [System.IO.File]::Replace($temp, $Path, $null, $true)
-    } else {
-        [System.IO.File]::Move($temp, $Path)
+    if (Test-Path -LiteralPath $Path) {
+        throw "CGCE-OPS-OUTPUT-EXISTS destination exists"
     }
+    [System.IO.File]::Move($temp, $Path)
+}
+
+function Replace-CgceRunStateJson(
+    $Value,
+    [string]$Path,
+    [string]$ExpectedStateChecksum
+) {
+    $parent = Split-Path -Parent $Path
+    if ([string]::IsNullOrWhiteSpace($parent) -or
+        -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "CGCE-OPS-JSON output parent is missing"
+    }
+    if ((Split-Path -Leaf $Path) -cne "run-state.json") {
+        throw "CGCE-OPS-CHECKSUM state replacement is restricted to run-state.json"
+    }
+    if (-not (Test-CgceChecksum $ExpectedStateChecksum)) {
+        throw "CGCE-OPS-CHECKSUM invalid state replacement checksum"
+    }
+    $temp = Join-Path $parent ((Split-Path -Leaf $Path) + ".tmp")
+    if (Test-Path -LiteralPath $temp) {
+        throw "CGCE-OPS-OUTPUT-EXISTS temp exists"
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        if (Test-Path -LiteralPath $Path) {
+            throw "CGCE-OPS-OUTPUT-EXISTS destination exists"
+        }
+        throw "CGCE-OPS-CHECKSUM expected existing run-state"
+    }
+    if ((Get-CgceSha256 -Path $Path) -cne $ExpectedStateChecksum) {
+        throw "CGCE-OPS-CHECKSUM state replacement mismatch"
+    }
+    $existingState = Read-CgceJsonObject -Path $Path
+    Assert-CgceStateShape $existingState
+    Assert-CgceStateShape $Value
+    Assert-CgceCheckpointEvidence $existingState
+    Assert-CgceCheckpointEvidence $Value
+
+    $json = ConvertTo-CgceJsonText $Value
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($temp, $json, $utf8NoBom)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or
+        (Get-CgceSha256 -Path $Path) -cne $ExpectedStateChecksum) {
+        throw "CGCE-OPS-CHECKSUM state replacement mismatch"
+    }
+    [System.IO.File]::Replace($temp, $Path, $null, $true)
 }
 
 function Write-CgceRunState(
@@ -1349,7 +1362,8 @@ function Write-CgceRunState(
         $script:CgceNextPhase[$ExpectedPhase] -ceq $State.phase -and
         $old.outcome -ceq "ACTIVE" -and
         $State.outcome -ceq $expectedOutcome
-    $validBlock = $State.phase -ceq $ExpectedPhase -and
+    $validBlock = $ExpectedPhase -cne "RESTORING" -and
+        $State.phase -ceq $ExpectedPhase -and
         $old.outcome -ceq "ACTIVE" -and
         $State.outcome -ceq "BLOCKED"
     if (-not $validTransition -and -not $validBlock) {
@@ -1393,10 +1407,10 @@ function Write-CgceRunState(
             "before-state-replace" `
             $persistenceContext
     }
-    Write-CgceJsonAtomic `
+    Replace-CgceRunStateJson `
         -Value $State `
         -Path $StatePath `
-        -ExpectedExistingSha256 $oldChecksum
+        -ExpectedStateChecksum $oldChecksum
     if ($null -ne $script:CgceTestStatePersistenceSeam) {
         $null = & $script:CgceTestStatePersistenceSeam `
             "after-state-replace" `
@@ -1527,6 +1541,9 @@ function Block-CgceRunState(
     Assert-CgceStateShape $state
     Assert-CgceCheckpointEvidence $state
     Assert-CgceStateIdentity $genesis $state
+    if ($state.phase -ceq "RESTORING") {
+        throw "CGCE-OPS-PHASE recovery blocking requires fixed-purpose authority"
+    }
     if ($state.outcome -cne "ACTIVE") {
         throw "CGCE-OPS-PHASE only ACTIVE state can become BLOCKED"
     }

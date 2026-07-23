@@ -238,20 +238,15 @@ Result: all exit `0`; the package verifier printed
 
 Static correction scans found no remaining `$`-anchored .NET regex in the
 PowerShell production or Windows test files, no unsupported `\z` in either
-Draft-07 schema, and no recovery-state writer in production or tests. The
+Draft-07 schema, and no fixed-purpose recovery-state writer in production or
+tests. The
 Windows suite now contains `102` static `Invoke-CgceTest` cases.
 
 The existing direct recovery-checkpoint test was renamed to state explicitly
-that it validates source profiles without granting persistence authority. No
-recovery writer was implemented: Task 6 now has a blocking design/RED gate for
-the full exact restore-intent schema, all seven source phases under both
-`ACTIVE` and `BLOCKED`, fresh disk authority, the receipt-free initial CAS,
-strict read-back, and drift rejection. Its future initial and completion
-writers are fixed-purpose and output-free (`-> void`); the intent binds the
-exact source-state preimage, while completion derives the restored checksum
-from fresh final evidence. The gate also requires resumable no-overwrite
-restored-inventory and final-journal helpers before a state-only completion
-CAS. The normal phase DAG and writer remain unchanged.
+that it validates source profiles without itself granting persistence
+authority. A later authority review found that the still-normal phase map and
+public generic JSON CAS nevertheless left a recovery persistence bypass. That
+bypass is closed in the recovery-authority correction round below.
 
 The documented Windows command was rerun:
 
@@ -263,3 +258,87 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
 Result: exit `127` because `powershell.exe` is not installed on this macOS
 host. Elevated Windows PowerShell 5.1 execution remains the mandatory residual
 gate.
+
+## Recovery-authority correction round
+
+This round makes recovery persistence exclusively fixed-purpose:
+
+- `Set-CgceRunPhase`, `Write-CgceRunState`, and the normal checkpoint-field
+  validator no longer contain either recovery edge. The normal writer retains
+  only prepare/invoke transitions through `CAPTURED` and the post-restore
+  `RESTORED` to `EXPORTED` transition.
+- `Write-CgceRunState` and `Block-CgceRunState` reject same-phase blocking at
+  `RESTORING`. Future output-free `Block-CgceRecoveryRunState`, with explicit
+  `StatePath`, `RecoveryIntentPath`, and stable `Code`, is the sole writer of
+  the legal caught-failure revision + 2 form. Same-phase blocking remains legal
+  at `CAPTURED` and `RESTORED` under the existing lock/active-marker protocol.
+- exported `Write-CgceJsonAtomic` is create-only and has no replacement
+  checksum parameter. The unexported `Replace-CgceRunStateJson` accepts only
+  `run-state.json`, validates old/new state shape and checkpoint evidence,
+  preserves temp/no-overwrite behavior, rechecks the old checksum, and is
+  called only by fixed-purpose Contract state writers.
+- the Task 6 gate now defines the exact legal `RESTORING` resume deltas,
+  reserves completed-marker tolerance for the freshly revalidated `RESTORED`
+  branch, and requires a fresh process/listener check inside every mutating
+  helper immediately before each write, move, replace, final journal write,
+  completion CAS, or marker move. The three future output-free recovery writers
+  are explicitly Contract exports; filesystem and journal helpers remain
+  private to Restore. A Contract-private, state-derived inactivity validator
+  owns checks for those three writers without importing Runtime or accepting a
+  caller-supplied bypass; Task 6 must RED-test parity with Runtime before
+  implementing either validator path.
+
+Portable RED command:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+```
+
+The first RED exited `1` after the first three handoff tests passed. The new
+recovery-authority test failed at the still-present normal
+`CAPTURED`/`RESTORING` edge (`expected nil, got 403`). After removing the two
+edges and splitting the JSON writers, a second RED exited `1` at the missing
+normal-block guard (`expected true, got false`). Fresh diff review then exposed
+that the revision + 2 writer had no input for the actual failure code; a third
+RED exited `1` at the missing explicit
+`Block-CgceRecoveryRunState ... -Code` contract (`expected true, got false`).
+A re-review then caught an unmatched catch/finally and StrictMode-uninitialized
+lock/path variables in the Task 6 skeleton; a fourth RED exited `1` at the
+missing null initialization plus enclosing `try` contract (`expected true, got
+false`). These are the intended failures for the independently identified
+authority and recovery-skeleton paths.
+
+Focused portable GREEN:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+```
+
+Result: exit `0`; `4` passed.
+
+Full portable, package, and schema verification:
+
+```text
+./scripts/run-tests.sh
+./scripts/verify-package.sh discovery
+jq empty tools/windows-discovery/schemas/control-evidence.schema.json \
+  tools/windows-discovery/schemas/run-state.schema.json
+```
+
+Result: all exit `0`; package verification printed
+`DISCOVERY_PACKAGE_VERIFIED`. The Windows suite now contains `106` static
+`Invoke-CgceTest` cases. Added Windows tests cover the exact public parameter
+surface, unexported raw-state CAS rejection, existing-temp and checksum-drift
+preservation through the fixed state writer, both recovery edges under
+`ACTIVE` and `BLOCKED`, the `RESTORING` block prohibition, and retained
+`CAPTURED`/`RESTORED` checkpoint blocking.
+
+The documented Windows command was rerun:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+  .\tests\windows\Run-CgceDiscoveryTests.ps1
+```
+
+Result: exit `127` because `powershell.exe` is not installed on this macOS
+host. Elevated Windows PowerShell 5.1 execution remains mandatory.

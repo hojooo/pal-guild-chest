@@ -34,9 +34,10 @@ plain-PowerShell synthetic tests.
 - Task 11A export는 Gate A authority, mutation authority 또는 release evidence가 아니다.
 - 실제 save, credential, server password, administrator/RCON/REST secret은
   source, test fixture, handoff ZIP, evidence ZIP에 넣지 않는다.
-- immutable artifact output은 no-overwrite이며 실패 시 original, backup,
-  clone을 보존한다. `run-state.json`만 checksum compare-and-swap으로 교체하고
-  server-global lock file은 OS handle ownership에 재사용한다.
+- immutable artifact output은 public create-only JSON writer를 사용하며
+  no-overwrite이다. 실패 시 original, backup, clone을 보존한다.
+  `run-state.json`만 Contract-private run-state CAS로 교체하고 server-global
+  lock file은 OS handle ownership에 재사용한다.
 - PowerShell-only atomic replace와 read-back은 process crash/replay를 다루지만
   전원 상실 시 directory-entry durability까지 보장하지 않는다. 모호한
   power-loss 상태는 자동 추론하지 않고 manual recovery로 차단한다.
@@ -56,8 +57,13 @@ Assert-CgceHandoffSource -HandoffRoot <string> -ManifestPath <string> -> void
 New-CgceRunState -RunId <string> -MaintenanceId <string> -Paths <PSCustomObject> -> PSCustomObject
 Read-CgceRunState -RunRoot <string> -RunId <string> -> PSCustomObject
 Set-CgceRunPhase -State <PSCustomObject> -ExpectedPhase <string> -NextPhase <string> -> PSCustomObject
-Write-CgceJsonAtomic -Value <object> -Path <string> [-ExpectedExistingSha256 <string>] -> void
+Write-CgceJsonAtomic -Value <object> -Path <string> -> void
 Write-CgceRunState -State <PSCustomObject> -StatePath <string> -ExpectedPhase <string> -> void
+# Task 6 future output-free Contract exports:
+Write-CgceRecoveryRunState -StatePath <string> -RecoveryIntentPath <string> -> void
+Block-CgceRecoveryRunState -StatePath <string>
+  -RecoveryIntentPath <string> -Code <string> -> void
+Complete-CgceRecoveryRunState -StatePath <string> -RecoveryIntentPath <string> -> void
 Write-CgceActiveRunMarker -State <PSCustomObject> -GenesisStateChecksum <string> -Path <string> -> void
 Block-CgceRunState -StatePath <string> -Code <string> -> PSCustomObject
 Enter-CgceExclusiveLock -ServerRoot <string> -RunId <string> -> FileStream
@@ -88,6 +94,20 @@ Enable-CgceInventoryProbe -Ue4ssRoot <string> -ProbeSource <string> -RunDirector
 Restore-CgceInventoryProbe -Paths <PSCustomObject> -RunDirectory <string> -RunId <string> [-ExpectedFinalReceiptChecksum <string>] -> void
 Invoke-CgceChildProcess -Executable <string> -ExpectedExecutableChecksum <string> -AllowedExecutablePaths <string[]> -Arguments <string[]> -ReceiptRoot <string> -TimeoutSeconds <int> -> PSCustomObject
 ```
+
+`Write-CgceJsonAtomic` is the public create-only JSON writer; it has no replace
+or checksum-CAS parameter. `Replace-CgceRunStateJson` is the Contract-private
+run-state CAS. It is not exported and accepts only an already validated
+`run-state.json` candidate from fixed-purpose Contract writers.
+Task 6 will add the output-free Contract exports
+`Write-CgceRecoveryRunState -StatePath <string> -RecoveryIntentPath <string>
+-> void`,
+`Block-CgceRecoveryRunState -StatePath <string> -RecoveryIntentPath <string>
+-Code <string> -> void`, and
+`Complete-CgceRecoveryRunState -StatePath <string> -RecoveryIntentPath <string>
+-> void`. Those fixed-purpose exports may use the private state CAS after their
+own fresh authority validation; Restore-private filesystem and journal helpers
+must not call it directly.
 
 ### Entry points
 
@@ -264,8 +284,6 @@ $script:CgceNextPhase = @{
     CLONE_ACTIVE = "PROBE_STAGED"
     PROBE_STAGED = "RUNNING"
     RUNNING = "CAPTURED"
-    CAPTURED = "RESTORING"
-    RESTORING = "RESTORED"
     RESTORED = "EXPORTED"
 }
 
@@ -311,27 +329,30 @@ function Set-CgceRunPhase($State, [string]$ExpectedPhase, [string]$NextPhase) {
 
 function Write-CgceJsonAtomic(
     $Value,
-    [string]$Path,
-    [string]$ExpectedExistingSha256 = ""
+    [string]$Path
 ) {
     $parent = Split-Path -Parent $Path
     $temp = Join-Path $parent ((Split-Path -Leaf $Path) + ".tmp")
     if (Test-Path -LiteralPath $temp) { throw "CGCE-OPS-OUTPUT-EXISTS temp exists" }
+    if (Test-Path -LiteralPath $Path) {
+        throw "CGCE-OPS-OUTPUT-EXISTS destination exists"
+    }
     $json = $Value | ConvertTo-Json -Depth 12
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($temp, $json, $utf8NoBom)
     if (Test-Path -LiteralPath $Path) {
-        if ($ExpectedExistingSha256 -eq "" -or
-            (Get-CgceSha256 -Path $Path) -ne $ExpectedExistingSha256) {
-            throw "CGCE-OPS-CHECKSUM compare-and-swap mismatch"
-        }
-        [System.IO.File]::Replace($temp, $Path, $null, $true)
-    } else {
-        if ($ExpectedExistingSha256 -ne "") {
-            throw "CGCE-OPS-CHECKSUM expected existing file"
-        }
-        Move-Item -LiteralPath $temp -Destination $Path
+        throw "CGCE-OPS-OUTPUT-EXISTS destination exists"
     }
+    [System.IO.File]::Move($temp, $Path)
+}
+
+function Replace-CgceRunStateJson(
+    $Value,
+    [string]$Path,
+    [string]$ExpectedStateChecksum
+) {
+    # Contract-private: exact run-state leaf, old/new state shape and checkpoint
+    # validation, two checksum comparisons, temp no-overwrite, File.Replace.
 }
 
 Export-ModuleMember -Function @(
@@ -359,15 +380,18 @@ excessive depth/size, and trailing input. Add tests for `{}`, `[{}]`, `"x"`,
 `["x"]`, duplicate/case-variant keys, one-element argument arrays, and malformed
 UTF-8.
 
-The final implementation must use `ExpectedExistingSha256` only for
-compare-and-swap replacement of an already validated `run-state.json`.
+The final implementation keeps `Write-CgceJsonAtomic` strictly create-only.
 `Write-CgceRunState` must re-read the on-disk state, validate `run_id`,
 `maintenance_id`, schema, and `ExpectedPhase`, then pass the old file checksum
-to `Write-CgceJsonAtomic`. It must re-open the replaced file, parse it, and
-verify the expected revision/phase/checksum before returning. No other output
-path may be overwritten. Add crash-point tests for an existing temp file,
-checksum drift, initial create, successful state replacement, and failed
-read-back; no test may observe a delete-before-replace gap. Raw output must not
+to the unexported `Replace-CgceRunStateJson`. That private primitive rejects
+non-state values and non-`run-state.json` paths, validates old/new state shape
+and checkpoint evidence, rechecks the old checksum before replacement, and
+retains temp/no-overwrite safeguards. The fixed-purpose writer must re-open the
+replaced file, parse it, and verify the expected revision/phase/checksum before
+returning. No other output path may be overwritten. Add crash-point tests for
+an existing temp file, checksum drift, initial create, successful state
+replacement, failed read-back, the public parameter surface, and raw private-CAS
+rejection; no test may observe a delete-before-replace gap. Raw output must not
 begin with the UTF-8 BOM bytes `EF BB BF`.
 
 - [ ] **Step 4: Add exact JSON schema fixtures and control-evidence validation**
@@ -1160,15 +1184,22 @@ deactivation과 clone activation을 state-bound operation으로 만든다.
 - `inventory_checksums.original` is part of immutable genesis/current
   identity. Every already non-null inventory, receipt, and capture checksum is
   immutable; errors are append-only; outcome is monotonic. The normal state
-  writer retains the existing phase DAG and a transition may introduce only
-  its checkpoint fields. A committed `CREATED` state requires original
+  writer supports only prepare/invoke transitions through `CAPTURED` and the
+  post-restore `RESTORED` to `EXPORTED` transition; it has no transition into
+  `RESTORING` or from `RESTORING` to `RESTORED`. A normal transition may
+  introduce only its checkpoint fields. A committed `CREATED` state requires original
   evidence, `BACKUP_VERIFIED` requires backup,
   `ORIGINAL_DEACTIVATED` inherits backup, `CLONE_ACTIVE` requires clone,
   `PROBE_STAGED` requires the probe receipt, `RUNNING` inherits the probe
   requirement without requiring launch evidence yet, `CAPTURED` requires
   launch/result/capture evidence, and `RESTORED` requires restored evidence.
   `BLOCKED` is valid at the last committed checkpoint. `New-CgceRunState`
-  itself remains valid before original is assigned.
+  itself remains valid before original is assigned. Normal blocking remains
+  available at `CAPTURED` for pre-recovery failure capture and at `RESTORED`
+  for a post-completion/pre-export failure while active-marker authority is
+  still held. `Write-CgceRunState` and `Block-CgceRunState` both reject
+  same-phase blocking at `RESTORING`; Task 6's intent-bound writer exclusively
+  owns its legal revision + 2 caught-failure form.
 - Task 4 does not generalize recovery transitions. Task 6 must implement a
   separate recovery compare-and-swap contract for its cross-phase restore
   cases instead of weakening the normal writer.
@@ -1280,8 +1311,12 @@ deactivation과 clone activation을 state-bound operation으로 만든다.
   intent-bound transition. A separate fixed-purpose completion writer must
   freshly validate the final intent/journal/inventories/tree, preserve either
   outcome, introduce only the restored checksum, and CAS/read back
-  `RESTORED`. Both are output-free. The existing normal DAG and writer,
-  including `CAPTURED -> RESTORING`, remain unchanged.
+  `RESTORED`. A third fixed-purpose recovery blocker takes the stable normalized
+  failure code and exclusively owns the intent-bound revision + 2
+  `RESTORING/BLOCKED` form. All three are output-free. The normal phase map and
+  writer deliberately omit both recovery edges; only those Task 6
+  fixed-purpose Contract exports may persist them through the Contract-private
+  state CAS.
 - [x] **RED — exercise preloaded wrong-origin modules.** Preload the same
   module name from a different canonical path in the lifecycle child before
   invoking the verified handoff Prepare copy. Require one checksum terminal
@@ -1529,6 +1564,9 @@ Run the Windows suite. Expected: invoke script missing.
 ```powershell
 $provisional = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
 $lock = Enter-CgceExclusiveLock -ServerRoot $provisional.paths.server_root -RunId $RunId
+$statePath = $null
+$recoveryIntentPath = $null
+try {
 $state = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
 $statePath = $state.paths.state
 if ($state.phase -ne "PROBE_STAGED" -or $state.outcome -ne "ACTIVE") {
@@ -1681,18 +1719,23 @@ PalServer가 멈춘 뒤 original을 active path로 복원한다.
 **Interfaces:**
 - Consumes: phase `CREATED` through `RESTORED`, including
   `outcome=BLOCKED`; `RESTORING` is explicitly resumable.
-- Produces:
+- Produces Contract module export:
   `Write-CgceRecoveryRunState -StatePath <string>
   -RecoveryIntentPath <string> -> void`, which reads fresh authoritative state
   itself and never accepts a caller-built state object.
-- Produces:
+- Produces Contract module export:
+  `Block-CgceRecoveryRunState -StatePath <string>
+  -RecoveryIntentPath <string> -Code <string> -> void`, which accepts only a
+  stable normalized error code and owns the caught-failure
+  `RESTORING/ACTIVE` to `RESTORING/BLOCKED` revision + 2 delta.
+- Produces Contract module export:
   `Complete-CgceRecoveryRunState -StatePath <string>
   -RecoveryIntentPath <string> -> void`, which derives the restored inventory
   path and checksum from fresh state after validating the intent-bound
   receipt/filesystem result. Neither helper emits success-stream output;
   callers explicitly re-read persisted state after each helper's strict
   read-back succeeds.
-- Private recovery helpers:
+- Restore entry-point-private helpers:
   `Write-OrResume-CgceRestoredInventory -StatePath <string>
   -RecoveryIntentPath <string> -> string` and
   `Complete-CgceRecoveryJournal -StatePath <string>
@@ -1702,6 +1745,16 @@ PalServer가 멈춘 뒤 original을 active path로 복원한다.
 - Produces: quarantined test clone/probe, exact restored original inventory,
   phase `RESTORED`; preserves `BLOCKED` outcome when the run failed.
 - Error code: `CGCE-OPS-MANUAL-RECOVERY`.
+- Internal activity-check ownership: Contract adds an unexported,
+  state-derived `Assert-CgceRecoveryStateInactivity` used by all three recovery
+  state writers. It re-reads the exact state-bound executable paths, listener
+  ports, and durable process-receipt identities (including Task 5's recorded
+  unlisted identities), performs its own fail-closed CIM/listener/liveness
+  checks, and has no Runtime-module or caller-provided callback/boolean
+  dependency. Restore-private filesystem/journal helpers continue to call the
+  Runtime activity validator internally. Task 6 RED tests must prove both
+  validators make identical allow/block decisions over the same complete
+  receipt/process/port fixtures before any recovery writer is implemented.
 
 - [ ] **Blocking gate: define and RED-test recovery persistence authority**
 
@@ -1718,12 +1771,30 @@ PalServer가 멈춘 뒤 original을 active path로 복원한다.
   must bind `source_state_sha256` plus the source phase, outcome, revision,
   `updated_at_utc`, exact errors, genesis identity, and original-inventory
   identity. A `RESTORING` resume reconstructs that source-state preimage and
-  verifies its checksum before trusting the intent. The completion writer must
-  freshly validate the `RESTORING` state, exact intent, full gapless final
-  journal, original/restored inventory files, and live restored tree; derive
-  rather than accept the restored checksum; preserve `ACTIVE` or `BLOCKED`,
-  errors, and every other checksum; introduce only the restored checksum; and
-  CAS/read back `RESTORED`. The restored-inventory helper must no-overwrite
+  verifies its checksum before trusting the intent. The only legal persisted
+  resume deltas are exact: a `BLOCKED` source becomes revision + 1
+  `RESTORING/BLOCKED` with byte/value-identical errors; an `ACTIVE` source
+  becomes revision + 1 `RESTORING/ACTIVE` with exact errors, or, after a caught
+  failure following that successful CAS, revision + 2 `RESTORING/BLOCKED` with
+  exactly one append-only error. Reject every other phase, revision, outcome,
+  error, checksum, identity, or evidence delta. The normal
+  `Write-CgceRunState` and `Block-CgceRunState` paths must reject this
+  `RESTORING` block. Only `Block-CgceRecoveryRunState` may persist it: that
+  writer freshly reads the current state and immutable intent, reconstructs the
+  exact `ACTIVE` source preimage, requires current revision to equal source
+  revision + 1 with unchanged errors/evidence, validates `Code` as one stable
+  `CGCE-OPS-*` token, appends exactly that one error, rechecks server
+  inactivity internally, and CAS/read-backs revision + 2. It rejects a
+  `BLOCKED` source/current state, missing intent, foreign code, or any drift.
+  RED-test the successful caught-failure path plus invocation before the
+  initial CAS, an already-`BLOCKED` source/current state, stale revision,
+  changed errors/evidence, missing or mismatched intent, and invalid or
+  CR/LF-suffixed codes; every rejection preserves state bytes.
+  The completion writer must freshly validate the `RESTORING` state, exact
+  intent, full gapless final journal, original/restored inventory files, and
+  live restored tree; derive rather than accept the restored checksum; preserve
+  `ACTIVE` or `BLOCKED`, errors, and every other checksum; introduce only the
+  restored checksum; and CAS/read back `RESTORED`. The restored-inventory helper must no-overwrite
   create the exact inventory when missing, or accept an existing file only
   after exact kind/entries/checksum read-back. The journal helper must
   no-overwrite create the exact final receipt, or resume only after validating
@@ -1731,8 +1802,22 @@ PalServer가 멈춘 뒤 original을 active path로 복원한다.
   or moves no filesystem/journal artifact; it only revalidates authority and
   writes state. The exact final receipt schema and crash tests across
   inventory-created, receipt-created, and state-completed boundaries remain
-  part of this blocking design/RED gate. Keep the existing normal
-  DAG—including `CAPTURED -> RESTORING`—and `Write-CgceRunState` unchanged.
+  part of this blocking design/RED gate.
+  Before `RESTORED`, require the active marker and reject the completed marker;
+  only the `RESTORED` branch may use `-AllowCompleted`, and that branch must
+  freshly revalidate the exact intent, full final journal, original/restored
+  inventories, and live tree before accepting or moving a completed marker.
+  Re-run server process/listener inactivity immediately before every filesystem mutation
+  and immediately before the final journal write and completion CAS. Each
+  mutating helper performs this final check internally after its other
+  validation and directly before its actual write/move/replace; a caller-only
+  precheck is insufficient.
+  RED tests must inject process and listener activity after each preceding
+  check and prove that the next intent/state/receipt/inventory/move/marker
+  mutation does not occur. Keep both recovery edges absent from
+  `Set-CgceRunPhase`, `Write-CgceRunState`, and its normal checkpoint-field
+  validator; only the three fixed-purpose recovery exports may call the private
+  state CAS for those phase changes.
 
 - [ ] **Step 1: Write failing successful and blocked restore tests**
 
@@ -1786,6 +1871,10 @@ any active Saved + inactive original after an unrelated quarantine target exists
 Implementation skeleton:
 
 ```powershell
+$lock = $null
+$statePath = $null
+$recoveryIntentPath = $null
+try {
 $provisional = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
 $lock = Enter-CgceExclusiveLock -ServerRoot $provisional.paths.server_root -RunId $RunId
 $state = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
@@ -1796,7 +1885,6 @@ $recoveryIntentPath = Join-Path `
 $activeSaved = $state.paths.active_saved
 $inactiveOriginal = $state.paths.inactive_original
 $quarantinedClone = $state.paths.quarantined_clone
-Assert-CgceRunMarker -State $state -AllowCompleted
 $original = Read-CgceInventory `
     -Path $state.paths.original_inventory -ExpectedKind "original"
 if ((Get-CgceSha256 -Path $state.paths.original_inventory) -ne
@@ -1809,10 +1897,13 @@ Assert-CgceNoServerActivity `
     -ReceiptRoot $state.paths.process_receipts
 
 if ($state.phase -eq "RESTORED") {
-    Assert-CgceRestoredState -State $state
+    Assert-CgceRunMarker -State $state -AllowCompleted
+    Assert-CgceRestoredCompletionAuthority -State $state
+    Assert-CgceFreshRecoveryInactivity -State $state
     Complete-CgceRunMarker -State $state
     return
 }
+Assert-CgceRunMarker -State $state
 
 $intent = Read-CgceRecoveryIntentIfPresent `
     -ReceiptRoot $state.paths.restore_receipts
@@ -1821,9 +1912,11 @@ if ($null -eq $intent) {
         throw "CGCE-OPS-MANUAL-RECOVERY RESTORING without intent"
     }
     $matrix = Assert-CgceRecoveryMatrix -State $state
+    Assert-CgceFreshRecoveryInactivity -State $state
     $intent = Write-CgceRecoveryIntent `
         -State $state -Matrix $matrix `
         -ReceiptRoot $state.paths.restore_receipts
+    Assert-CgceFreshRecoveryInactivity -State $state
     Write-CgceRecoveryRunState `
         -StatePath $statePath `
         -RecoveryIntentPath $recoveryIntentPath
@@ -1836,6 +1929,7 @@ if ($null -eq $intent) {
         }
         Assert-CgceNoRestoreOperationReceipt `
             -ReceiptRoot $state.paths.restore_receipts
+        Assert-CgceFreshRecoveryInactivity -State $state
         Write-CgceRecoveryRunState `
             -StatePath $statePath `
             -RecoveryIntentPath $recoveryIntentPath
@@ -1849,12 +1943,15 @@ switch ($matrix.case) {
         # Verify only; do not move active Saved.
     }
     "CLONE_AND_INACTIVE_ORIGINAL" {
+        Assert-CgceFreshRecoveryInactivity -State $state
         Invoke-CgceJournaledMove -Step "010-quarantine-clone" `
             -Source $activeSaved -Destination $quarantinedClone
+        Assert-CgceFreshRecoveryInactivity -State $state
         Invoke-CgceJournaledMove -Step "020-restore-original" `
             -Source $inactiveOriginal -Destination $activeSaved
     }
     "NO_ACTIVE_AND_INACTIVE_ORIGINAL" {
+        Assert-CgceFreshRecoveryInactivity -State $state
         Invoke-CgceJournaledMove -Step "020-restore-original" `
             -Source $inactiveOriginal -Destination $activeSaved
     }
@@ -1877,28 +1974,57 @@ if ($null -ne $state.probe_receipt_checksum) {
     $probeRestore.ExpectedFinalReceiptChecksum =
         $state.probe_receipt_checksum
 }
+Assert-CgceFreshRecoveryInactivity -State $state
 Restore-CgceInventoryProbe @probeRestore
 $restored = @(Get-CgceTreeInventory -Root $activeSaved)
 Compare-CgceInventory -Expected $original -Actual $restored
+Assert-CgceFreshRecoveryInactivity -State $state
 $restoredInventorySha = Write-OrResume-CgceRestoredInventory `
     -StatePath $statePath `
     -RecoveryIntentPath $recoveryIntentPath
 Compare-CgceInventory `
     -Expected $original `
     -Actual @(Get-CgceTreeInventory -Root $activeSaved)
+Assert-CgceFreshRecoveryInactivity -State $state
 Complete-CgceRecoveryJournal `
     -StatePath $statePath `
     -RecoveryIntentPath $recoveryIntentPath `
     -RestoredInventorySha256 $restoredInventorySha
+Assert-CgceFreshRecoveryInactivity -State $state
 Complete-CgceRecoveryRunState `
     -StatePath $statePath `
     -RecoveryIntentPath $recoveryIntentPath
 $state = Read-CgceRunState -RunRoot $RunRoot -RunId $RunId
+Assert-CgceFreshRecoveryInactivity -State $state
 Complete-CgceRunMarker -State $state
+} catch {
+    $failure = $_
+    $failureCode = Get-CgceRestoreErrorCode -ErrorRecord $failure
+    if ($null -ne $statePath -and $null -ne $recoveryIntentPath) {
+        try {
+            $null = Block-CgceRecoveryRunState `
+                -StatePath $statePath `
+                -RecoveryIntentPath $recoveryIntentPath `
+                -Code $failureCode
+        } catch {
+            # Preserve the original failure; the fixed-purpose blocker either
+            # proves its exact authority and commits, or performs no write.
+        }
+    }
+    throw $failure
+} finally {
+    Close-CgceRestoreLock -Lock $lock
+}
 ```
 
-The helper names in this skeleton are private Task 6 helpers, not new entry
-points. `Write-CgceRecoveryIntent` atomically creates
+`Write-CgceRecoveryRunState`, `Block-CgceRecoveryRunState`, and
+`Complete-CgceRecoveryRunState` are the three future output-free Contract
+exports listed in Approved Interfaces. The other new helper names in this
+skeleton are Restore entry-point-private helpers, not new entry points or
+generic Contract exports. `Get-CgceRestoreErrorCode` normalizes exactly one
+stable code without throwing, and `Close-CgceRestoreLock` contains disposal
+failures, accepts a null lock, and adds no success-stream output.
+`Write-CgceRecoveryIntent` atomically creates
 `000-restore-intent.json` before the first transition to `RESTORING` and records
 the exact source-state checksum/preimage identity, selected matrix case, and
 expected layouts/checksums. A crash after intent creation but before the
@@ -1925,6 +2051,14 @@ after probe cleanup, restored-inventory validation, and a final live-tree
 comparison; on resume it requires the exact full gapless journal instead.
 `Complete-CgceRecoveryRunState` never creates, moves, or repairs those
 artifacts.
+`Assert-CgceRestoredCompletionAuthority` re-reads and validates the exact
+restore intent, complete gapless journal, original and restored inventory
+files, and current live tree. It is the only path that permits
+`Assert-CgceRunMarker -AllowCompleted`; every pre-`RESTORED` path requires the
+active marker. `Assert-CgceFreshRecoveryInactivity` is called by each mutating
+helper after all other validation and immediately before the actual
+write/move/replace, including every journaled move, probe cleanup step,
+inventory or receipt publication, recovery state CAS, and marker move.
 `Complete-CgceRunMarker` no-overwrite moves the active marker to
 `.cgce-discovery-completed-<run_id>.json` only after the RESTORED state
 read-back. A crash before that move is resumed by calling restore again.

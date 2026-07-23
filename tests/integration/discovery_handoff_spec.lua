@@ -250,4 +250,69 @@ end
             ) ~= nil
         )
     end)
+
+    it("keeps recovery persistence behind fixed-purpose authority", function()
+        local contract = read(
+            "tools/windows-discovery/modules/CgceDiscovery.Contract.psm1"
+        )
+        a.equal(
+            nil,
+            contract:find('CAPTURED = "RESTORING"', 1, true)
+        )
+        a.equal(
+            nil,
+            contract:find('RESTORING = "RESTORED"', 1, true)
+        )
+        a.equal(
+            true,
+            contract:find('RESTORED = "EXPORTED"', 1, true) ~= nil
+        )
+        a.equal(
+            nil,
+            contract:find("ExpectedExistingSha256", 1, true)
+        )
+        a.equal(
+            true,
+            contract:find(
+                "function Replace-CgceRunStateJson",
+                1,
+                true
+            ) ~= nil
+        )
+        a.equal(
+            nil,
+            contract:find('"Replace-CgceRunStateJson"', 1, true)
+        )
+        for _, required in ipairs({
+            '$ExpectedPhase -cne "RESTORING"',
+            '$state.phase -ceq "RESTORING"',
+        }) do
+            a.equal(true, contract:find(required, 1, true) ~= nil)
+        end
+
+        local plan = read(
+            "docs/superpowers/plans/"
+                .. "2026-07-23-cgce-windows-discovery-operator.md"
+        )
+        for _, required in ipairs({
+            "public create-only JSON writer",
+            "Contract-private run-state CAS",
+            "only the `RESTORED` branch may use `-AllowCompleted`",
+            "revision + 2",
+            "Block-CgceRecoveryRunState -StatePath <string>",
+            "-RecoveryIntentPath <string> -Code <string> -> void",
+            "immediately before every filesystem mutation",
+            "$lock = $null\n$statePath = $null\n"
+                .. "$recoveryIntentPath = $null\ntry {",
+        }) do
+            a.equal(true, plan:find(required, 1, true) ~= nil)
+        end
+        for _, forbidden in ipairs({
+            "CAPTURED -> RESTORING",
+            "RESTORING -> RESTORED",
+            "ExpectedExistingSha256",
+        }) do
+            a.equal(nil, plan:find(forbidden, 1, true))
+        end
+    end)
 end)

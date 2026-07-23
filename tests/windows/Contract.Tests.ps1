@@ -269,6 +269,32 @@ Invoke-CgceTest "rejects skipped phases" {
     }
 }
 
+Invoke-CgceTest "normal transition helper rejects fixed-purpose recovery edges" {
+    foreach ($case in @(
+        [pscustomobject]@{
+            Source = "CAPTURED"
+            Destination = "RESTORING"
+        },
+        [pscustomobject]@{
+            Source = "RESTORING"
+            Destination = "RESTORED"
+        }
+    )) {
+        foreach ($outcome in @("ACTIVE", "BLOCKED")) {
+            $state = [pscustomobject]@{
+                phase = $case.Source
+                outcome = $outcome
+            }
+            Assert-CgceThrows "CGCE-OPS-PHASE" {
+                Set-CgceRunPhase `
+                    -State $state `
+                    -ExpectedPhase $case.Source `
+                    -NextPhase $case.Destination
+            }
+        }
+    }
+}
+
 Invoke-CgceTest "strict JSON preserves root kinds and one-element arrays" {
     $root = New-CgceContractTestRoot
     try {
@@ -395,6 +421,10 @@ Invoke-CgceTest "rejects control drift incomplete paths and expiration" {
 Invoke-CgceTest "atomic JSON creates UTF-8 without BOM and never overwrites ordinary output" {
     $root = New-CgceContractTestRoot
     try {
+        $writer = Get-Command "Write-CgceJsonAtomic"
+        Assert-CgceEqual `
+            $false `
+            $writer.Parameters.ContainsKey("ExpectedExistingSha256")
         $path = Join-Path $root "output.json"
         Write-CgceJsonAtomic -Value ([pscustomobject]@{ value = "ok" }) -Path $path
         $bytes = [System.IO.File]::ReadAllBytes($path)
@@ -408,23 +438,102 @@ Invoke-CgceTest "atomic JSON creates UTF-8 without BOM and never overwrites ordi
     }
 }
 
-Invoke-CgceTest "atomic JSON rejects existing temp and checksum drift without deleting destination" {
+Invoke-CgceTest "private state CAS rejects raw objects and is not exported" {
     $root = New-CgceContractTestRoot
     try {
         $path = Join-Path $root "run-state.json"
         Write-CgceContractTestUtf8 $path '{"value":"old"}'
         $oldSha = Get-CgceSha256 $path
-        Write-CgceContractTestUtf8 ($path + ".tmp") '{}'
-        Assert-CgceThrows "CGCE-OPS-OUTPUT-EXISTS" {
-            Write-CgceJsonAtomic -Value ([pscustomobject]@{ value = "new" }) -Path $path -ExpectedExistingSha256 $oldSha
-        }
-        Assert-CgceEqual "old" (Read-CgceJsonObject $path).value
-        Remove-Item -LiteralPath ($path + ".tmp")
-        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
-            Write-CgceJsonAtomic -Value ([pscustomobject]@{ value = "new" }) -Path $path -ExpectedExistingSha256 ("f" * 64)
-        }
+        Assert-CgceEqual `
+            $null `
+            (Get-Command `
+                "Replace-CgceRunStateJson" `
+                -ErrorAction SilentlyContinue)
+        $module = Get-Module "CgceDiscovery.Contract"
+        $message = & $module {
+            param([string]$Path, [string]$ExpectedStateChecksum)
+            try {
+                Replace-CgceRunStateJson `
+                    -Value ([pscustomobject]@{ value = "new" }) `
+                    -Path $Path `
+                    -ExpectedStateChecksum $ExpectedStateChecksum
+                return ""
+            } catch {
+                return $_.Exception.Message
+            }
+        } $path $oldSha
+        Assert-CgceEqual `
+            $true `
+            ([string]$message).StartsWith(
+                "CGCE-OPS-JSON",
+                [StringComparison]::Ordinal
+            )
         Assert-CgceEqual "old" (Read-CgceJsonObject $path).value
     } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "run-state CAS rejects existing temp and checksum drift without deleting destination" {
+    $root = New-CgceContractTestRoot
+    $module = $null
+    try {
+        $paths = New-CgceContractTestPaths $root
+        New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
+        New-Item -ItemType Directory -Path $paths.server_root | Out-Null
+        $state = New-CgceRunState `
+            -RunId "r-0123456789abcdef0123456789abcdef" `
+            -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+            -Paths $paths
+        Set-CgceContractCreatedEvidence $state
+        Write-CgceJsonAtomic $state $paths.genesis_state
+        Write-CgceJsonAtomic $state $paths.state
+        $oldSha = Get-CgceSha256 $paths.state
+        $candidate = Read-CgceJsonObject $paths.state
+        $candidate.inventory_checksums.backup = ("2" * 64)
+        $candidate = Set-CgceRunPhase `
+            $candidate `
+            "CREATED" `
+            "BACKUP_VERIFIED"
+
+        Write-CgceContractTestUtf8 ($paths.state + ".tmp") '{}'
+        Assert-CgceThrows "CGCE-OPS-OUTPUT-EXISTS" {
+            Write-CgceRunState $candidate $paths.state "CREATED"
+        }
+        Assert-CgceEqual $oldSha (Get-CgceSha256 $paths.state)
+        Remove-Item -LiteralPath ($paths.state + ".tmp")
+
+        $module = Get-Module "CgceDiscovery.Contract"
+        & $module {
+            $script:CgceTestStatePersistenceSeam = {
+                param([string]$Phase, $Context)
+                if ($Phase -ceq "before-state-replace") {
+                    $text = [System.IO.File]::ReadAllText(
+                        $Context.state_path
+                    )
+                    $encoding = New-Object System.Text.UTF8Encoding($false)
+                    [System.IO.File]::WriteAllText(
+                        $Context.state_path,
+                        ($text + " "),
+                        $encoding
+                    )
+                }
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Write-CgceRunState $candidate $paths.state "CREATED"
+        }
+        & $module { $script:CgceTestStatePersistenceSeam = $null }
+        $current = Read-CgceJsonObject $paths.state
+        Assert-CgceEqual "CREATED" $current.phase
+        Assert-CgceEqual 0 $current.revision
+        Assert-CgceEqual `
+            $false `
+            (Test-Path -LiteralPath ($paths.state + ".tmp"))
+    } finally {
+        if ($null -ne $module) {
+            & $module { $script:CgceTestStatePersistenceSeam = $null }
+        }
         Remove-Item -LiteralPath $root -Recurse -Force
     }
 }
@@ -893,6 +1002,154 @@ Invoke-CgceTest "recovery checkpoint validator accepts exact source profiles wit
         } finally {
             Remove-Item -LiteralPath $root -Recurse -Force
         }
+    }
+}
+
+Invoke-CgceTest "normal state writer rejects fixed-purpose recovery edges for active and blocked authority" {
+    foreach ($case in @(
+        [pscustomobject]@{
+            Source = "CAPTURED"
+            Destination = "RESTORING"
+            Revision = 6
+        },
+        [pscustomobject]@{
+            Source = "RESTORING"
+            Destination = "RESTORED"
+            Revision = 7
+        }
+    )) {
+        foreach ($outcome in @("ACTIVE", "BLOCKED")) {
+            $root = New-CgceContractTestRoot
+            try {
+                $paths = New-CgceContractTestPaths $root
+                New-Item `
+                    -ItemType Directory `
+                    -Path $paths.run_directory |
+                    Out-Null
+                New-Item `
+                    -ItemType Directory `
+                    -Path $paths.server_root |
+                    Out-Null
+                $genesis = New-CgceRunState `
+                    -RunId "r-0123456789abcdef0123456789abcdef" `
+                    -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+                    -Paths $paths
+                Set-CgceContractCreatedEvidence $genesis
+                Write-CgceJsonAtomic $genesis $paths.genesis_state
+
+                $source = Read-CgceJsonObject $paths.genesis_state
+                Set-CgceContractSourceEvidence $source "CAPTURED"
+                $source.phase = $case.Source
+                $source.revision = $case.Revision
+                $source.outcome = $outcome
+                if ($outcome -ceq "BLOCKED") {
+                    $source.errors = @(
+                        [pscustomobject][ordered]@{
+                            code = "CGCE-OPS-BLOCKED"
+                            at_utc = "2026-07-23T00:00:00Z"
+                        }
+                    )
+                }
+                Write-CgceJsonAtomic $source $paths.state
+                $sourceChecksum = Get-CgceSha256 $paths.state
+
+                $candidate = Read-CgceJsonObject $paths.state
+                $candidate.phase = $case.Destination
+                if ($case.Destination -ceq "RESTORED") {
+                    $candidate.inventory_checksums.restored = ("8" * 64)
+                }
+                Assert-CgceThrows "CGCE-OPS-PHASE" {
+                    Write-CgceRunState `
+                        -State $candidate `
+                        -StatePath $paths.state `
+                        -ExpectedPhase $case.Source
+                }
+                Assert-CgceEqual `
+                    $sourceChecksum `
+                    (Get-CgceSha256 $paths.state)
+                $current = Read-CgceJsonObject $paths.state
+                Assert-CgceEqual $case.Source $current.phase
+                Assert-CgceEqual $outcome $current.outcome
+                Assert-CgceEqual $case.Revision $current.revision
+            } catch {
+                throw (
+                    "CGCE-TEST $($case.Source) $outcome: " +
+                    $_.Exception.Message
+                )
+            } finally {
+                Remove-Item -LiteralPath $root -Recurse -Force
+            }
+        }
+    }
+}
+
+Invoke-CgceTest "normal block paths reject RESTORING but retain adjacent checkpoint blocking" {
+    $root = New-CgceContractTestRoot
+    try {
+        $paths = New-CgceContractTestPaths $root
+        New-Item -ItemType Directory -Path $paths.run_directory | Out-Null
+        New-Item -ItemType Directory -Path $paths.server_root | Out-Null
+        $genesis = New-CgceRunState `
+            -RunId "r-0123456789abcdef0123456789abcdef" `
+            -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+            -Paths $paths
+        Set-CgceContractCreatedEvidence $genesis
+        Write-CgceJsonAtomic $genesis $paths.genesis_state
+        Write-CgceJsonAtomic $genesis $paths.state
+        Write-CgceActiveRunMarker `
+            -State $genesis `
+            -GenesisStateChecksum (Get-CgceSha256 $paths.genesis_state) `
+            -Path $paths.active_run_marker
+
+        $restoring = Read-CgceJsonObject $paths.genesis_state
+        Set-CgceContractSourceEvidence $restoring "CAPTURED"
+        $restoring.phase = "RESTORING"
+        $restoring.revision = 7
+        Write-CgceContractTestUtf8 `
+            $paths.state `
+            ($restoring | ConvertTo-Json -Depth 12)
+        $restoringChecksum = Get-CgceSha256 $paths.state
+        $blockedCandidate = Read-CgceJsonObject $paths.state
+        $blockedCandidate.outcome = "BLOCKED"
+        $blockedCandidate.errors = @(
+            [pscustomobject][ordered]@{
+                code = "CGCE-OPS-BLOCKED"
+                at_utc = "2026-07-23T00:00:00Z"
+            }
+        )
+        Assert-CgceThrows "CGCE-OPS-PHASE" {
+            Write-CgceRunState `
+                -State $blockedCandidate `
+                -StatePath $paths.state `
+                -ExpectedPhase "RESTORING"
+        }
+        Assert-CgceThrows "CGCE-OPS-PHASE" {
+            Block-CgceRunState `
+                -StatePath $paths.state `
+                -Code "CGCE-OPS-BLOCKED"
+        }
+        Assert-CgceEqual $restoringChecksum (Get-CgceSha256 $paths.state)
+
+        foreach ($phase in @("CAPTURED", "RESTORED")) {
+            $source = Read-CgceJsonObject $paths.genesis_state
+            Set-CgceContractSourceEvidence $source "CAPTURED"
+            $source.phase = $phase
+            $source.revision = if ($phase -ceq "CAPTURED") { 6 } else { 8 }
+            if ($phase -ceq "RESTORED") {
+                $source.inventory_checksums.restored = ("8" * 64)
+            }
+            Write-CgceContractTestUtf8 `
+                $paths.state `
+                ($source | ConvertTo-Json -Depth 12)
+            $blocked = Block-CgceRunState `
+                -StatePath $paths.state `
+                -Code "CGCE-OPS-BLOCKED"
+            Assert-CgceEqual $phase $blocked.phase
+            Assert-CgceEqual "BLOCKED" $blocked.outcome
+            Assert-CgceEqual 1 @($blocked.errors).Count
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
     }
 }
 
