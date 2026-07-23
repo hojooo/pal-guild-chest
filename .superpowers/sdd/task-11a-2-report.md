@@ -28,7 +28,7 @@ non-Windows substitute was treated as behavioral evidence.
 
 ### GREEN implementation and pending platform gate
 
-The implementation now has 25 filesystem tests covering:
+The implementation now has 27 filesystem tests covering:
 
 - drive, descendant, trailing-separator, case-insensitive, UNC, containment,
   and overlap canonical path behavior;
@@ -50,7 +50,7 @@ zsh:1: command not found: powershell.exe
 exit 127
 ```
 
-No claim is made that the 47-test Windows suite passes. It must run unchanged
+No claim is made that the 49-test Windows suite passes. It must run unchanged
 under Windows PowerShell 5.1 before any real server workflow uses these helpers.
 
 ## Available verification
@@ -168,3 +168,37 @@ one Windows host, but this macOS environment cannot execute a real
 `Directory.Move` across two mounted Windows volumes. A Windows host with two
 writable volumes must still confirm that provider/runtime behavior as part of
 the mandatory PowerShell 5.1 gate.
+
+## R2 review-fix evidence — source stability at publication
+
+Review found that tree staging was compared only to the source inventory taken
+before robocopy. A source mutation after that snapshot could therefore publish
+stale staging.
+
+`Copy-CgceTreeVerified` now:
+
+1. recomputes source inventory after final reparse validation and immediately
+   before publication;
+2. compares original source, current source, and verified staging inventories;
+3. publishes only when all three agree;
+4. recomputes source and final destination inventories after publication;
+5. compares post-publication source, original source, and final destination
+   before returning success.
+
+Two private-seam tests mutate source bytes at the exact boundaries. A
+`tree-before-revalidate` mutation blocks before publication, leaves the final
+path absent, and preserves the verified staging tree. A
+`tree-after-publish` mutation blocks success after atomic publication and
+proves the final tree still contains the verified pre-drift bytes.
+
+The Task 2 implementation plan now describes unique same-volume staging,
+`File.Copy(..., overwrite=false)`, verified staging, `File.Move` /
+`Directory.Move` atomic publication, repeated source inventories, and staging
+preservation. It no longer directs later implementers back to unsafe literal
+`Copy-Item` / `Move-Item` operations.
+
+R2 verification:
+
+- RED and GREEN Windows commands both returned `command not found`, exit 127.
+- `./scripts/run-tests.sh | tail -n 8` with `pipefail` — exit 0.
+- Schemas, diff, delimiters, 14/14 exports, and forbidden-surface scan — clean.

@@ -615,19 +615,33 @@ Inventory files are objects, never ambiguous top-level JSON arrays.
 1. reject existing destination;
 2. reject reparse points in the source tree and both source/destination path
    component chains before copy;
-3. invoke `%SystemRoot%\System32\robocopy.exe` with
+3. select a unique same-volume sibling staging path beside the destination and
+   invoke `%SystemRoot%\System32\robocopy.exe` against that staging path with
    `/E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /XJ`;
 4. accept only robocopy exit codes `0..7`;
-5. inventory destination and exact-compare it to source;
-6. return the destination inventory.
+5. inventory staging and exact-compare it to the original source inventory;
+6. immediately before publication, revalidate every source/staging/destination
+   component chain and tree, recompute source inventory, and compare original
+   source, current source, and staging;
+7. publish staging with `[System.IO.Directory]::Move`, which fails when the
+   final destination exists;
+8. after publication, recompute source and destination inventories and compare
+   current source, original source, and final destination before returning the
+   destination inventory.
 
 `Move-CgceDirectoryNoOverwrite` must require source directory, absent
 destination, reparse-free path components, and equal volume roots before
-`Move-Item`.
+immediately revalidating the component chains and calling
+`[System.IO.Directory]::Move`. An existing final destination must fail rather
+than becoming a move container.
 
 `Copy-CgceFileVerified` must reject a missing source or existing destination,
-copy one file with `Copy-Item`, and compare length and SHA-256 after the copy.
-Use it for `UE4SS_ObjectDump.txt`; never copy the whole UE4SS root as capture.
+copy one file to a unique same-volume sibling staging path with
+`[System.IO.File]::Copy(..., overwrite=false)`, compare staging length and
+SHA-256, immediately revalidate source/staging/destination component chains,
+then publish with `[System.IO.File]::Move` and verify the final file. Use it for
+`UE4SS_ObjectDump.txt`; never copy the whole UE4SS root as capture. Staging
+artifacts are preserved on failure; these helpers never delete them.
 
 - [ ] **Step 5: Run GREEN and commit**
 

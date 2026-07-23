@@ -443,6 +443,71 @@ Invoke-CgceTest "verified tree copy cannot merge into a destination created befo
     }
 }
 
+Invoke-CgceTest "verified tree copy blocks source drift before publication" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $source = Join-Path $root "source"
+        $destination = Join-Path $root "destination"
+        New-Item -ItemType Directory -Path $source | Out-Null
+        Set-Content -LiteralPath (Join-Path $source "source.txt") -Value "original" -NoNewline
+        Set-CgceFilesTestPublishSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "tree-before-revalidate") {
+                [System.IO.File]::WriteAllText(
+                    (Join-Path $Context.source "source.txt"),
+                    "drifted",
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-INVENTORY" {
+            Copy-CgceTreeVerified -Source $source -Destination $destination
+        }
+        Assert-CgceEqual $false (Test-Path -LiteralPath $destination)
+        Assert-CgceEqual "drifted" ([System.IO.File]::ReadAllText((Join-Path $source "source.txt")))
+        $staging = @(Get-ChildItem -LiteralPath $root -Directory -Filter ".destination.cgce-stage-tree-*")
+        Assert-CgceEqual 1 $staging.Count
+        Assert-CgceEqual `
+            "original" `
+            ([System.IO.File]::ReadAllText((Join-Path $staging[0].FullName "source.txt")))
+    } finally {
+        Set-CgceFilesTestPublishSeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "verified tree copy blocks source drift after publication" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $source = Join-Path $root "source"
+        $destination = Join-Path $root "destination"
+        New-Item -ItemType Directory -Path $source | Out-Null
+        Set-Content -LiteralPath (Join-Path $source "source.txt") -Value "original" -NoNewline
+        Set-CgceFilesTestPublishSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "tree-after-publish") {
+                [System.IO.File]::WriteAllText(
+                    (Join-Path $Context.source "source.txt"),
+                    "drifted",
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-INVENTORY" {
+            Copy-CgceTreeVerified -Source $source -Destination $destination
+        }
+        Assert-CgceEqual "drifted" ([System.IO.File]::ReadAllText((Join-Path $source "source.txt")))
+        Assert-CgceEqual `
+            "original" `
+            ([System.IO.File]::ReadAllText((Join-Path $destination "source.txt")))
+        $staging = @(Get-ChildItem -LiteralPath $root -Directory -Filter ".destination.cgce-stage-tree-*")
+        Assert-CgceEqual 0 $staging.Count
+    } finally {
+        Set-CgceFilesTestPublishSeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
 Invoke-CgceTest "verified tree copy preserves staging when robocopy fails" {
     $root = New-CgceFilesTestRoot
     try {

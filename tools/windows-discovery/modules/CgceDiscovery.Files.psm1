@@ -703,6 +703,13 @@ function Copy-CgceTreeVerified([string]$Source, [string]$Destination) {
     Assert-CgceNoReparseInPath -Path $staging
     Assert-CgceTreeHasNoReparsePoints -Root $staging
     Assert-CgceNoReparseInPath -Path $canonicalDestination
+    $sourceBeforePublication = @(Get-CgceTreeInventory -Root $canonicalSource)
+    Compare-CgceInventory `
+        -Expected $sourceInventory `
+        -Actual $sourceBeforePublication
+    Compare-CgceInventory `
+        -Expected $sourceBeforePublication `
+        -Actual $stagingInventory
     Invoke-CgceTestPublishSeam -Phase "tree-before-publish" -Context $context
     try {
         [System.IO.Directory]::Move($staging, $canonicalDestination)
@@ -712,8 +719,22 @@ function Copy-CgceTreeVerified([string]$Source, [string]$Destination) {
         }
         throw "CGCE-OPS-COPY tree publication failed"
     }
+    Invoke-CgceTestPublishSeam -Phase "tree-after-publish" -Context $context
+    Assert-CgceNoReparseInPath -Path $canonicalSource
+    Assert-CgceTreeHasNoReparsePoints -Root $canonicalSource
+    Assert-CgceNoReparseInPath -Path $canonicalDestination
+    Assert-CgceTreeHasNoReparsePoints -Root $canonicalDestination
+    $sourceAfterPublication = @(Get-CgceTreeInventory -Root $canonicalSource)
     $destinationInventory = @(Get-CgceTreeInventory -Root $canonicalDestination)
-    Compare-CgceInventory -Expected $sourceInventory -Actual $destinationInventory
+    Compare-CgceInventory `
+        -Expected $sourceInventory `
+        -Actual $sourceAfterPublication
+    Compare-CgceInventory `
+        -Expected $sourceAfterPublication `
+        -Actual $destinationInventory
+    Compare-CgceInventory `
+        -Expected $sourceInventory `
+        -Actual $destinationInventory
     return $destinationInventory
 }
 
