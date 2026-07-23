@@ -1661,18 +1661,16 @@ switch ($matrix.case) {
 
 $restored = @(Get-CgceTreeInventory -Root $activeSaved)
 Compare-CgceInventory -Expected $original -Actual $restored
-if (Test-Path -LiteralPath $state.paths.probe_intent -PathType Leaf) {
-    $probeRestore = @{
-        Paths = $state.paths
-        RunDirectory = $state.paths.run_directory
-        RunId = $RunId
-    }
-    if ($null -ne $state.probe_receipt_checksum) {
-        $probeRestore.ExpectedFinalReceiptChecksum =
-            $state.probe_receipt_checksum
-    }
-    Restore-CgceInventoryProbe @probeRestore
+$probeRestore = @{
+    Paths = $state.paths
+    RunDirectory = $state.paths.run_directory
+    RunId = $RunId
 }
+if ($null -ne $state.probe_receipt_checksum) {
+    $probeRestore.ExpectedFinalReceiptChecksum =
+        $state.probe_receipt_checksum
+}
+Restore-CgceInventoryProbe @probeRestore
 $state.inventory_checksums.restored = Write-CgceInventory `
     -Entries $restored -Path $state.paths.restored_inventory -Kind "restored"
 $state.phase = "RESTORED"
@@ -1702,6 +1700,9 @@ sibling paths; `RunRoot` may be on a different backup volume.
 read-back. A crash before that move is resumed by calling restore again.
 Hold the exclusive lock through the final `RESTORED` state read-back and
 release it in `finally`.
+Once restoration checks begin, Task 6 calls `Restore-CgceInventoryProbe`
+unconditionally. The helper may no-op only after proving that no Task 3 residue exists;
+the caller must never infer safety from a missing probe intent.
 
 - [ ] **Step 4: Add crash-point tests**
 

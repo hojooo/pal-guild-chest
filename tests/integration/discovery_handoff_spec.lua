@@ -56,4 +56,30 @@ end
             a.equal(nil, source:find(forbidden, 1, true))
         end
     end)
+
+    it("requires Task 6 to invoke Task 3 restoration unconditionally", function()
+        local plan = read(
+            "docs/superpowers/plans/"
+                .. "2026-07-23-cgce-windows-discovery-operator.md"
+        )
+        local conditional = "if (Test-Path -LiteralPath "
+            .. "$state.paths.probe_intent -PathType Leaf)"
+        a.equal(nil, plan:find(conditional, 1, true))
+        a.equal(
+            true,
+            plan:find(
+                "Restore-CgceInventoryProbe @probeRestore",
+                1,
+                true
+            ) ~= nil
+        )
+        a.equal(
+            true,
+            plan:find(
+                "proving that no Task 3 residue exists",
+                1,
+                true
+            ) ~= nil
+        )
+    end)
 end)

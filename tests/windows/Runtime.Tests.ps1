@@ -196,6 +196,38 @@ Invoke-CgceTest "framed argument and path digests match fixed vectors" {
             -Values @("D:\PalServer\PalServer.exe"))
 }
 
+Invoke-CgceTest "strict JSON Decimal integers accept only exact Int64 values" {
+    $root = New-CgceRuntimeTestRoot
+    $module = Get-Module "CgceDiscovery.Runtime"
+    try {
+        $path = Join-Path $root "numbers.json"
+        Write-CgceRuntimeTestUtf8 `
+            -Path $path `
+            -Text '{"valid":42,"fraction":1.5,"overflow":9223372036854775808,"string":"42","boolean":true}'
+        $parsed = Read-CgceJsonObject $path
+        Assert-CgceEqual $true (& $module {
+            param($Value)
+            Test-CgceRuntimeInteger $Value 1 100
+        } $parsed.valid)
+        foreach ($invalid in @(
+            $parsed.fraction,
+            $parsed.overflow,
+            $parsed.string,
+            $parsed.boolean
+        )) {
+            Assert-CgceEqual $false (& $module {
+                param($Value)
+                Test-CgceRuntimeInteger $Value 1 ([int64]::MaxValue)
+            } $invalid)
+        }
+        Assert-CgceEqual $true (& $module {
+            Test-CgceRuntimeInteger ([int64]42) 1 100
+        })
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
 Invoke-CgceTest "server activity requires exhaustive paths and all telemetry" {
     Set-CgceRuntimeTestActivitySeam {
         New-CgceRuntimeActivitySnapshot `
@@ -391,7 +423,10 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
         $runId = "r-0123456789abcdef0123456789abcdef"
         $receiptRoot = Join-Path $root "$runId\receipts\process"
         New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
-        $allowed = @("D:\PalServer\PalServer.exe")
+        $allowed = @(
+            "D:\PalServer\PalServer.exe",
+            "D:\PalServer\PalServer-Win64-Shipping.exe"
+        )
         $launch = [pscustomobject][ordered]@{
             schema_version = "1.0"
             kind = "cgce_windows_discovery_process_launch"
@@ -401,7 +436,7 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
             executable_path = $allowed[0]
             executable_sha256 = ("a" * 64)
             working_directory = "D:\PalServer"
-            allowed_executable_path_count = 1
+            allowed_executable_path_count = 2
             allowed_executable_paths_sha256 = (Get-CgceRuntimeTestFramedDigest `
                 -Domain "CGCE-PATHS-1" -Values $allowed)
             argument_count = 1
@@ -472,7 +507,49 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
         Write-CgceRuntimeTestUtf8 `
             -Path $resultPath `
             -Text ($result | ConvertTo-Json -Depth 12)
+
+        $pid.executable_path = $allowed[1]
+        Write-CgceRuntimeTestUtf8 `
+            -Path $pidPath `
+            -Text ($pid | ConvertTo-Json -Depth 12)
+        $wrongRootChecksum = Get-CgceRuntimeTestSha256 $pidPath
+        $result.previous_receipt_sha256 = $wrongRootChecksum
+        $result.observed_processes[0].executable_path = $allowed[1]
+        $result.pid_receipts[0].sha256 = $wrongRootChecksum
+        Write-CgceRuntimeTestUtf8 `
+            -Path $resultPath `
+            -Text ($result | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
+        }
+
         [System.IO.File]::Delete($pidPath)
+        $result.previous_receipt_sha256 =
+            (Get-CgceRuntimeTestSha256 $launchPath)
+        $result.observed_processes = @()
+        $result.pid_receipts = @()
+        Write-CgceRuntimeTestUtf8 `
+            -Path $resultPath `
+            -Text ($result | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
+            Assert-CgceNoServerActivity `
+                -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
+        }
+
+        $result.observed_processes = @([pscustomobject][ordered]@{
+            sequence = 1
+            pid = 42
+            parent_pid = 1
+            executable_path = $allowed[0]
+            creation_time_utc = "2026-07-23T01:01:01Z"
+            creation_time_filetime_utc = [int64]134292420610000000
+        })
+        $result.pid_receipts = @([pscustomobject][ordered]@{
+            sequence = 1
+            path = $pidPath
+            sha256 = $wrongRootChecksum
+        })
         Assert-CgceThrows "CGCE-OPS-PROCESS-RECEIPT" {
             Assert-CgceNoServerActivity `
                 -ExecutablePaths $allowed -Ports @(8211) -ReceiptRoot $receiptRoot
@@ -480,6 +557,77 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
     } finally {
         Set-CgceRuntimeTestActivitySeam $null
         Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "artifact states reject coercion and inventory path aliases" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    $valid = [pscustomobject][ordered]@{
+        artifact_type = "FILE"; present = $true; length = [decimal]3
+        sha256 = ("a" * 64); tree_sha256 = $null
+    }
+    & $module {
+        param($State)
+        Assert-CgceArtifactStateSchema `
+            $State "FILE" "CGCE-OPS-PROBE-RECEIPT"
+    } $valid
+    foreach ($invalid in @(
+        [pscustomobject][ordered]@{
+            artifact_type = "FILE"; present = 1; length = [decimal]3
+            sha256 = ("a" * 64); tree_sha256 = $null
+        },
+        [pscustomobject][ordered]@{
+            artifact_type = "FILE"; present = $true; length = "3"
+            sha256 = ("a" * 64); tree_sha256 = $null
+        },
+        [pscustomobject][ordered]@{
+            artifact_type = "FILE"; present = $true; length = [decimal]3.5
+            sha256 = ("a" * 64); tree_sha256 = $null
+        },
+        [pscustomobject][ordered]@{
+            artifact_type = "FILE"; present = $true; length = [decimal]3
+            sha256 = ("A" * 64); tree_sha256 = $null
+        }
+    )) {
+        Assert-CgceThrows "CGCE-OPS-PROBE-RECEIPT" {
+            & $module {
+                param($State)
+                Assert-CgceArtifactStateSchema `
+                    $State "FILE" "CGCE-OPS-PROBE-RECEIPT"
+            } $invalid
+        }
+    }
+    $coerced = [pscustomobject][ordered]@{
+        artifact_type = "FILE"; present = $true; length = "3"
+        sha256 = ("a" * 64); tree_sha256 = $null
+    }
+    Assert-CgceEqual $false (& $module {
+        param($Left, $Right)
+        Test-CgceArtifactStateEqual $Left $Right
+    } $valid $coerced)
+    $caseChanged = [pscustomobject][ordered]@{
+        artifact_type = "FILE"; present = $true; length = [decimal]3
+        sha256 = ("A" * 64); tree_sha256 = $null
+    }
+    Assert-CgceEqual $false (& $module {
+        param($Left, $Right)
+        Test-CgceArtifactStateEqual $Left $Right
+    } $valid $caseChanged)
+
+    foreach ($relativePath in @(
+        ".", "..", "a//b", "a/./b", "a/../b", "a:b", "a\b", "a`0b"
+    )) {
+        $entry = [pscustomobject][ordered]@{
+            relative_path = $relativePath
+            length = [decimal]1
+            sha256 = ("b" * 64)
+        }
+        Assert-CgceThrows "CGCE-OPS-INVENTORY" {
+            & $module {
+                param($Value)
+                Compare-CgceInventory -Expected @($Value) -Actual @($Value)
+            } $entry
+        }
     }
 }
 
@@ -986,10 +1134,14 @@ Invoke-CgceTest "restore case authority distinguishes untouched from journal-res
             Get-CgceRestoreSelectedCase `
                 "MODS_TXT" $true $before $absent $absent $before $test $true
         )
-        Assert-CgceEqual "BEFORE_PRESENT_UNCHANGED" (
+        Assert-CgceEqual "BEFORE_PRESENT_ALREADY_RESTORED" (
             Get-CgceRestoreSelectedCase `
                 "OBJECT_DUMP" $true $before $absent $absent $before $test $false
         )
+        Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+            Get-CgceRestoreSelectedCase `
+                "OBJECT_DUMP" $true $before $absent $test $before $test $false
+        }
         Assert-CgceEqual "BEFORE_PRESENT_ALREADY_RESTORED" (
             Get-CgceRestoreSelectedCase `
                 "OBJECT_DUMP" $true $before $absent $test $before $test $true
@@ -1163,6 +1315,27 @@ Invoke-CgceTest "short-lived root process uses immediate Process identity when C
         Assert-CgceEqual "D:\PalServer\PalServer.exe" $record.ExecutablePath
         Assert-CgceEqual $start.ToFileTimeUtc() `
             $record.CreationTimeFileTimeUtc
+    } finally {
+        Set-CgceRuntimeTestRootProcessRecordSeam $null
+    }
+}
+
+Invoke-CgceTest "root process CIM access failure never degrades to fallback identity" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    try {
+        Set-CgceRuntimeTestRootProcessRecordSeam {
+            throw "synthetic CIM access denied"
+        }
+        $process = [pscustomobject]@{
+            Id = 73
+            StartTime = [DateTime]::Parse("2026-07-23T01:02:03Z")
+        }
+        Assert-CgceThrows "CGCE-OPS-PROCESS-QUERY" {
+            & $module {
+                param($Value, $Path)
+                Get-CgceRootProcessRecord -Process $Value -CanonicalPath $Path
+            } $process "D:\PalServer\PalServer.exe"
+        }
     } finally {
         Set-CgceRuntimeTestRootProcessRecordSeam $null
     }

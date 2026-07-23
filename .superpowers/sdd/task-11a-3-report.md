@@ -64,7 +64,7 @@ Full Lua:
 
 ```text
 ./scripts/run-tests.sh
-lua_pass=432 lua_fail=0
+lua_pass=433 lua_fail=0
 exit 0
 ```
 
@@ -77,8 +77,8 @@ zsh:1: command not found: powershell.exe
 exit 127
 ```
 
-The suite contains 71 plain-PowerShell tests: Contract 22, Files 27, and
-Runtime 22. No claim is made that they pass until the suite runs
+The suite contains 74 plain-PowerShell tests: Contract 22, Files 27, and
+Runtime 25. No claim is made that they pass until the suite runs
 under elevated Windows PowerShell 5.1.
 
 ### Failed-review correction wave
@@ -122,6 +122,68 @@ The corrected implementation addresses every review finding:
    must restore exactly; the test no longer accepts manual recovery and its
    before-image assertions prove no overwrite.
 
+### R2 failed-review correction wave
+
+R2 regressions were also authored before production and plan changes. The
+focused Lua test failed first because the Task 6 skeleton still conditioned
+the restore call on probe-intent existence:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+FAIL requires Task 6 to invoke Task 3 restoration unconditionally
+exit 1
+```
+
+The Windows RED attempt remained unavailable:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/Run-CgceDiscoveryTests.ps1
+zsh: command not found: powershell.exe
+exit 127
+```
+
+The R2 correction addresses the six findings exactly:
+
+1. Runtime integer validation now accepts strict-parser `Decimal` values only
+   when they are integral and within the requested `Int64` bounds. CLR integer
+   values remain supported; booleans, strings, fractions, and overflow values
+   are rejected.
+2. The Task 6 restore skeleton calls `Restore-CgceInventoryProbe`
+   unconditionally after restoration checks begin. Only the helper may no-op,
+   after it proves that no Task 3 residue exists.
+3. Artifact and operation states now enforce exact key shape, Boolean/type
+   identity, bounded integral lengths, lowercase checksums, and
+   case-sensitive non-coercive comparison. Snapshot inventories reuse
+   `Compare-CgceInventory` validation for path components, controls, colons,
+   backslashes, sorting, and duplicates.
+4. A completed process result requires 1–998 PID receipts, and receipt 001's
+   executable must exactly match the launch executable. Zero-root and
+   allowlisted-wrong-root journals fail closed.
+5. Only a successful filtered CIM query returning null may use the immediate
+   `System.Diagnostics.Process` fallback. Query exceptions and access failures
+   now return `CGCE-OPS-PROCESS-QUERY`.
+6. The uncontracted `BEFORE_PRESENT_UNCHANGED` case was removed. An exact
+   active-before/original-absent/quarantine-absent stage-incomplete layout uses
+   `BEFORE_PRESENT_ALREADY_RESTORED`; its quarantine-test alternative requires
+   validated existing journal authority.
+
+R2 GREEN evidence:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+PASS Windows discovery handoff > keeps the inventory probe isolated to the two UE4SS dumpers
+PASS Windows discovery handoff > requires Task 6 to invoke Task 3 restoration unconditionally
+exit 0
+
+./scripts/run-tests.sh
+433 passed, 0 failed
+exit 0
+
+./scripts/verify-package.sh discovery
+DISCOVERY_PACKAGE_VERIFIED
+exit 0
+```
+
 ## Runtime coverage
 
 The Task 3 runtime tests cover:
@@ -144,6 +206,12 @@ The Task 3 runtime tests cover:
 - untouched versus journal-authorized already-restored alternatives,
   including exact absent and retained-test quarantine states;
 - null filtered-CIM fallback for an extremely short-lived root process;
+- strict-parser Decimal integer acceptance with fractional, string, Boolean,
+  and overflow rejection;
+- artifact-state coercion/checksum-case rejection and invalid inventory path
+  rejection;
+- completed-result zero-root and allowlisted-wrong-root rejection;
+- distinct filtered-CIM null and exception behavior;
 - ambiguous layout and unrelated quarantine preservation;
 - active/preserved foreign artifact blocking; and
 - synthetic child launch intent/root PID/result receipts, non-zero exit,
@@ -152,8 +220,7 @@ The Task 3 runtime tests cover:
 ## Static verification
 
 - `python3 -m json.tool`/equivalent JSON parsing on both existing Windows
-  schemas remains covered by the prior verification; no schema changed in the
-  correction wave.
+  schemas: exit 0; no schema changed in either correction wave.
 - `git diff --check`: exit 0.
 - Runtime/test delimiter audit: parentheses, braces, and brackets balanced.
 - Runtime export audit: exact six approved functions.
@@ -178,6 +245,10 @@ The Task 3 runtime tests cover:
   snapshot, original, quarantine, staged probe, or probe-enable line remains.
 - Confirmed completed process results cannot survive deletion, reordering, or
   mutation of their exact PID receipt chain.
+- Confirmed all six R2 findings against the final diff: Decimal receipt
+  numbers, unconditional downstream restoration, strict artifact/inventory
+  authority, nonempty root process evidence, null-only CIM fallback, and the
+  unchanged documented restore-case list.
 - Confirmed `Enable-CgceInventoryProbe` is the only probe-final writer and
   returns only its exact path/checksum.
 - Confirmed launch intent is immutable and contains only argument count/digest;

@@ -53,19 +53,28 @@ function Test-CgceRuntimeInteger(
     [int64]$Minimum,
     [int64]$Maximum
 ) {
-    if ($Value -isnot [sbyte] -and
-        $Value -isnot [byte] -and
-        $Value -isnot [int16] -and
-        $Value -isnot [uint16] -and
-        $Value -isnot [int32] -and
-        $Value -isnot [uint32] -and
-        $Value -isnot [int64] -and
-        $Value -isnot [uint64]) {
+    if ($null -eq $Value -or $Value -is [bool]) {
+        return $false
+    }
+    $typeCode = [Type]::GetTypeCode($Value.GetType())
+    if (@(
+            [TypeCode]::SByte,
+            [TypeCode]::Byte,
+            [TypeCode]::Int16,
+            [TypeCode]::UInt16,
+            [TypeCode]::Int32,
+            [TypeCode]::UInt32,
+            [TypeCode]::Int64,
+            [TypeCode]::UInt64,
+            [TypeCode]::Decimal
+        ) -notcontains $typeCode) {
         return $false
     }
     try {
-        $number = [int64]$Value
-        return $number -ge $Minimum -and $number -le $Maximum
+        $number = [decimal]$Value
+        return [decimal]::Truncate($number) -eq $number -and
+            $number -ge [decimal]$Minimum -and
+            $number -le [decimal]$Maximum
     } catch {
         return $false
     }
@@ -450,6 +459,7 @@ function Assert-CgceProcessResult(
             $value.exit_code ([int32]::MinValue) ([int32]::MaxValue)) -or
         $value.observed_processes -isnot [System.Array] -or
         $value.pid_receipts -isnot [System.Array] -or
+        $PidReceipts.Count -lt 1 -or $PidReceipts.Count -gt 998 -or
         @($value.observed_processes).Count -ne $PidReceipts.Count -or
         @($value.pid_receipts).Count -ne $PidReceipts.Count) {
         throw "CGCE-OPS-PROCESS-RECEIPT invalid process result fields"
@@ -516,6 +526,14 @@ function Assert-CgceProcessResult(
                     )
                 }).Count -ne 1) {
             throw "CGCE-OPS-PROCESS-RECEIPT observed executable not allowed"
+        }
+        if ($index -eq 0 -and
+            -not (Test-CgceRuntimePathEqual `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $expected.executable_path "CGCE-OPS-PROCESS-RECEIPT") `
+                (ConvertTo-CgceCanonicalRuntimePath `
+                    $Launch.executable_path "CGCE-OPS-PROCESS-RECEIPT"))) {
+            throw "CGCE-OPS-PROCESS-RECEIPT root PID launch binding drift"
         }
     }
 }
@@ -802,10 +820,34 @@ function Test-CgceArtifactStateEqual($Left, $Right) {
     if ($null -eq $Left -or $null -eq $Right) {
         return $null -eq $Left -and $null -eq $Right
     }
-    foreach ($key in @(
-        "artifact_type", "present", "length", "sha256", "tree_sha256"
-    )) {
-        if ($Left.$key -ne $Right.$key) { return $false }
+    if ($Left.artifact_type -isnot [string] -or
+        $Right.artifact_type -isnot [string] -or
+        $Left.artifact_type -cne $Right.artifact_type -or
+        $Left.present -isnot [bool] -or $Right.present -isnot [bool] -or
+        [bool]$Left.present -ne [bool]$Right.present) {
+        return $false
+    }
+    if ($null -eq $Left.length -or $null -eq $Right.length) {
+        if ($null -ne $Left.length -or $null -ne $Right.length) {
+            return $false
+        }
+    } elseif (-not (Test-CgceRuntimeInteger `
+            $Left.length 0 ([int64]::MaxValue)) -or
+        -not (Test-CgceRuntimeInteger `
+            $Right.length 0 ([int64]::MaxValue)) -or
+        [decimal]$Left.length -ne [decimal]$Right.length) {
+        return $false
+    }
+    foreach ($key in @("sha256", "tree_sha256")) {
+        if ($null -eq $Left.$key -or $null -eq $Right.$key) {
+            if ($null -ne $Left.$key -or $null -ne $Right.$key) {
+                return $false
+            }
+        } elseif ($Left.$key -isnot [string] -or
+            $Right.$key -isnot [string] -or
+            $Left.$key -cne $Right.$key) {
+            return $false
+        }
     }
     return $true
 }
@@ -1200,7 +1242,9 @@ function Assert-CgceArtifactStateSchema(
     Assert-CgceRuntimeExactKeys $State @(
         "artifact_type", "present", "length", "sha256", "tree_sha256"
     ) $Code
-    if ($State.artifact_type -cne $ExpectedType -or
+    if ($ExpectedType -cnotin @("FILE", "DIRECTORY") -or
+        $State.artifact_type -isnot [string] -or
+        $State.artifact_type -cne $ExpectedType -or
         $State.present -isnot [bool]) {
         throw "$Code invalid artifact state identity"
     }
@@ -1298,27 +1342,9 @@ function Read-CgceProbeSnapshotMap($Intent, $Paths) {
                 $snapshot.entries -isnot [System.Array]) {
                 throw "CGCE-OPS-PROBE-RECEIPT invalid directory snapshot"
             }
-            $previousPath = $null
-            foreach ($entry in @($snapshot.entries)) {
-                Assert-CgceRuntimeExactKeys $entry @(
-                    "relative_path", "length", "sha256"
-                ) "CGCE-OPS-PROBE-RECEIPT"
-                if ($entry.relative_path -isnot [string] -or
-                    [string]::IsNullOrWhiteSpace($entry.relative_path) -or
-                    $entry.relative_path.Contains("\") -or
-                    $entry.relative_path.StartsWith("/") -or
-                    $entry.relative_path.Contains("../") -or
-                    -not (Test-CgceRuntimeInteger `
-                        $entry.length 0 ([int64]::MaxValue)) -or
-                    -not (Test-CgceRuntimeChecksum $entry.sha256) -or
-                    ($null -ne $previousPath -and
-                        [StringComparer]::Ordinal.Compare(
-                            $previousPath, $entry.relative_path
-                        ) -ge 0)) {
-                    throw "CGCE-OPS-PROBE-RECEIPT invalid snapshot inventory"
-                }
-                $previousPath = $entry.relative_path
-            }
+            Compare-CgceInventory `
+                -Expected ([object[]]@($snapshot.entries)) `
+                -Actual ([object[]]@($snapshot.entries))
         }
         $map[$binding.artifact_name] = $snapshot
     }
@@ -1339,6 +1365,12 @@ function Assert-CgceOperationPairState($Pair, [string]$Code) {
             Assert-CgceRuntimeExactKeys $state @(
                 "artifact_type", "present", "length", "sha256", "tree_sha256"
             ) $Code
+            if ($state.artifact_type -isnot [string] -or
+                @("FILE", "DIRECTORY") -cnotcontains $state.artifact_type) {
+                throw "$Code invalid operation artifact type"
+            }
+            Assert-CgceArtifactStateSchema `
+                $state $state.artifact_type $Code
         }
     }
 }
@@ -1633,11 +1665,11 @@ function Get-CgceRestoreSelectedCase(
         if ($aT -and $oN -and $qN) { return "BEFORE_ABSENT_TEST_ACTIVE" }
         if ($aN -and $oN -and $qT) { return "BEFORE_ABSENT_TEST_QUARANTINED" }
     } else {
-        if ($aB -and $oN -and ($qN -or $qT)) {
-            if ($AllowJournalRestored) {
-                return "BEFORE_PRESENT_ALREADY_RESTORED"
-            }
-            if ($qN) { return "BEFORE_PRESENT_UNCHANGED" }
+        if ($aB -and $oN -and $qN) {
+            return "BEFORE_PRESENT_ALREADY_RESTORED"
+        }
+        if ($aB -and $oN -and $qT -and $AllowJournalRestored) {
+            return "BEFORE_PRESENT_ALREADY_RESTORED"
         }
         if ($aN -and $oB -and $qN) { return "BEFORE_PRESENT_ORIGINAL_PRESERVED_NO_TEST" }
         if ($aT -and $oB -and $qN) { return "BEFORE_PRESENT_TEST_ACTIVE_AND_ORIGINAL_PRESERVED" }
@@ -1678,7 +1710,6 @@ function Assert-CgceRestorePlans([object[]]$Plans) {
         "BEFORE_PRESENT_ORIGINAL_PRESERVED_NO_TEST",
         "BEFORE_PRESENT_TEST_ACTIVE_AND_ORIGINAL_PRESERVED",
         "BEFORE_PRESENT_TEST_QUARANTINED_AND_ORIGINAL_PRESERVED",
-        "BEFORE_PRESENT_UNCHANGED",
         "BEFORE_PRESENT_ALREADY_RESTORED"
     )
     for ($index = 0; $index -lt $Plans.Count; $index += 1) {
@@ -1831,7 +1862,9 @@ function Assert-CgceRestorePlansBoundToSnapshots(
             throw "CGCE-OPS-PROBE-RECEIPT restore plan snapshot presence drift"
         }
         if ($plan.selected_case -like "*ALREADY_RESTORED") {
-            if (-not $HasJournalAuthority -or
+            $stageIncompleteOutput = $index -ge 2 -and
+                -not $plan.quarantine_state.present
+            if ((-not $HasJournalAuthority -and -not $stageIncompleteOutput) -or
                 -not (Test-CgceArtifactStateEqual `
                     $plan.active_state $before) -or
                 $plan.original_state.present) {
@@ -2534,7 +2567,7 @@ function Get-CgceRootProcessRecord($Process, [string]$CanonicalPath) {
                 -Filter ("ProcessId=" + $Process.Id) -ErrorAction Stop
         }
     } catch {
-        $record = $null
+        throw "CGCE-OPS-PROCESS-QUERY root process query failed"
     }
     if ($null -eq $record) {
         try {
