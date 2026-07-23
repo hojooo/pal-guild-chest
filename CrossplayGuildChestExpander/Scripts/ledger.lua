@@ -880,18 +880,18 @@ end
 function ledger.verify(fs, root, relative_path, audit_context)
     local capture_ok, handle = pcall(audit_capture, audit_context)
     if not capture_ok then
-        return audit_failure_result()
+        return audit_failure_result(), nil
     end
     local trusted_ok, fresh, fresh_checksum = pcall(trusted_audit, handle, "CGCE-LEDGER-AUDIT")
     if not trusted_ok then
-        return audit_failure_result()
+        return audit_failure_result(), nil
     end
 
     local load_result = load_ledger(fs, root, relative_path)
     if load_result.status ~= "LOADED" then
-        return load_status_result(load_result, fresh, fresh_checksum)
+        return load_status_result(load_result, fresh, fresh_checksum), handle
     end
-    return compare_live(load_result.ledger, fresh, fresh_checksum)
+    return compare_live(load_result.ledger, fresh, fresh_checksum), handle
 end
 
 return ledger

@@ -138,6 +138,153 @@ describe("world_ready bounded selected-world authority", function()
         assert_zero_forbidden(runtime)
     end)
 
+    it("notifies exactly once after an asynchronous PENDING to READY transition", function()
+        local runtime = runtime_binding_fixture.new({ ready = false })
+        local timers = timer_harness()
+        local notifications = 0
+        local callback_state
+        local callback_world_id
+        local detector
+
+        detector = start(runtime, timers, {
+            on_terminal = function(callback_detector)
+                notifications = notifications + 1
+                a.equal(detector, callback_detector)
+                callback_state = world_ready.status(callback_detector).state
+                local epoch = world_ready.epoch(callback_detector)
+                callback_world_id = world_ready.world_id(epoch)
+            end,
+        })
+
+        a.equal("PENDING", world_ready.status(detector).state)
+        a.equal(0, notifications)
+
+        runtime:set_ready(true)
+        runtime:fire_world_ready()
+
+        a.equal("READY", callback_state)
+        a.equal("test-world-alpha", callback_world_id)
+        a.equal(1, notifications)
+
+        runtime:fire_world_ready()
+        timers:fire_late(2)
+        a.equal("BLOCKED", world_ready.status(detector).state)
+        a.equal(1, notifications)
+
+        a.equal(true, world_ready.close(detector))
+        runtime:fire_world_ready_late()
+        a.equal(1, notifications)
+        assert_zero_forbidden(runtime)
+    end)
+
+    it("notifies exactly once after an asynchronous PENDING to BLOCKED transition", function()
+        local runtime = runtime_binding_fixture.new({ ready = false })
+        local timers = timer_harness()
+        local notifications = 0
+        local callback_status
+        local detector
+
+        detector = start(runtime, timers, {
+            on_terminal = function(callback_detector)
+                notifications = notifications + 1
+                a.equal(detector, callback_detector)
+                callback_status = world_ready.status(callback_detector)
+            end,
+        })
+
+        while timers:fire_next() do
+        end
+
+        a.equal(1, notifications)
+        a.equal("BLOCKED", callback_status.state)
+        a.equal("CGCE-WORLD-TIMEOUT", callback_status.errors[1].code)
+        a.equal(nil, world_ready.epoch(detector))
+
+        runtime:fire_world_ready_late()
+        timers:fire_late(#timers.records)
+        a.equal(1, notifications)
+        a.equal(true, world_ready.close(detector))
+        a.equal(1, notifications)
+        assert_zero_forbidden(runtime)
+    end)
+
+    it("fails closed and sanitizes an asynchronous terminal callback failure", function()
+        local runtime = runtime_binding_fixture.new({ ready = false })
+        local timers = timer_harness()
+        local notifications = 0
+        local callback_state
+        local callback_epoch
+        local detector = start(runtime, timers, {
+            on_terminal = function(callback_detector)
+                notifications = notifications + 1
+                callback_state = world_ready.status(callback_detector).state
+                callback_epoch = world_ready.epoch(callback_detector)
+                error("secret callback failure 0xDEADBEEF")
+            end,
+        })
+
+        runtime:set_ready(true)
+        runtime:fire_world_ready()
+
+        local status = world_ready.status(detector)
+        a.equal("BLOCKED", status.state)
+        a.equal(1, notifications)
+        a.equal("READY", callback_state)
+        a.equal("function", type(callback_epoch))
+        a.equal("CGCE-WORLD-TERMINAL-CALLBACK", status.errors[1].code)
+        a.equal("on_terminal", status.errors[1].field)
+        a.equal("world readiness terminal callback failed", status.errors[1].detail)
+        a.equal(nil, status.errors[1].detail:find("secret", 1, true))
+        a.equal(nil, status.errors[1].detail:find("0x", 1, true))
+        a.equal(nil, world_ready.epoch(detector))
+        expect_problem("CGCE-WORLD-EPOCH", "epoch", function()
+            world_ready.world_id(callback_epoch)
+        end)
+
+        runtime:fire_world_ready_late()
+        timers:fire_late(2)
+        a.equal(1, notifications)
+        a.equal(true, world_ready.close(detector))
+        a.equal(1, notifications)
+        assert_zero_forbidden(runtime)
+    end)
+
+    it("does not notify terminal callbacks for immediate startup outcomes", function()
+        local notifications = 0
+        local callback = function()
+            notifications = notifications + 1
+        end
+
+        local ready_runtime = runtime_binding_fixture.new()
+        local ready_detector = start(ready_runtime, timer_harness(), {
+            on_terminal = callback,
+        })
+        a.equal("READY", world_ready.status(ready_detector).state)
+
+        local registration_race_runtime = runtime_binding_fixture.new({
+            ready = false,
+            on_register = function(value)
+                value:set_ready(true)
+            end,
+        })
+        local registration_race_detector = start(
+            registration_race_runtime,
+            timer_harness(),
+            { on_terminal = callback }
+        )
+        a.equal("READY", world_ready.status(registration_race_detector).state)
+
+        local blocked_runtime = runtime_binding_fixture.new({ world_id = "" })
+        local blocked_detector = start(blocked_runtime, timer_harness(), {
+            on_terminal = callback,
+        })
+        a.equal("BLOCKED", world_ready.status(blocked_detector).state)
+        a.equal(0, notifications)
+        assert_zero_forbidden(ready_runtime)
+        assert_zero_forbidden(registration_race_runtime)
+        assert_zero_forbidden(blocked_runtime)
+    end)
+
     it("validates candidate manager relations without exporting epoch handles", function()
         local runtime = runtime_binding_fixture.new()
         local detector = start(runtime, timer_harness())
@@ -702,6 +849,9 @@ describe("world_ready bounded selected-world authority", function()
 
         expect_problem("CGCE-WORLD-OPTIONS", "unexpected", function()
             start(runtime, timers, { unexpected = true })
+        end)
+        expect_problem("CGCE-WORLD-OPTIONS", "on_terminal", function()
+            start(runtime, timers, { on_terminal = true })
         end)
         expect_problem("CGCE-WORLD-DETECTOR", "detector", function()
             world_ready.status(function() end)

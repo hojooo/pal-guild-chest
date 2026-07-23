@@ -30,6 +30,7 @@ local option_fields = {
     binding_session = true,
     schedule = true,
     cancel = true,
+    on_terminal = true,
 }
 
 local option_field_order = {
@@ -108,6 +109,15 @@ local function capture_options(options)
     if type(captured.cancel) ~= "function" then
         fail("CGCE-WORLD-OPTIONS", "cancel", "cancel must be a function")
     end
+    local on_terminal = rawget(options, "on_terminal")
+    if on_terminal ~= nil and type(on_terminal) ~= "function" then
+        fail(
+            "CGCE-WORLD-OPTIONS",
+            "on_terminal",
+            "on_terminal must be a function when provided"
+        )
+    end
+    captured.on_terminal = on_terminal
     return captured
 end
 
@@ -525,9 +535,36 @@ local function cleanup_timer(record)
     return true
 end
 
+local function notify_terminal(record)
+    if not record.terminal_callback_armed
+        or record.terminal_callback_delivered
+        or record.close_requested
+        or (record.state ~= "READY" and record.state ~= "BLOCKED") then
+        return
+    end
+
+    record.terminal_callback_delivered = true
+    if record.on_terminal == nil then
+        return
+    end
+
+    local values = table.pack(pcall(record.on_terminal, record.handle))
+    if values[1] then
+        return
+    end
+
+    mark_blocked(record, problem(
+        "CGCE-WORLD-TERMINAL-CALLBACK",
+        "on_terminal",
+        "world readiness terminal callback failed"
+    ))
+    cleanup_observation(record)
+end
+
 local function block_and_cleanup_observation(record, value)
     mark_blocked(record, value)
     cleanup_observation(record)
+    notify_terminal(record)
 end
 
 local function create_epoch(record, relation)
@@ -582,6 +619,7 @@ local function scheduler_terminal(record, snapshot)
         and record.probe_relation ~= nil then
         record.state = "READY"
         create_epoch(record, record.probe_relation)
+        notify_terminal(record)
         return
     end
 
@@ -653,6 +691,9 @@ function world_ready.start(options)
         observation_cleanup_attempted = false,
         timer_cleanup_attempted = false,
         observed_event_epoch = function() end,
+        on_terminal = ports.on_terminal,
+        terminal_callback_armed = false,
+        terminal_callback_delivered = false,
     }
     detector_records[detector] = record
 
@@ -758,6 +799,9 @@ function world_ready.start(options)
     end
 
     wake_pending(record)
+    if record.state == "PENDING" and not record.close_requested then
+        record.terminal_callback_armed = true
+    end
     return detector
 end
 

@@ -535,13 +535,15 @@ describe("migration ledger", function()
         audit.to_table = audit.capture
         audit.checksum = audit.capture
 
-        local ok, result = pcall(ledger.verify, fs, ROOT, LEDGER_PATH, live_context)
+        local ok, result, fresh_handle = pcall(ledger.verify, fs, ROOT, LEDGER_PATH, live_context)
 
         audit.capture = original_capture
         audit.to_table = original_to_table
         audit.checksum = original_checksum
         a.equal(true, ok)
         a.equal("MALFORMED", result.status)
+        a.equal("function", type(fresh_handle))
+        a.equal(result.fresh_audit_checksum, audit.checksum(fresh_handle))
         a.equal(1, calls.count)
 
         fs = filesystem_with(value)
@@ -554,6 +556,64 @@ describe("migration ledger", function()
         result = ledger.verify(fs, ROOT, LEDGER_PATH, live_context)
         a.equal("MATCH", result.status)
         a.equal(1, calls.count)
+    end)
+
+    it("returns the opaque fresh audit handle for every successfully captured load outcome", function()
+        local value = build_ledger("COMPLETE")
+        local read_failed_fs = filesystem_with(value)
+        read_failed_fs.read_all_no_follow = function()
+            return nil, "permission denied"
+        end
+        local cases = {
+            { expected = "MISSING", fs = filesystem_with() },
+            { expected = "MALFORMED", fs = filesystem_with("{not-json") },
+            { expected = "READ_FAILED", fs = read_failed_fs },
+            { expected = "MATCH", fs = filesystem_with(value) },
+        }
+
+        for _, case in ipairs(cases) do
+            local live_context = audit_fixture({ alpha_slots = 358, beta_slots = 358 })
+            local verification, fresh_handle = ledger.verify(
+                case.fs,
+                ROOT,
+                LEDGER_PATH,
+                live_context
+            )
+
+            a.equal(case.expected, verification.status)
+            a.equal("function", type(fresh_handle))
+            a.equal(false, type(fresh_handle) == "table")
+            a.equal(verification.fresh_audit_checksum, audit.checksum(fresh_handle))
+            a.equal(verification.fresh_audit_checksum, audit.to_table(fresh_handle).checksum)
+        end
+    end)
+
+    it("returns no fresh audit handle when capture or trusted validation fails", function()
+        local capture_result, capture_handle = ledger.verify(
+            filesystem_with(),
+            ROOT,
+            LEDGER_PATH,
+            {}
+        )
+        a.equal("AUDIT_BLOCKED", capture_result.status)
+        a.equal(nil, capture_handle)
+
+        local original_hex = sha256.hex
+        sha256.hex = function()
+            return "not-a-sha256"
+        end
+        local ok, trusted_result, trusted_handle = pcall(
+            ledger.verify,
+            filesystem_with(),
+            ROOT,
+            LEDGER_PATH,
+            audit_fixture()
+        )
+        sha256.hex = original_hex
+
+        a.equal(true, ok)
+        a.equal("AUDIT_BLOCKED", trusted_result.status)
+        a.equal(nil, trusted_handle)
     end)
 
     it("reports a ledger guild missing from the fresh audit deterministically", function()
