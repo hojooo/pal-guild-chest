@@ -676,7 +676,268 @@ git commit -m "feat: verify Windows discovery filesystem copies"
   `CGCE-OPS-PROCESS-ACTIVE`, `CGCE-OPS-PORT-ACTIVE`,
   `CGCE-OPS-ARGUMENT`, `CGCE-OPS-PROBE-EXISTS`,
   `CGCE-OPS-MODS-TXT`, `CGCE-OPS-PROCESS-TIMEOUT`,
-  `CGCE-OPS-CAPTURE-MISSING`.
+  `CGCE-OPS-CAPTURE-MISSING`, `CGCE-OPS-PROCESS-QUERY`,
+  `CGCE-OPS-PORT-QUERY`, `CGCE-OPS-PROCESS-UNLISTED`,
+  `CGCE-OPS-PROCESS-RECEIPT`, `CGCE-OPS-PROBE-RECEIPT`,
+  `CGCE-OPS-FOREIGN-ARTIFACT`, `CGCE-OPS-MANUAL-RECOVERY`.
+
+#### Fixed Task 3 runtime journal contract
+
+The exact 41-key `Paths` object from Task 2 remains unchanged. Task 3 Runtime
+may derive only these fixed journal/snapshot children:
+
+```text
+<run_directory>\before\
+  010-mods-txt.json
+  020-object-dump.json
+  030-cxx-header-dump.json
+  040-ue4ss-log.json
+  050-probe-source.json
+
+<probe_receipts>\
+  000-probe-intent.json
+  010-preserve-mods.json
+  020-create-test-mods.json
+  030-preserve-object-dump.json
+  040-preserve-cxx-header-dump.json
+  050-preserve-ue4ss-log.json
+  060-stage-probe.json
+  999-probe-final.json
+  restore\
+    000-probe-restore-intent.json
+    010-quarantine-probe.json
+    020-quarantine-test-mods.json
+    030-restore-mods.json
+    040-quarantine-object-dump.json
+    050-restore-object-dump.json
+    060-quarantine-cxx-header-dump.json
+    070-restore-cxx-header-dump.json
+    080-quarantine-ue4ss-log.json
+    090-restore-ue4ss-log.json
+    999-probe-restore-final.json
+
+<process_receipts>\
+  000-launch.json
+  001-pid.json ... 998-pid.json
+  999-result.json
+```
+
+This allowlist is scoped to Task 3 Runtime-owned snapshots and journals.
+Later entry-point-owned children, including Task 5/7 fixed capture payloads
+below `Paths.capture`, remain governed by those tasks. Atomic
+`<target>.tmp` files may exist only during `Write-CgceJsonAtomic`. Unknown
+children, stale temp files, gaps, duplicates, or checksum drift block automatic
+recovery.
+
+Every runtime JSON object has `schema_version="1.0"`, its exact key set, no
+unknown/duplicate/case-variant key, UTF-8 without BOM, strict read-back, and a
+no-overwrite write. Exact snapshot keys are:
+
+```text
+schema_version,kind,run_id,artifact_name,artifact_type,path,
+present,length,sha256,entries
+```
+
+The five snapshots bind `MODS_TXT`, `OBJECT_DUMP`, `CXX_HEADER_DUMP`,
+`UE4SS_LOG`, and `PROBE_SOURCE` in that order. File snapshots use
+`length,sha256`; directory snapshots use the full sorted inventory in
+`entries`; absent optional artifacts use null measurements. The probe intent
+has exact keys:
+
+```text
+schema_version,kind,run_id,created_at_utc,run_directory,ue4ss_root,
+paths,snapshots
+```
+
+Its `paths` object has exact keys:
+
+```text
+before_directory,probe_source,probe_staged,probe_quarantine,
+mods_txt,mods_original,mods_test,
+object_dump,object_dump_original,object_dump_quarantine,
+cxx_header_dump,cxx_header_dump_original,cxx_header_dump_quarantine,
+ue4ss_log,ue4ss_log_original,ue4ss_log_quarantine,
+probe_receipts,probe_restore_receipts,probe_final_receipt
+```
+
+Each snapshot binding has exact keys
+`artifact_name,snapshot_path,snapshot_sha256`. Probe and probe-restore
+operation receipts have exact keys:
+
+```text
+schema_version,kind,run_id,sequence,step,operation,
+source_path,destination_path,before_state,after_state,
+previous_receipt_sha256,completed_at_utc
+```
+
+The named `artifact_state` schema has exact keys
+`artifact_type,present,length,sha256,tree_sha256`. Every operation receipt
+`before_state` and `after_state` is the named `operation_pair_state` schema
+with exact keys
+`source,destination`; each value is either null or one `artifact_state`.
+When `source_path=null`, `source=null`; otherwise both pair members are
+explicit `artifact_state` objects, including explicit absent states.
+Staging sequences/steps are
+`010 PRESERVE_MODS`, `020 CREATE_TEST_MODS`,
+`030 PRESERVE_OBJECT_DUMP`, `040 PRESERVE_CXX_HEADER_DUMP`,
+`050 PRESERVE_UE4SS_LOG`, and `060 STAGE_PROBE`; absent optional artifacts
+still receive a gapless `VERIFY_ABSENT` receipt. Restore sequences/steps are
+`010 QUARANTINE_PROBE`, `020 QUARANTINE_TEST_MODS`, `030 RESTORE_MODS`,
+`040 QUARANTINE_OBJECT_DUMP`, `050 RESTORE_OBJECT_DUMP`,
+`060 QUARANTINE_CXX_HEADER_DUMP`, `070 RESTORE_CXX_HEADER_DUMP`,
+`080 QUARANTINE_UE4SS_LOG`, and `090 RESTORE_UE4SS_LOG`. Each operation
+points to the preceding exact receipt checksum.
+
+The probe final has exact keys:
+
+```text
+schema_version,kind,run_id,sequence,intent_sha256,
+previous_receipt_sha256,mods_before_sha256,mods_after_sha256,
+staged_path,paths,operation_receipts,completed_at_utc
+```
+
+The restore intent has exact keys:
+
+```text
+schema_version,kind,run_id,sequence,created_at_utc,
+stage_intent_sha256,stage_final_sha256,
+stage_chain_last_sequence,stage_chain_last_sha256,paths,plans
+```
+
+Each plan has exact keys
+`artifact_name,selected_case,before_present,active_state,original_state,
+quarantine_state`. The restore final has exact keys:
+
+```text
+schema_version,kind,run_id,sequence,restore_intent_sha256,
+previous_receipt_sha256,paths,operation_receipts,restored_states,
+completed_at_utc
+```
+
+Each receipt binding is exactly `sequence,path,sha256`; each restored-state
+binding is exactly `artifact_name,state`. Restoration validates the longest
+valid staging/restore prefix and accepts an unreceipted completed operation
+only when the intent-bound source/destination states prove that exact next
+step. It never backfills the staging journal, overwrites, deletes, or crosses a
+volume; ambiguity returns `CGCE-OPS-MANUAL-RECOVERY`.
+
+The restore intent freezes the selected case and entry states before step 010.
+The fixed paths are:
+
+| Seq | Source | Destination | Kind |
+|---:|---|---|---|
+| 010 | `probe_staged` | `probe_quarantine` | directory |
+| 020 | `mods_txt` | `mods_test` | file |
+| 030 | `mods_original` | `mods_txt` | file |
+| 040 | `object_dump` | `object_dump_quarantine` | file |
+| 050 | `object_dump_original` | `object_dump` | file |
+| 060 | `cxx_header_dump` | `cxx_header_dump_quarantine` | directory |
+| 070 | `cxx_header_dump_original` | `cxx_header_dump` | directory |
+| 080 | `ue4ss_log` | `ue4ss_log_quarantine` | file |
+| 090 | `ue4ss_log_original` | `ue4ss_log` | file |
+
+For a move, the before pair is exact present source plus absent destination and
+the after pair is absent source plus the same exact destination.
+`VERIFY_ABSENT` binds absent artifact states for both pair members before/after;
+`VERIFY_RESTORED` binds the identical case-specific pair before/after.
+
+The normative case-to-step matrix is:
+
+```text
+PROBE_NOT_STAGED:
+  010 VERIFY_ABSENT (-,-) -> (-,-)
+PROBE_ACTIVE:
+  010 MOVE_DIRECTORY (T,-) -> (-,T)
+PROBE_ALREADY_QUARANTINED:
+  010 VERIFY_RESTORED (-,T) -> (-,T)
+
+ORIGINAL_UNCHANGED:
+  020 VERIFY_RESTORED (A,Q)=(B,-)
+  030 VERIFY_RESTORED (O,A)=(-,B)
+ORIGINAL_PRESERVED_NO_TEST:
+  020 VERIFY_ABSENT (A,Q)=(-,-)
+  030 MOVE_FILE O(B)->A
+TEST_ACTIVE_AND_ORIGINAL_PRESERVED:
+  020 MOVE_FILE A(T)->Q
+  030 MOVE_FILE O(B)->A
+TEST_QUARANTINED_AND_ORIGINAL_PRESERVED:
+  020 VERIFY_RESTORED (A,Q)=(-,T)
+  030 MOVE_FILE O(B)->A
+ORIGINAL_ALREADY_RESTORED:
+  020 VERIFY_RESTORED (A,Q)=(B,<intent-bound - or T>)
+  030 VERIFY_RESTORED (O,A)=(-,B)
+
+BEFORE_ABSENT_NO_TEST:
+  quarantine VERIFY_ABSENT; restore VERIFY_ABSENT
+BEFORE_ABSENT_TEST_ACTIVE:
+  quarantine MOVE A(T)->Q; restore VERIFY_ABSENT
+BEFORE_ABSENT_TEST_QUARANTINED:
+  quarantine VERIFY_RESTORED (A,Q)=(-,T); restore VERIFY_ABSENT
+BEFORE_PRESENT_ORIGINAL_PRESERVED_NO_TEST:
+  quarantine VERIFY_ABSENT; restore MOVE O(B)->A
+BEFORE_PRESENT_TEST_ACTIVE_AND_ORIGINAL_PRESERVED:
+  quarantine MOVE A(T)->Q; restore MOVE O(B)->A
+BEFORE_PRESENT_TEST_QUARANTINED_AND_ORIGINAL_PRESERVED:
+  quarantine VERIFY_RESTORED (A,Q)=(-,T); restore MOVE O(B)->A
+BEFORE_PRESENT_ALREADY_RESTORED:
+  quarantine VERIFY_RESTORED (A,Q)=(B,<intent-bound - or T>)
+  restore VERIFY_RESTORED (O,A)=(-,B)
+```
+
+The seven output cases apply independently to object dump steps 040/050, CXX
+header steps 060/070, and log steps 080/090 with the fixed file/directory move
+kind. For the next missing receipt only, live state must equal either the
+frozen exact before state (perform once, verify, receipt) or exact after state
+(operation completed before receipt; verify and receipt). Any other state is
+manual recovery without mutation.
+
+`000-launch.json` is the immutable pre-launch intent, not a post-launch PID
+receipt. It has exact keys:
+
+```text
+schema_version,kind,run_id,sequence,created_at_utc,
+executable_path,executable_sha256,working_directory,
+allowed_executable_path_count,allowed_executable_paths_sha256,
+argument_count,arguments_sha256,timeout_seconds,previous_receipt_sha256
+```
+
+It is written, strictly read back, and checksum-verified before
+`Start-Process`; any pre-existing process-journal child is the one-launch
+replay barrier. Root/descendant identities are separate gapless
+`001..998-pid.json` files with exact keys:
+
+```text
+schema_version,kind,run_id,sequence,pid,parent_pid,executable_path,
+creation_time_utc,creation_time_filetime_utc,observed_at_utc,
+previous_receipt_sha256
+```
+
+PID identity is exact PID + canonical executable path + UTC creation
+`FileTime`. `999-result.json` has exact keys:
+
+```text
+schema_version,kind,run_id,sequence,launch_receipt_sha256,
+previous_receipt_sha256,started_at_utc,exit_at_utc,exit_code,
+observed_processes,pid_receipts
+```
+
+Each observed-process item is exactly
+`sequence,pid,parent_pid,executable_path,creation_time_utc,
+creation_time_filetime_utc`; argument plaintext is never persisted. Argument
+and allowlist digests frame the ordered UTF-8 strings with domains
+`CGCE-ARGS-1\0` and `CGCE-PATHS-1\0`, a big-endian UInt32 count, then each
+big-endian UInt32 byte length and bytes. Directory `tree_sha256` frames the
+sorted inventory with `CGCE-TREE-1\0`, count, each path length/path, UInt64
+file length, and raw 32-byte file checksum.
+
+Receipt-aware `Assert-CgceNoServerActivity` recomputes the exact canonical
+allowlist count/framed digest and requires it to match `000-launch.json`;
+mismatch is `CGCE-OPS-PROCESS-RECEIPT`. Preflight claims only exact
+allowlisted-image blocking, still-live durable PID identity blocking, and
+configured endpoint blocking. During one launched run, ancestry polling
+enforces the allowlist for every descendant actually observed from the known
+root. It does not claim kernel-enforced containment or complete history for an
+extremely short-lived descendant between polling samples.
 
 - [ ] **Step 1: Write failing runtime tests**
 
@@ -1197,12 +1458,12 @@ state is re-read under the lock before checking phase or paths.
 
 `Invoke-CgceChildProcess` re-hashes the executable against
 `ExpectedExecutableChecksum` immediately before launch, sets the working
-directory to the executable's parent, and writes a no-overwrite launch intent
-under `ReceiptRoot` before `Start-Process -PassThru`. Immediately after launch
-it writes the root PID, executable SHA-256, sanitized argument-array checksum,
-executable path, process creation time, and start UTC to
-`process_launch_receipt`; each newly observed descendant gets its own chained
-no-overwrite PID/path/creation-time receipt. Before launch it requires
+directory to the executable's parent, and writes the immutable no-overwrite
+pre-launch intent at `process_launch_receipt` before
+`Start-Process -PassThru`. It never replaces that file with PID data.
+Immediately after launch it writes the root identity to `001-pid.json`; each
+newly observed descendant gets the next gapless chained no-overwrite
+PID/path/creation-time receipt through `998-pid.json`. Before launch it requires
 `Executable` to be an exact member of `AllowedExecutablePaths`; during tracking
 it canonicalizes each descendant image and blocks before success if any image
 is absent from that same bound allowlist. The final
@@ -1211,13 +1472,14 @@ During the bounded wait it recursively tracks descendants through
 `Win32_Process.ParentProcessId`; success requires the root and every observed
 descendant to exit, followed by the process/listener check shown above.
 
-The state reaches `RUNNING` before launch, so a crash can never replay
-`Start-Process`. For the gap between process creation and the first PID receipt,
-the exact executable-path scan is sound only because control evidence requires
-an operator-attested exhaustive set of all possible server-owned descendant
-images; configured ports provide an independent second check. During normal
-tracking, discovery of an unlisted descendant immediately blocks the run and
-proves that the completeness attestation was false. Restore remains blocked
+The state reaches `RUNNING` and the immutable launch intent exists before
+launch, so a crash can never replay `Start-Process`. Preflight blocks exact
+attested executable images, durable PID identities, and configured endpoints;
+it does not claim to discover an arbitrary unlisted descendant before launch.
+During normal ancestry polling, discovery of an observed unlisted descendant
+immediately blocks the run and proves that the completeness attestation was
+false. Extremely short-lived descendants that start and exit between polling
+samples are outside the bounded observation claim. Restore remains blocked
 until every allowlisted process, durably receipted PID identity, and configured
 listener is inactive. The helper never starts a replacement process. On timeout
 it throws a stable error; the entry point marks the run blocked and instructs

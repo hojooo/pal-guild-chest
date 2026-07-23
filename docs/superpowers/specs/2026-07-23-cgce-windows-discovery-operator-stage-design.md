@@ -202,6 +202,36 @@ marker는 이 파일의 checksum과 RunId/RunRoot를 결합한다. 이후 mutabl
 바뀌지 않으며, 모든 entry point는 marker, genesis, current-state identity를
 함께 검증한다.
 
+Task 11A.3 runtime journal은 기존 exact 41-key `Paths` schema를 변경하지
+않는다. `receipts\process\000-launch.json`은 `Start-Process` 전에 생성·검증되는
+immutable launch intent이며 PID 정보로 교체하지 않는다. root/descendant
+identity는 gapless `001..998-pid.json`, 성공 결과는 `999-result.json`에
+checksum chain으로 기록한다. argument plaintext는 receipt에 기록하지 않고
+framed digest와 count만 기록한다. Probe는 fixed `before\` metadata snapshots,
+`receipts\probe\000/010..060/999`, 그리고 fixed `restore\000/010..090/999`
+children만 사용하며 valid receipt-prefix와 intent-bound exact filesystem
+matrix가 함께 증명될 때만 no-overwrite recovery를 계속한다. 이 derived-path
+allowlist는 Task 3 Runtime-owned journal/snapshot에만 적용되며 Task 5/7의
+fixed capture children은 각 task contract를 따른다.
+
+Probe restore intent는 `PROBE`, `MODS_TXT`, `OBJECT_DUMP`,
+`CXX_HEADER_DUMP`, `UE4SS_LOG`의 exact entry state와 selected case를 step
+010 전에 고정한다. 이후 010..090은 각각 probe quarantine, test mods
+quarantine/original restore, object quarantine/original restore, header
+quarantine/original restore, log quarantine/original restore의 fixed
+source/destination만 사용한다. 각 missing receipt에서 live state가 intent의
+exact before state이면 operation을 한 번 수행하고, exact after state이면
+crash-before-receipt로 인정해 operation 없이 receipt만 완성한다. 그 외
+layout은 overwrite 없이 `CGCE-OPS-MANUAL-RECOVERY`다.
+
+Process preflight는 attested exact executable image, valid durable
+PID/path/creation-FileTime identity, configured TCP/UDP endpoint를 fail-closed로
+차단한다. receipt-aware preflight는 현재 canonical executable allowlist의
+framed count/digest가 launch intent와 exact match인지도 검증한다. Launch 후
+known root ancestry polling으로 실제 관찰한 descendant만 allowlist enforcement
+대상이며, polling interval 사이에 시작·종료한 극단적으로 짧은 descendant의
+완전한 history나 kernel-enforced containment를 주장하지 않는다.
+
 ## 실행 흐름
 
 ### 1. Build

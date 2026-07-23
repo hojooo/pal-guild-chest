@@ -6,3 +6,6 @@ Import-Module $contractModule -Force -Scope Global | Out-Null
 
 $filesModule = Join-Path $PSScriptRoot "modules\CgceDiscovery.Files.psm1"
 Import-Module $filesModule -Force -Scope Global | Out-Null
+
+$runtimeModule = Join-Path $PSScriptRoot "modules\CgceDiscovery.Runtime.psm1"
+Import-Module $runtimeModule -Force -Scope Global | Out-Null
