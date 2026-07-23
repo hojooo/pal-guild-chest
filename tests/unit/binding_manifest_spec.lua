@@ -1,43 +1,14 @@
 local a = require("tests.support.assertions")
 local binding_manifest = require("CrossplayGuildChestExpander.Scripts.binding_manifest")
+local binding_symbols = require("CrossplayGuildChestExpander.Scripts.binding_symbols")
 local constants = require("CrossplayGuildChestExpander.Scripts.constants")
 local json = require("CrossplayGuildChestExpander.Scripts.json")
 local sha256 = require("CrossplayGuildChestExpander.Scripts.sha256")
 
-local logical_kinds = {
-    world_ready_function = "function",
-    world_ready_state_property = "property",
-    selected_world_class = "class",
-    world_id_property = "property",
-    selected_world_guild_manager_property = "property",
-    selected_world_container_manager_property = "property",
-    guild_manager_class = "class",
-    guild_class = "class",
-    guild_list_property = "property",
-    guild_id_property = "property",
-    guild_name_property = "property",
-    guild_chest_container_id_property = "property",
-    guild_chest_class = "class",
-    guild_chest_container_manager_property = "property",
-    container_manager_class = "class",
-    find_container_function = "function",
-    container_id_property = "property",
-    container_owner_guild_id_property = "property",
-    slot_array_property = "property",
-    slot_occupancy_discriminator_property = "property",
-    item_static_id_property = "property",
-    item_dynamic_guid_property = "property",
-    item_quantity_property = "property",
-    item_durability_property = "property",
-    item_metadata_hash_inputs_property = "property",
-    empty_slot_type = "struct",
-    resize_function = "function",
-    mark_dirty_function = "function",
-    replicate_function = "function",
-    new_guild_function = "function",
-    container_in_use_function = "function",
-    fatal_safe_stop_function = "function",
-}
+local logical_kinds = {}
+for _, symbol in ipairs(binding_symbols.list()) do
+    logical_kinds[symbol.name] = symbol.kind
+end
 
 local function logical_count()
     local count = 0
@@ -381,6 +352,7 @@ describe("binding_manifest.verify_types", function()
         local original_decode = json.decode
         local original_sha256 = sha256.hex
         local original_version = constants.versions.manifest
+        local original_symbols_list = binding_symbols.list
         local first = original_parse(encode_with_checksum(runtime_manifest()))
         local second_text = encode_with_checksum(runtime_manifest())
         local forged = original_decode(second_text)
@@ -389,6 +361,7 @@ describe("binding_manifest.verify_types", function()
         json.decode = function() return { kind = "discovery", symbols = {} } end
         sha256.hex = function() return string.rep("f", 64) end
         constants.versions.manifest = "forged"
+        binding_symbols.list = function() return {} end
         binding_manifest.parse = function() return forged end
         binding_manifest.verify_types = function() return true, json.array() end
 
@@ -413,6 +386,7 @@ describe("binding_manifest.verify_types", function()
         json.decode = original_decode
         sha256.hex = original_sha256
         constants.versions.manifest = original_version
+        binding_symbols.list = original_symbols_list
         if not test_ok then
             error(test_error)
         end

@@ -14,10 +14,12 @@ local forbidden_exports = {
 local production_modules = {
     "CrossplayGuildChestExpander.Scripts.audit",
     "CrossplayGuildChestExpander.Scripts.binding_manifest",
+    "CrossplayGuildChestExpander.Scripts.binding_symbols",
     "CrossplayGuildChestExpander.Scripts.certification",
     "CrossplayGuildChestExpander.Scripts.config",
     "CrossplayGuildChestExpander.Scripts.constants",
     "CrossplayGuildChestExpander.Scripts.container_resolver",
+    "CrossplayGuildChestExpander.Scripts.discovery_evidence",
     "CrossplayGuildChestExpander.Scripts.fingerprint",
     "CrossplayGuildChestExpander.Scripts.guild_repository",
     "CrossplayGuildChestExpander.Scripts.json",

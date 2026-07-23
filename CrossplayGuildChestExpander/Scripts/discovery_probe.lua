@@ -1,47 +1,19 @@
+local binding_symbols = require("CrossplayGuildChestExpander.Scripts.binding_symbols")
 local json = require("CrossplayGuildChestExpander.Scripts.json")
 local sha256 = require("CrossplayGuildChestExpander.Scripts.sha256")
 
 local discovery_probe = {}
 
 local PROBE_VERSION = "1.0"
+local binding_symbols_list = binding_symbols.list
 local json_decode = json.decode
 local json_encode = json.encode
 local sha256_hex = sha256.hex
 
-local logical_kinds = {
-    world_ready_function = "function",
-    world_ready_state_property = "property",
-    selected_world_class = "class",
-    world_id_property = "property",
-    selected_world_guild_manager_property = "property",
-    selected_world_container_manager_property = "property",
-    guild_manager_class = "class",
-    guild_class = "class",
-    guild_list_property = "property",
-    guild_id_property = "property",
-    guild_name_property = "property",
-    guild_chest_container_id_property = "property",
-    guild_chest_class = "class",
-    guild_chest_container_manager_property = "property",
-    container_manager_class = "class",
-    find_container_function = "function",
-    container_id_property = "property",
-    container_owner_guild_id_property = "property",
-    slot_array_property = "property",
-    slot_occupancy_discriminator_property = "property",
-    item_static_id_property = "property",
-    item_dynamic_guid_property = "property",
-    item_quantity_property = "property",
-    item_durability_property = "property",
-    item_metadata_hash_inputs_property = "property",
-    empty_slot_type = "struct",
-    resize_function = "function",
-    mark_dirty_function = "function",
-    replicate_function = "function",
-    new_guild_function = "function",
-    container_in_use_function = "function",
-    fatal_safe_stop_function = "function",
-}
+local logical_kinds = {}
+for _, symbol in ipairs(binding_symbols_list()) do
+    logical_kinds[symbol.name] = symbol.kind
+end
 
 local top_fields = {
     probe_version = true,

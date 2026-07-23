@@ -1,5 +1,6 @@
 local a = require("tests.support.assertions")
 local binding_manifest = require("CrossplayGuildChestExpander.Scripts.binding_manifest")
+local binding_symbols = require("CrossplayGuildChestExpander.Scripts.binding_symbols")
 local certification = require("CrossplayGuildChestExpander.Scripts.certification")
 local discovery_probe = require("CrossplayGuildChestExpander.Scripts.discovery_probe")
 local json = require("CrossplayGuildChestExpander.Scripts.json")
@@ -214,6 +215,7 @@ describe("discovery_probe.parse", function()
         local original_encode = json.encode
         local original_decode = json.decode
         local original_sha256 = sha256.hex
+        local original_symbols_list = binding_symbols.list
         local first = original_parse(encode_with_checksum(request()))
         local second_text = encode_with_checksum(request())
 
@@ -222,6 +224,7 @@ describe("discovery_probe.parse", function()
             return { authoritative = true, mutation_capability = true }
         end
         sha256.hex = function() return string.rep("f", 64) end
+        binding_symbols.list = function() return {} end
         discovery_probe.parse = function() return function() end end
         discovery_probe.to_table = function()
             return { authoritative = true, mutation_capability = true }
@@ -252,6 +255,7 @@ describe("discovery_probe.parse", function()
         json.encode = original_encode
         json.decode = original_decode
         sha256.hex = original_sha256
+        binding_symbols.list = original_symbols_list
         if not test_ok then
             error(test_error)
         end
