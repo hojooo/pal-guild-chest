@@ -82,4 +82,34 @@ end
             ) ~= nil
         )
     end)
+
+    it("defines a fail-closed Windows prepare entry point", function()
+        local source = read(
+            "tools/windows-discovery/Prepare-CgceDiscovery.ps1"
+        )
+        for _, required in ipairs({
+            "#Requires -Version 5.1",
+            "#Requires -RunAsAdministrator",
+            "Initialize-CgceRunLayout",
+            "Assert-CgceDiscoveryDiskCapacity",
+            "Write-CgceActiveRunMarker",
+            "Block-CgceRunState",
+            "Enable-CgceInventoryProbe",
+            "'^\\s*(CGCE-OPS-[A-Z0-9-]+)(?![A-Za-z0-9-])'",
+            "return $match.Groups[1].Value",
+            "CGCE_WINDOWS_DISCOVERY_OK",
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED",
+        }) do
+            a.equal(true, source:find(required, 1, true) ~= nil)
+        end
+        for _, forbidden in ipairs({
+            "ExecuteInGameThread",
+            "SetPropertyValue",
+            "ProcessConsoleExec",
+            "TArray",
+            "(?<![A-Za-z0-9-])CGCE-OPS-",
+        }) do
+            a.equal(nil, source:find(forbidden, 1, true))
+        end
+    end)
 end)

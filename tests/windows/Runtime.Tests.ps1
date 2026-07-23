@@ -1199,6 +1199,18 @@ Invoke-CgceTest "child process writes immutable intent PID and result receipts w
         New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
         $executable = [System.IO.Path]::GetFullPath($env:ComSpec)
         $checksum = Get-CgceRuntimeTestSha256 $executable
+        Assert-CgceThrows "CGCE-OPS-CHECKSUM" {
+            Invoke-CgceChildProcess `
+                -Executable $executable `
+                -ExpectedExecutableChecksum ("f" * 64) `
+                -AllowedExecutablePaths @($executable) `
+                -Arguments @("/d", "/c", "exit", "/b", "7") `
+                -ReceiptRoot $receiptRoot `
+                -TimeoutSeconds 30
+        }
+        Assert-CgceEqual `
+            0 `
+            @(Get-ChildItem -LiteralPath $receiptRoot -Force).Count
         $run = Invoke-CgceChildProcess `
             -Executable $executable `
             -ExpectedExecutableChecksum $checksum `

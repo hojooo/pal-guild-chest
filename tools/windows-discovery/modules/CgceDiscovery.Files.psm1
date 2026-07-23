@@ -18,6 +18,8 @@ $script:CgceInventoryEntryKeys = @(
 
 $script:CgceTestPublishSeam = $null
 $script:CgceTestRobocopySeam = $null
+$script:CgceTestLayoutSeam = $null
+$script:CgceTestFreeSpaceSeam = $null
 
 function Resolve-CgceCanonicalPath([string]$Path, [bool]$MustExist) {
     if ([string]::IsNullOrWhiteSpace($Path) -or
@@ -505,6 +507,190 @@ function New-CgceRunPaths(
     }
 }
 
+function Assert-CgceExactRunPaths($Paths) {
+    $expected = New-CgceRunPaths `
+        -ServerRoot $Paths.server_root `
+        -SavedPath $Paths.active_saved `
+        -Ue4ssRoot $Paths.ue4ss_root `
+        -RunRoot $Paths.run_root `
+        -RunId ([System.IO.Path]::GetFileName($Paths.run_directory))
+    $expectedProperties = @($expected.PSObject.Properties)
+    $actualProperties = @($Paths.PSObject.Properties)
+    if ($actualProperties.Count -ne 41 -or
+        $actualProperties.Count -ne $expectedProperties.Count) {
+        throw "CGCE-OPS-PATH run Paths key drift"
+    }
+    for ($index = 0; $index -lt $expectedProperties.Count; $index += 1) {
+        if ($actualProperties[$index].Name -cne $expectedProperties[$index].Name) {
+            throw "CGCE-OPS-PATH run Paths key drift"
+        }
+        $actual = Resolve-CgceCanonicalPath `
+            -Path ([string]$actualProperties[$index].Value) `
+            -MustExist $false
+        $expectedValue = Resolve-CgceCanonicalPath `
+            -Path ([string]$expectedProperties[$index].Value) `
+            -MustExist $false
+        if (-not $actual.Equals(
+                $expectedValue,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "CGCE-OPS-PATH run Paths value drift"
+        }
+    }
+}
+
+function Initialize-CgceRunLayout($Paths) {
+    Assert-CgceExactRunPaths $Paths
+    $runRoot = Resolve-CgceCanonicalPath -Path $Paths.run_root -MustExist $true
+    $runDirectory = Resolve-CgceCanonicalPath `
+        -Path $Paths.run_directory `
+        -MustExist $false
+    if (-not (Test-Path -LiteralPath $runRoot -PathType Container)) {
+        throw "CGCE-OPS-STATE-EXISTS run root is not a directory"
+    }
+    Assert-CgceNoReparseInPath -Path $runRoot
+    $runId = [System.IO.Path]::GetFileName($runDirectory)
+    $staging = Join-Path $runRoot ".$runId.cgce-stage-layout"
+    if ((Test-Path -LiteralPath $runDirectory) -or
+        (Test-Path -LiteralPath $staging)) {
+        throw "CGCE-OPS-STATE-EXISTS run layout already exists"
+    }
+    try {
+        $null = [System.IO.Directory]::CreateDirectory($staging)
+        foreach ($relative in @(
+            "backup",
+            "inventories",
+            "capture",
+            "before",
+            "receipts\probe",
+            "receipts\process",
+            "receipts\restore"
+        )) {
+            $null = [System.IO.Directory]::CreateDirectory(
+                (Join-Path $staging $relative)
+            )
+        }
+        Assert-CgceNoReparseInPath -Path $staging
+        Assert-CgceTreeHasNoReparsePoints -Root $staging
+        if ($null -ne $script:CgceTestLayoutSeam) {
+            $context = [pscustomobject]@{
+                staging = $staging
+                destination = $runDirectory
+            }
+            $null = & $script:CgceTestLayoutSeam "before-publish" $context
+        }
+        if (Test-Path -LiteralPath $runDirectory) {
+            throw "CGCE-OPS-STATE-EXISTS final run directory appeared"
+        }
+        [System.IO.Directory]::Move($staging, $runDirectory)
+    } catch {
+        if ($_.Exception.Message -like "CGCE-OPS-STATE-EXISTS*") {
+            throw
+        }
+        throw "CGCE-OPS-BLOCKED run layout publication failed"
+    }
+    Assert-CgceNoReparseInPath -Path $runDirectory
+    Assert-CgceTreeHasNoReparsePoints -Root $runDirectory
+}
+
+function Add-CgceCheckedInt64([int64]$Left, [int64]$Right) {
+    if ($Left -lt 0 -or $Right -lt 0 -or
+        $Left -gt ([int64]::MaxValue - $Right)) {
+        throw "CGCE-OPS-DISK byte count overflow"
+    }
+    return [int64]($Left + $Right)
+}
+
+function Get-CgceAvailableFreeSpace([string]$VolumeRoot) {
+    if ($null -ne $script:CgceTestFreeSpaceSeam) {
+        $value = & $script:CgceTestFreeSpaceSeam $VolumeRoot
+    } else {
+        if ($VolumeRoot -cnotmatch '^[A-Za-z]:\\$') {
+            throw "CGCE-OPS-DISK unsupported volume"
+        }
+        try {
+            $drive = [System.IO.DriveInfo]::new($VolumeRoot)
+            if (-not $drive.IsReady) {
+                throw "volume is not ready"
+            }
+            $value = $drive.AvailableFreeSpace
+        } catch {
+            throw "CGCE-OPS-DISK free space query failed"
+        }
+    }
+    if ($null -eq $value -or $value -is [bool] -or
+        $value -isnot [ValueType]) {
+        throw "CGCE-OPS-DISK invalid free space result"
+    }
+    try {
+        $decimalValue = [decimal]$value
+    } catch {
+        throw "CGCE-OPS-DISK invalid free space result"
+    }
+    if ([decimal]::Truncate($decimalValue) -ne $decimalValue -or
+        $decimalValue -lt 0 -or
+        $decimalValue -gt [decimal][int64]::MaxValue) {
+        throw "CGCE-OPS-DISK invalid free space result"
+    }
+    return [int64]$decimalValue
+}
+
+function Assert-CgceDiscoveryDiskCapacity(
+    [object[]]$Entries,
+    [string]$BackupPath,
+    [string]$ClonePath
+) {
+    if ($null -eq $Entries) {
+        throw "CGCE-OPS-DISK inventory is required"
+    }
+    $size = [int64]0
+    foreach ($entry in $Entries) {
+        if ($null -eq $entry -or
+            $null -eq $entry.PSObject.Properties["length"] -or
+            $entry.length -is [bool] -or
+            $entry.length -isnot [ValueType]) {
+            throw "CGCE-OPS-DISK invalid inventory length"
+        }
+        try {
+            $lengthValue = [decimal]$entry.length
+        } catch {
+            throw "CGCE-OPS-DISK invalid inventory length"
+        }
+        if ([decimal]::Truncate($lengthValue) -ne $lengthValue -or
+            $lengthValue -lt 0 -or
+            $lengthValue -gt [decimal][int64]::MaxValue) {
+            throw "CGCE-OPS-DISK invalid inventory length"
+        }
+        $size = Add-CgceCheckedInt64 $size ([int64]$lengthValue)
+    }
+
+    $required = [System.Collections.Generic.Dictionary[string,int64]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($destination in @($BackupPath, $ClonePath)) {
+        $canonical = Resolve-CgceCanonicalPath `
+            -Path $destination `
+            -MustExist $false
+        $volumeRoot = [System.IO.Path]::GetPathRoot($canonical)
+        if ([string]::IsNullOrWhiteSpace($volumeRoot)) {
+            throw "CGCE-OPS-DISK unsupported volume"
+        }
+        if ($required.ContainsKey($volumeRoot)) {
+            $required[$volumeRoot] = Add-CgceCheckedInt64 `
+                $required[$volumeRoot] `
+                $size
+        } else {
+            $null = $required.Add($volumeRoot, $size)
+        }
+    }
+    foreach ($entry in $required.GetEnumerator()) {
+        $available = Get-CgceAvailableFreeSpace $entry.Key
+        if ($available -lt $entry.Value) {
+            throw "CGCE-OPS-DISK insufficient free space"
+        }
+    }
+}
+
 function New-CgceStagingPath([string]$Destination, [string]$Kind) {
     $parent = [System.IO.Path]::GetDirectoryName($Destination)
     $leaf = [System.IO.Path]::GetFileName($Destination)
@@ -799,6 +985,8 @@ Export-ModuleMember -Function @(
     "Assert-CgceNoReparseInPath",
     "Assert-CgceTreeHasNoReparsePoints",
     "New-CgceRunPaths",
+    "Initialize-CgceRunLayout",
+    "Assert-CgceDiscoveryDiskCapacity",
     "Get-CgceTreeInventory",
     "Compare-CgceInventory",
     "Write-CgceInventory",

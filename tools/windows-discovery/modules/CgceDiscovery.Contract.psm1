@@ -866,6 +866,127 @@ function Assert-CgceStateShape($State) {
     }
 }
 
+function Assert-CgceCheckpointEvidence($State) {
+    $phaseIndex = [Array]::IndexOf($script:CgcePhases, [string]$State.phase)
+    if ($phaseIndex -lt 0) {
+        throw "CGCE-OPS-PHASE invalid checkpoint phase"
+    }
+    if ($null -eq $State.inventory_checksums.original) {
+        throw "CGCE-OPS-PHASE CREATED requires original inventory"
+    }
+    if ($phaseIndex -ge 1 -and
+        $null -eq $State.inventory_checksums.backup) {
+        throw "CGCE-OPS-PHASE checkpoint requires backup inventory"
+    }
+    if ($phaseIndex -ge 3 -and
+        $null -eq $State.inventory_checksums.clone) {
+        throw "CGCE-OPS-PHASE CLONE_ACTIVE requires clone inventory"
+    }
+    if ($phaseIndex -ge 4 -and
+        $null -eq $State.probe_receipt_checksum) {
+        throw "CGCE-OPS-PHASE PROBE_STAGED requires probe receipt"
+    }
+    if ($phaseIndex -ge 6 -and (
+            $null -eq $State.process_launch_receipt_checksum -or
+            $null -eq $State.process_result_receipt_checksum -or
+            $null -eq $State.capture_inventory_checksum
+        )) {
+        throw "CGCE-OPS-PHASE CAPTURED requires process and capture receipts"
+    }
+    if ($phaseIndex -ge 8 -and
+        $null -eq $State.inventory_checksums.restored) {
+        throw "CGCE-OPS-PHASE RESTORED requires restored inventory"
+    }
+}
+
+function Get-CgceStateChecksumValue($State, [string]$Name) {
+    switch ($Name) {
+        "inventory.original" { return $State.inventory_checksums.original }
+        "inventory.backup" { return $State.inventory_checksums.backup }
+        "inventory.clone" { return $State.inventory_checksums.clone }
+        "inventory.restored" { return $State.inventory_checksums.restored }
+        "probe" { return $State.probe_receipt_checksum }
+        "process.launch" { return $State.process_launch_receipt_checksum }
+        "process.result" { return $State.process_result_receipt_checksum }
+        "capture" { return $State.capture_inventory_checksum }
+        default { throw "CGCE-OPS-JSON unknown state checksum field" }
+    }
+}
+
+function Assert-CgceImmutableStateChecksums($Old, $Next) {
+    foreach ($name in @(
+        "inventory.original",
+        "inventory.backup",
+        "inventory.clone",
+        "inventory.restored",
+        "probe",
+        "process.launch",
+        "process.result",
+        "capture"
+    )) {
+        $oldValue = Get-CgceStateChecksumValue $Old $name
+        $nextValue = Get-CgceStateChecksumValue $Next $name
+        if ($null -ne $oldValue -and $oldValue -cne $nextValue) {
+            throw "CGCE-OPS-CHECKSUM immutable state checksum drift"
+        }
+    }
+}
+
+function Assert-CgceExactStateChecksums($Old, $Next) {
+    foreach ($name in @(
+        "inventory.original",
+        "inventory.backup",
+        "inventory.clone",
+        "inventory.restored",
+        "probe",
+        "process.launch",
+        "process.result",
+        "capture"
+    )) {
+        if ((Get-CgceStateChecksumValue $Old $name) -cne
+            (Get-CgceStateChecksumValue $Next $name)) {
+            throw "CGCE-OPS-CHECKSUM blocked state checksum drift"
+        }
+    }
+}
+
+function Assert-CgceTransitionCheckpointFields(
+    $Old,
+    $Next,
+    [string]$ExpectedPhase
+) {
+    $allowed = switch ($ExpectedPhase) {
+        "CREATED" { @("inventory.backup") }
+        "BACKUP_VERIFIED" { @() }
+        "ORIGINAL_DEACTIVATED" { @("inventory.clone") }
+        "CLONE_ACTIVE" { @("probe") }
+        "PROBE_STAGED" { @() }
+        "RUNNING" { @("process.launch", "process.result", "capture") }
+        "CAPTURED" { @() }
+        "RESTORING" { @("inventory.restored") }
+        "RESTORED" { @() }
+        default { throw "CGCE-OPS-PHASE unsupported normal transition" }
+    }
+    foreach ($name in @(
+        "inventory.original",
+        "inventory.backup",
+        "inventory.clone",
+        "inventory.restored",
+        "probe",
+        "process.launch",
+        "process.result",
+        "capture"
+    )) {
+        $oldValue = Get-CgceStateChecksumValue $Old $name
+        $nextValue = Get-CgceStateChecksumValue $Next $name
+        if ($null -eq $oldValue -and
+            $null -ne $nextValue -and
+            $allowed -cnotcontains $name) {
+            throw "CGCE-OPS-PHASE transition introduced a foreign checkpoint"
+        }
+    }
+}
+
 function New-CgceRunState([string]$RunId, [string]$MaintenanceId, $Paths) {
     if (-not (Test-CgceRunId $RunId) -or -not (Test-CgceMaintenanceId $MaintenanceId)) {
         throw "CGCE-OPS-ID invalid run-state identifier"
@@ -943,6 +1064,10 @@ function Assert-CgceStateIdentity($Genesis, $Current) {
     if ([decimal]$Current.revision -lt [decimal]$Genesis.revision) {
         throw "CGCE-OPS-PHASE non-monotonic revision"
     }
+    if ($Genesis.inventory_checksums.original -cne
+        $Current.inventory_checksums.original) {
+        throw "CGCE-OPS-CHECKSUM original inventory identity drift"
+    }
 }
 
 function Read-CgceRunState([string]$RunRoot, [string]$RunId) {
@@ -956,6 +1081,8 @@ function Read-CgceRunState([string]$RunRoot, [string]$RunId) {
     $genesis = Read-CgceJsonObject -Path $genesisPath
     Assert-CgceStateShape $state
     Assert-CgceStateShape $genesis
+    Assert-CgceCheckpointEvidence $state
+    Assert-CgceCheckpointEvidence $genesis
     if ($state.run_id -cne $RunId -or $genesis.run_id -cne $RunId) {
         throw "CGCE-OPS-ID run-state path identity mismatch"
     }
@@ -1039,6 +1166,8 @@ function Write-CgceJsonAtomic(
         $existingState = Read-CgceJsonObject -Path $Path
         Assert-CgceStateShape $existingState
         Assert-CgceStateShape $Value
+        Assert-CgceCheckpointEvidence $existingState
+        Assert-CgceCheckpointEvidence $Value
     }
     $json = ConvertTo-CgceJsonText $Value
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -1065,6 +1194,12 @@ function Write-CgceRunState(
     $old = Read-CgceJsonObject -Path $StatePath
     Assert-CgceStateShape $old
     Assert-CgceStateShape $State
+    Assert-CgceCheckpointEvidence $old
+    Assert-CgceCheckpointEvidence $State
+    $genesis = Read-CgceJsonObject -Path $old.paths.genesis_state
+    Assert-CgceStateShape $genesis
+    Assert-CgceCheckpointEvidence $genesis
+    Assert-CgceStateIdentity $genesis $old
     if ($old.phase -cne $ExpectedPhase) {
         throw "CGCE-OPS-PHASE current phase drift"
     }
@@ -1093,11 +1228,39 @@ function Write-CgceRunState(
             throw "CGCE-OPS-CHECKSUM run-state identity drift"
         }
     }
+    Assert-CgceImmutableStateChecksums $old $State
+    $expectedOutcome = if ($State.phase -ceq "EXPORTED") {
+        "SUCCEEDED"
+    } else {
+        "ACTIVE"
+    }
     $validTransition = $script:CgceNextPhase.ContainsKey($ExpectedPhase) -and
-        $script:CgceNextPhase[$ExpectedPhase] -ceq $State.phase
-    $validBlock = $State.phase -ceq $ExpectedPhase -and $State.outcome -ceq "BLOCKED"
+        $script:CgceNextPhase[$ExpectedPhase] -ceq $State.phase -and
+        $old.outcome -ceq "ACTIVE" -and
+        $State.outcome -ceq $expectedOutcome
+    $validBlock = $State.phase -ceq $ExpectedPhase -and
+        $old.outcome -ceq "ACTIVE" -and
+        $State.outcome -ceq "BLOCKED"
     if (-not $validTransition -and -not $validBlock) {
         throw "CGCE-OPS-PHASE invalid persisted transition"
+    }
+    if ($validTransition) {
+        if (-not (Compare-CgceJsonValue $old.errors $State.errors)) {
+            throw "CGCE-OPS-PHASE normal transition cannot change errors"
+        }
+        Assert-CgceTransitionCheckpointFields $old $State $ExpectedPhase
+    } else {
+        Assert-CgceExactStateChecksums $old $State
+        if (@($State.errors).Count -ne (@($old.errors).Count + 1)) {
+            throw "CGCE-OPS-PHASE blocked transition must append one error"
+        }
+        for ($index = 0; $index -lt @($old.errors).Count; $index += 1) {
+            if (-not (Compare-CgceJsonValue `
+                    $old.errors[$index] `
+                    $State.errors[$index])) {
+                throw "CGCE-OPS-PHASE blocked errors are append-only"
+            }
+        }
     }
     $State.revision = [int64]$old.revision + 1
     $State.updated_at_utc = [DateTime]::UtcNow.ToString(
@@ -1126,6 +1289,7 @@ function Confirm-CgceRunStateReadBack(
 ) {
     $readBack = Read-CgceRunStateAfterReplace -Path $StatePath
     Assert-CgceStateShape $readBack
+    Assert-CgceCheckpointEvidence $readBack
     $actualChecksum = Get-CgceSha256 -Path $StatePath
     if ($actualChecksum -cne $expectedChecksum -or
         [int64]$readBack.revision -ne $ExpectedRevision -or
@@ -1146,10 +1310,128 @@ function Get-CgceCanonicalForIdentity([string]$Path) {
     }
 }
 
+function Write-CgceActiveRunMarker(
+    $State,
+    [string]$GenesisStateChecksum,
+    [string]$Path
+) {
+    Assert-CgceStateShape $State
+    Assert-CgceCheckpointEvidence $State
+    if (-not (Test-CgceChecksum $GenesisStateChecksum)) {
+        throw "CGCE-OPS-CHECKSUM invalid genesis checksum"
+    }
+    $expectedPath = Get-CgceCanonicalForIdentity $State.paths.active_run_marker
+    $actualPath = Get-CgceCanonicalForIdentity $Path
+    if (-not $expectedPath.Equals(
+            $actualPath,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "CGCE-OPS-CONTROL active marker path drift"
+    }
+    if ((Get-CgceSha256 -Path $State.paths.genesis_state) -cne
+        $GenesisStateChecksum) {
+        throw "CGCE-OPS-CHECKSUM immutable genesis drift"
+    }
+    $genesis = Read-CgceJsonObject -Path $State.paths.genesis_state
+    $current = Read-CgceJsonObject -Path $State.paths.state
+    Assert-CgceStateShape $genesis
+    Assert-CgceStateShape $current
+    Assert-CgceCheckpointEvidence $genesis
+    Assert-CgceCheckpointEvidence $current
+    Assert-CgceStateIdentity $genesis $current
+    if (-not (Compare-CgceJsonValue $State $current)) {
+        throw "CGCE-OPS-CHECKSUM stale marker state"
+    }
+    $marker = [pscustomobject][ordered]@{
+        schema_version = "1.0"
+        kind = "cgce_windows_discovery_run_marker"
+        run_id = $State.run_id
+        run_root = $State.paths.run_root
+        genesis_state_checksum = $GenesisStateChecksum
+    }
+    Write-CgceJsonAtomic -Value $marker -Path $Path
+    $readBack = Read-CgceJsonObject -Path $Path
+    Assert-CgceExactKeys `
+        $readBack `
+        @("schema_version", "kind", "run_id", "run_root", "genesis_state_checksum") `
+        "CGCE-OPS-CONTROL"
+    if (-not (Compare-CgceJsonValue $marker $readBack)) {
+        throw "CGCE-OPS-CHECKSUM active marker read-back drift"
+    }
+    Assert-CgceRunMarker -State $State
+}
+
+function Block-CgceRunState(
+    [string]$StatePath,
+    [string]$Code
+) {
+    if ($Code -cnotmatch '^CGCE-OPS-[A-Z0-9-]+$') {
+        throw "CGCE-OPS-BLOCKED invalid stable error code"
+    }
+    $state = Read-CgceJsonObject -Path $StatePath
+    Assert-CgceStateShape $state
+    Assert-CgceCheckpointEvidence $state
+    $recordedStatePath = Get-CgceCanonicalForIdentity $state.paths.state
+    $actualStatePath = Get-CgceCanonicalForIdentity $StatePath
+    if (-not $recordedStatePath.Equals(
+            $actualStatePath,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "CGCE-OPS-ID run-state path identity mismatch"
+    }
+    $genesis = Read-CgceJsonObject -Path $state.paths.genesis_state
+    Assert-CgceStateShape $genesis
+    Assert-CgceCheckpointEvidence $genesis
+    Assert-CgceStateIdentity $genesis $state
+    if ($state.outcome -cne "ACTIVE") {
+        throw "CGCE-OPS-PHASE only ACTIVE state can become BLOCKED"
+    }
+    Assert-CgceRunMarker -State $state
+    $state = Read-CgceJsonObject -Path $StatePath
+    Assert-CgceStateShape $state
+    Assert-CgceCheckpointEvidence $state
+    Assert-CgceStateIdentity $genesis $state
+    if ($state.outcome -cne "ACTIVE") {
+        throw "CGCE-OPS-PHASE only ACTIVE state can become BLOCKED"
+    }
+    Assert-CgceRunMarker -State $state
+    $errors = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($existing in @($state.errors)) {
+        $null = $errors.Add($existing)
+    }
+    $null = $errors.Add([pscustomobject][ordered]@{
+        code = $Code
+        at_utc = [DateTime]::UtcNow.ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+    })
+    $state.errors = [object[]]$errors.ToArray()
+    $state.outcome = "BLOCKED"
+    $phase = $state.phase
+    Write-CgceRunState `
+        -State $state `
+        -StatePath $StatePath `
+        -ExpectedPhase $phase
+    $readBack = Read-CgceJsonObject -Path $StatePath
+    Assert-CgceStateShape $readBack
+    Assert-CgceCheckpointEvidence $readBack
+    Assert-CgceStateIdentity $genesis $readBack
+    if ($readBack.outcome -cne "BLOCKED" -or
+        $readBack.phase -cne $phase -or
+        @($readBack.errors).Count -ne $errors.Count -or
+        $readBack.errors[$errors.Count - 1].code -cne $Code) {
+        throw "CGCE-OPS-CHECKSUM blocked state read-back drift"
+    }
+    return $readBack
+}
+
 function Assert-CgceRunMarker($State, [switch]$AllowCompleted) {
     Assert-CgceStateShape $State
+    Assert-CgceCheckpointEvidence $State
     $current = Read-CgceJsonObject -Path $State.paths.state
     Assert-CgceStateShape $current
+    Assert-CgceCheckpointEvidence $current
     if (-not (Compare-CgceJsonValue $State $current)) {
         throw "CGCE-OPS-CHECKSUM stale or forged current state"
     }
@@ -1189,6 +1471,7 @@ function Assert-CgceRunMarker($State, [switch]$AllowCompleted) {
     }
     $genesis = Read-CgceJsonObject -Path $State.paths.genesis_state
     Assert-CgceStateShape $genesis
+    Assert-CgceCheckpointEvidence $genesis
     Assert-CgceStateIdentity $genesis $current
     if ($genesis.run_id -cne $State.run_id -or
         $genesis.maintenance_id -cne $State.maintenance_id) {
@@ -1232,6 +1515,8 @@ Export-ModuleMember -Function @(
     "Set-CgceRunPhase",
     "Write-CgceJsonAtomic",
     "Write-CgceRunState",
+    "Write-CgceActiveRunMarker",
+    "Block-CgceRunState",
     "Assert-CgceRunMarker",
     "Enter-CgceExclusiveLock"
 )

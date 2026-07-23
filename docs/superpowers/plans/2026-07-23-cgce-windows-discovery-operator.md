@@ -58,6 +58,8 @@ Read-CgceRunState -RunRoot <string> -RunId <string> -> PSCustomObject
 Set-CgceRunPhase -State <PSCustomObject> -ExpectedPhase <string> -NextPhase <string> -> PSCustomObject
 Write-CgceJsonAtomic -Value <object> -Path <string> [-ExpectedExistingSha256 <string>] -> void
 Write-CgceRunState -State <PSCustomObject> -StatePath <string> -ExpectedPhase <string> -> void
+Write-CgceActiveRunMarker -State <PSCustomObject> -GenesisStateChecksum <string> -Path <string> -> void
+Block-CgceRunState -StatePath <string> -Code <string> -> PSCustomObject
 Enter-CgceExclusiveLock -ServerRoot <string> -RunId <string> -> FileStream
 
 Resolve-CgceCanonicalPath -Path <string> -MustExist <bool> -> string
@@ -67,6 +69,8 @@ Assert-CgceDistinctRoots -Paths <string[]> -> void
 Assert-CgceNoReparseInPath -Path <string> -> void
 Assert-CgceTreeHasNoReparsePoints -Root <string> -> void
 New-CgceRunPaths -ServerRoot <string> -SavedPath <string> -Ue4ssRoot <string> -RunRoot <string> -RunId <string> -> PSCustomObject
+Initialize-CgceRunLayout -Paths <PSCustomObject> -> void
+Assert-CgceDiscoveryDiskCapacity -Entries <object[]> -BackupPath <string> -ClonePath <string> -> void
 Get-CgceTreeInventory -Root <string> -> object[]
 Compare-CgceInventory -Expected <object[]> -Actual <object[]> -> void
 Write-CgceInventory -Entries <object[]> -Path <string> -Kind <string> -> lowercase checksum
@@ -1137,6 +1141,72 @@ deactivation과 clone activation을 state-bound operation으로 만든다.
 - Error codes:
   `CGCE-OPS-DISK`, `CGCE-OPS-BACKUP`, `CGCE-OPS-CLONE`,
   `CGCE-OPS-STATE-EXISTS`, `CGCE-OPS-BLOCKED`.
+
+#### Binding Task 4 contract clarifications
+
+- `New-CgceRunPaths` remains the exact 41-key schema. Files owns
+  `Initialize-CgceRunLayout`, which fails when either the final run directory
+  or its fixed same-parent staging directory exists, creates only
+  `backup`, `inventories`, `capture`, `before`, `receipts\probe`,
+  `receipts\process`, and `receipts\restore` below staging, and publishes by
+  same-parent `Directory.Move`. A failure preserves staging.
+- Contract owns `Write-CgceActiveRunMarker` and `Block-CgceRunState`. The
+  marker uses the existing exact five-field schema, is no-overwrite, binds the
+  immutable genesis checksum, and is strictly read back. A post-genesis
+  failure re-reads authoritative disk state while the lock is held, preserves
+  phase, appends exactly one `{code,at_utc}`, compare-and-swaps
+  `ACTIVE -> BLOCKED`, and strictly reads back. It never blocks from stale
+  in-memory state.
+- `inventory_checksums.original` is part of immutable genesis/current
+  identity. Every already non-null inventory, receipt, and capture checksum is
+  immutable; errors are append-only; outcome is monotonic. The normal state
+  writer retains the existing phase DAG and a transition may introduce only
+  its checkpoint fields. A committed `CREATED` state requires original
+  evidence, `BACKUP_VERIFIED` requires backup,
+  `ORIGINAL_DEACTIVATED` inherits backup, `CLONE_ACTIVE` requires clone,
+  `PROBE_STAGED` requires the probe receipt, `RUNNING` inherits the probe
+  requirement without requiring launch evidence yet, `CAPTURED` requires
+  launch/result/capture evidence, and `RESTORED` requires restored evidence.
+  `BLOCKED` is valid at the last committed checkpoint. `New-CgceRunState`
+  itself remains valid before original is assigned.
+- Task 4 does not generalize recovery transitions. Task 6 must implement a
+  separate recovery compare-and-swap contract for its cross-phase restore
+  cases instead of weakening the normal writer.
+- Let `S` be the checked `Int64` sum of original inventory lengths. Required
+  bytes are aggregated by canonical destination volume root: add `S` for
+  `backup_saved` and `S` for the active clone. Equal roots require `2S`;
+  distinct roots require `S` on each. A deterministic free-space seam supports
+  tests; unsupported or unqueryable volumes fail closed with `CGCE-OPS-DISK`.
+  This check completes before genesis or marker creation. Only verified copy
+  helpers may cross volumes. `HandoffRoot` must not equal or overlap `RunRoot`.
+- Only pure control/handoff validation and path derivation occur before the
+  server lock. The lock is held from the first mutable/existence/server check
+  through layout, state, marker, copies, moves, transitions, or blocked-state
+  read-back. Production paths change only after marker write/read-back.
+- The durable `BACKUP_VERIFIED` compare-and-swap plus read-back is the sole
+  original-rename barrier. Immediately before moving active `Saved`, Prepare
+  re-reads the exact disk state, requires `BACKUP_VERIFIED`, validates
+  marker/genesis/current authority, rechecks process/listener inactivity,
+  original inventory bytes, PalServer and UE4SS checksums, and the bound
+  control/handoff evidence. The same authority validation is repeated before
+  every later production mutation or checkpoint, including probe staging. A
+  failed recheck performs no next mutation. If state replacement succeeded but
+  its read-back threw, error handling re-reads disk authority; it does not
+  overwrite state when that authority cannot itself be validated.
+- A pre-genesis failure creates no state or marker, performs no production
+  mutation, emits exactly one blocked terminal line, and exits non-zero. A
+  pre-marker orphan remains production-unchanged and requires manual cleanup.
+  Any final run-directory or marker artifact rejects replay; post-marker
+  recovery belongs only to Task 6.
+- `Enable-CgceInventoryProbe` is the sole writer of its final receipt.
+  Prepare only validates the returned path/checksum and records the checksum.
+  Prepare captures the validated source-manifest checksum before the lock and
+  rechecks both that exact checksum and the handoff contents under the lock
+  immediately before and after probe staging.
+- Entry-point exceptions normalize the first boundary-anchored
+  `CGCE-OPS-*` token, or `CGCE-OPS-BLOCKED` when none exists. Every helper
+  return and incidental success-stream value is suppressed so the child
+  `powershell.exe` process emits exactly one stdout terminal line.
 
 - [ ] **Step 1: Write a failing synthetic prepare test**
 

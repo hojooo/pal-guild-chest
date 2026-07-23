@@ -300,7 +300,7 @@
       ],
       "properties": {
         "original": {
-          "$ref": "#/definitions/nullableChecksum"
+          "$ref": "#/definitions/checksum"
         },
         "backup": {
           "$ref": "#/definitions/nullableChecksum"
@@ -347,6 +347,137 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "enum": [
+              "BACKUP_VERIFIED",
+              "ORIGINAL_DEACTIVATED",
+              "CLONE_ACTIVE",
+              "PROBE_STAGED",
+              "RUNNING",
+              "CAPTURED",
+              "RESTORING",
+              "RESTORED",
+              "EXPORTED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "inventory_checksums": {
+            "properties": {
+              "backup": {
+                "$ref": "#/definitions/checksum"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "enum": [
+              "CLONE_ACTIVE",
+              "PROBE_STAGED",
+              "RUNNING",
+              "CAPTURED",
+              "RESTORING",
+              "RESTORED",
+              "EXPORTED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "inventory_checksums": {
+            "properties": {
+              "clone": {
+                "$ref": "#/definitions/checksum"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "enum": [
+              "PROBE_STAGED",
+              "RUNNING",
+              "CAPTURED",
+              "RESTORING",
+              "RESTORED",
+              "EXPORTED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "probe_receipt_checksum": {
+            "$ref": "#/definitions/checksum"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "enum": [
+              "CAPTURED",
+              "RESTORING",
+              "RESTORED",
+              "EXPORTED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "process_launch_receipt_checksum": {
+            "$ref": "#/definitions/checksum"
+          },
+          "process_result_receipt_checksum": {
+            "$ref": "#/definitions/checksum"
+          },
+          "capture_inventory_checksum": {
+            "$ref": "#/definitions/checksum"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "enum": [
+              "RESTORED",
+              "EXPORTED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "inventory_checksums": {
+            "properties": {
+              "restored": {
+                "$ref": "#/definitions/checksum"
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {
@@ -557,13 +688,16 @@
     "nullableChecksum": {
       "anyOf": [
         {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "$ref": "#/definitions/checksum"
         },
         {
           "type": "null"
         }
       ]
+    },
+    "checksum": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     }
   }
 }

@@ -31,6 +31,22 @@ function Set-CgceFilesTestRobocopySeam($Seam) {
     } $Seam
 }
 
+function Set-CgceFilesTestLayoutSeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Files"
+    & $module {
+        param($Value)
+        $script:CgceTestLayoutSeam = $Value
+    } $Seam
+}
+
+function Set-CgceFilesTestFreeSpaceSeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Files"
+    & $module {
+        param($Value)
+        $script:CgceTestFreeSpaceSeam = $Value
+    } $Seam
+}
+
 Invoke-CgceTest "canonical paths preserve Windows volume roots and normalize descendants" {
     Assert-CgceEqual "D:\" (Resolve-CgceCanonicalPath -Path "D:\" -MustExist $false)
     Assert-CgceEqual `
@@ -262,6 +278,157 @@ Invoke-CgceTest "run paths reject invalid ids and non-exact Saved paths" {
             -Ue4ssRoot "D:\PalServer\Pal\Binaries\Win64" `
             -RunRoot "E:\CGCE-Private-Runs" `
             -RunId "r-0123456789abcdef0123456789abcdef"
+    }
+}
+
+Invoke-CgceTest "run layout publishes the exact fixed directories without changing the 41-key paths" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $serverRoot = Join-Path $root "server"
+        $savedPath = Join-Path $serverRoot "Pal\Saved"
+        $ue4ssRoot = Join-Path $serverRoot "Pal\Binaries\Win64"
+        $runRoot = Join-Path $root "runs"
+        New-Item -ItemType Directory -Path $savedPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $ue4ssRoot -Force | Out-Null
+        New-Item -ItemType Directory -Path $runRoot | Out-Null
+        $paths = New-CgceRunPaths `
+            -ServerRoot $serverRoot -SavedPath $savedPath `
+            -Ue4ssRoot $ue4ssRoot -RunRoot $runRoot `
+            -RunId "r-0123456789abcdef0123456789abcdef"
+
+        Initialize-CgceRunLayout -Paths $paths
+
+        Assert-CgceEqual 41 @($paths.PSObject.Properties).Count
+        Assert-CgceEqual $true (Test-Path -LiteralPath $paths.run_directory -PathType Container)
+        $relativeDirectories = @(
+            Get-ChildItem -LiteralPath $paths.run_directory -Directory -Recurse |
+                ForEach-Object {
+                    $_.FullName.Substring($paths.run_directory.Length + 1)
+                } |
+                Sort-Object
+        )
+        $expected = @(
+            "backup",
+            "before",
+            "capture",
+            "inventories",
+            "receipts",
+            "receipts\probe",
+            "receipts\process",
+            "receipts\restore"
+        ) | Sort-Object
+        Assert-CgceEqual `
+            ([string]::Join(",", $expected)) `
+            ([string]::Join(",", $relativeDirectories))
+        Assert-CgceEqual `
+            $false `
+            (Test-Path -LiteralPath (Join-Path $runRoot ".r-0123456789abcdef0123456789abcdef.cgce-stage-layout"))
+        Assert-CgceThrows "CGCE-OPS-STATE-EXISTS" {
+            Initialize-CgceRunLayout -Paths $paths
+        }
+    } finally {
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "run layout rejects fixed staging and preserves staging on publication failure" {
+    $root = New-CgceFilesTestRoot
+    try {
+        $serverRoot = Join-Path $root "server"
+        $savedPath = Join-Path $serverRoot "Pal\Saved"
+        $ue4ssRoot = Join-Path $serverRoot "Pal\Binaries\Win64"
+        $runRoot = Join-Path $root "runs"
+        New-Item -ItemType Directory -Path $savedPath -Force | Out-Null
+        New-Item -ItemType Directory -Path $ue4ssRoot -Force | Out-Null
+        New-Item -ItemType Directory -Path $runRoot | Out-Null
+        $runId = "r-0123456789abcdef0123456789abcdef"
+        $paths = New-CgceRunPaths `
+            -ServerRoot $serverRoot -SavedPath $savedPath `
+            -Ue4ssRoot $ue4ssRoot -RunRoot $runRoot -RunId $runId
+        $staging = Join-Path $runRoot ".$runId.cgce-stage-layout"
+        New-Item -ItemType Directory -Path $staging | Out-Null
+        Assert-CgceThrows "CGCE-OPS-STATE-EXISTS" {
+            Initialize-CgceRunLayout -Paths $paths
+        }
+        Remove-Item -LiteralPath $staging -Recurse -Force
+
+        Set-CgceFilesTestLayoutSeam {
+            param($Phase, $Context)
+            if ($Phase -ceq "before-publish") {
+                throw "injected layout failure"
+            }
+        }
+        Assert-CgceThrows "CGCE-OPS-BLOCKED" {
+            Initialize-CgceRunLayout -Paths $paths
+        }
+        Assert-CgceEqual $true (Test-Path -LiteralPath $staging -PathType Container)
+        Assert-CgceEqual $false (Test-Path -LiteralPath $paths.run_directory)
+        Assert-CgceEqual $true (Test-Path -LiteralPath (Join-Path $staging "receipts\restore"))
+    } finally {
+        Set-CgceFilesTestLayoutSeam $null
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "disk capacity aggregates checked inventory bytes by canonical volume" {
+    $entries = @(
+        [pscustomobject]@{ relative_path = "a"; length = [int64]7; sha256 = ("a" * 64) },
+        [pscustomobject]@{ relative_path = "b"; length = [int64]5; sha256 = ("b" * 64) }
+    )
+    try {
+        Set-CgceFilesTestFreeSpaceSeam {
+            param($VolumeRoot)
+            return [int64]24
+        }
+        Assert-CgceDiscoveryDiskCapacity `
+            -Entries $entries `
+            -BackupPath "C:\runs\r\backup\Saved" `
+            -ClonePath "c:\server\Pal\Saved"
+
+        Set-CgceFilesTestFreeSpaceSeam { param($VolumeRoot) return [int64]23 }
+        Assert-CgceThrows "CGCE-OPS-DISK" {
+            Assert-CgceDiscoveryDiskCapacity `
+                -Entries $entries `
+                -BackupPath "C:\runs\r\backup\Saved" `
+                -ClonePath "C:\server\Pal\Saved"
+        }
+
+        Set-CgceFilesTestFreeSpaceSeam {
+            param($VolumeRoot)
+            if ($VolumeRoot -ceq "C:\") { return [int64]12 }
+            if ($VolumeRoot -ceq "D:\") { return [int64]11 }
+            return $null
+        }
+        Assert-CgceThrows "CGCE-OPS-DISK" {
+            Assert-CgceDiscoveryDiskCapacity `
+                -Entries $entries `
+                -BackupPath "C:\runs\r\backup\Saved" `
+                -ClonePath "D:\server\Pal\Saved"
+        }
+        Set-CgceFilesTestFreeSpaceSeam {
+            param($VolumeRoot)
+            if ($VolumeRoot -ceq "C:\") { return [int64]11 }
+            if ($VolumeRoot -ceq "D:\") { return [int64]12 }
+            return $null
+        }
+        Assert-CgceThrows "CGCE-OPS-DISK" {
+            Assert-CgceDiscoveryDiskCapacity `
+                -Entries $entries `
+                -BackupPath "C:\runs\r\backup\Saved" `
+                -ClonePath "D:\server\Pal\Saved"
+        }
+
+        Assert-CgceThrows "CGCE-OPS-DISK" {
+            Assert-CgceDiscoveryDiskCapacity `
+                -Entries @(
+                    [pscustomobject]@{ relative_path = "a"; length = [int64]::MaxValue; sha256 = ("a" * 64) },
+                    [pscustomobject]@{ relative_path = "b"; length = [int64]1; sha256 = ("b" * 64) }
+                ) `
+                -BackupPath "C:\runs\r\backup\Saved" `
+                -ClonePath "D:\server\Pal\Saved"
+        }
+    } finally {
+        Set-CgceFilesTestFreeSpaceSeam $null
     }
 }
 
