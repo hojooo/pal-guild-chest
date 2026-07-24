@@ -3007,6 +3007,10 @@ function Initialize-CgceRuntimeRecoveryAuthority($Fixture, $Receipt) {
     $state.inventory_checksums.original = Get-CgceRuntimeTestSha256 `
         $Fixture.Paths.original_inventory
     Write-CgceJsonAtomic -Value $state -Path $Fixture.Paths.genesis_state
+    Write-CgceJsonAtomic -Value $state -Path $Fixture.Paths.state
+    Assert-CgceEqual `
+        (Get-CgceRuntimeTestSha256 $Fixture.Paths.genesis_state) `
+        (Get-CgceRuntimeTestSha256 $Fixture.Paths.state)
     Write-CgceActiveRunMarker `
         -State $state `
         -GenesisStateChecksum (Get-CgceRuntimeTestSha256 $Fixture.Paths.genesis_state) `
@@ -3147,7 +3151,10 @@ Invoke-CgceTest "probe restored validator is read-only over absent and completed
                     -Destination $fixture.Paths.probe_staged
             }
             $tampered = Get-CgceRuntimeRestoreSnapshot $fixture
-            Assert-CgceThrows "CGCE-OPS-" {
+            $expectedCode = if ($tamper -ceq "semantic") {
+                "CGCE-OPS-PROBE-RECEIPT"
+            } else { "CGCE-OPS-MANUAL-RECOVERY" }
+            Assert-CgceThrows $expectedCode {
                 Assert-CgceInventoryProbeRestored `
                     -Paths $fixture.Paths `
                     -RunDirectory $fixture.Paths.run_directory `
@@ -3196,6 +3203,7 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
             if ($bootstrap -ceq "restore-intent") {
                 New-Item -ItemType Directory -Path $restoreRoot | Out-Null
             }
+            $fixtureBefore = Get-CgceRuntimeRestoreSnapshot $fixture
             $activity = Set-CgceRuntimeRestoreActivityAfterSeam `
                 -ServerPath (Join-Path $fixture.Paths.server_root "PalServer.exe")
             $before = $null
@@ -3214,6 +3222,8 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
                     -ExpectedFinalReceiptChecksum $receipt.checksum
             }
             Assert-CgceEqual $true ($null -ne $before)
+            Assert-CgceDeepEqual $fixtureBefore `
+                (Get-CgceRuntimeRestoreSnapshot $fixture)
             if ($bootstrap -ceq "restore-root") {
                 Assert-CgceEqual $false (Test-Path -LiteralPath $restoreRoot)
             }

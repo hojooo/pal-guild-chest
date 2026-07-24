@@ -293,3 +293,14 @@ handoff checks pass. The required Windows command was retried and again exits
 `127` because `powershell.exe` is unavailable on this macOS host. `git diff
 --check` passes after the structural correction. These results remain RED/static
 evidence only, not Windows behavioral execution.
+
+### Fixture-order correction
+
+Effective-code review found that the Runtime recovery fixture created the active
+marker before writing the byte-identical pristine current state required by the
+marker writer. The fixture now atomically writes the same `CREATED` state to
+both genesis and current paths, asserts their checksums match, and only then
+creates the marker before publishing its staged current state. Semantic final
+receipt and terminal filesystem-residue validator negatives now assert their
+exact stable codes. Root/intent mutation-barrier cases also compare the full
+authority/filesystem snapshot before and after rejection.
