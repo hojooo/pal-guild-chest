@@ -1,6 +1,6 @@
 # CGCE requirements traceability
 
-Snapshot date: 2026-07-23. This matrix describes repository evidence at the
+Snapshot date: 2026-07-24. This matrix describes repository evidence at the
 Discovery milestone. `VERIFIED_STATIC` means a local deterministic contract is
 covered by tests; it is not Palworld runtime or client compatibility evidence.
 Every `BLOCKED_GATE_A` or `BLOCKED_GATE_B` row requires primary private evidence
@@ -98,6 +98,21 @@ exists; no row below is a claim about a real Palworld server or client.
 | DOD-28 | VERIFIED_STATIC | Backup/install/update/removal/restore docs | README and certification runbook provide procedures. |
 | DOD-29 | VERIFIED_STATIC | Public package excludes client/UI/original assets | Static verifier and deterministic archive test. |
 | DOD-30 | BLOCKED_GATE_B | Release notes list three-client matrix and runtime identity | No release/certification exists. |
+
+## Task 11A Windows operator status
+
+The Windows backup/clone/inventory/restore/private-export source and
+deterministic handoff source are implemented and documented in
+`docs/windows-discovery-operator-runbook.md`.
+
+- Tool implementation remains incomplete until the elevated Windows
+  PowerShell `5.1` synthetic suite reports `failures=0`.
+- Operational completion additionally requires one approved real run that
+  restores the original inventory and UE4SS before-images and produces a
+  verified private evidence ZIP.
+- Task 11B remains blocked until that private inventory is reviewed.
+- No Task 11A result is Gate A acceptance, mutation authority, Gate B evidence,
+  client compatibility evidence, or release authority.
 
 ## PRD section 32 spike artifacts
 

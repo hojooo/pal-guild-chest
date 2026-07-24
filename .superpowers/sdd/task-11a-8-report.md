@@ -56,9 +56,16 @@ Implemented:
 - path-independent SHA-256 sidecar;
 - dirty included-source rejection before building.
 
-## Remaining clean-source gate
+## Clean-source gate
 
-The real worktree contains the current implementation changes, so the
-tracked-clean verifier/build gate must be repeated after those included paths
-are committed. The temporary clean-repository behavior test passed and does
-not modify the project worktree.
+After commit `b83b50a`, the real worktree handoff inputs were tracked and clean.
+The verifier passed, two independently built ZIPs and sidecars compared
+byte-identical, and the archive SHA-256 was:
+
+```text
+92fc1482cbc87652c05901b11008111fdde02350e4d4472ba7f9c6c87a4fe21e
+```
+
+This checksum identifies the clean Task 8 source state only. Later changes to
+any included handoff source intentionally produce a new checksum and require
+the gate to be repeated.

@@ -86,5 +86,9 @@ blocked and no mutation build may be produced.
   Windows Dedicated Server. Mac in this project means the required vanilla
   macOS **client**, not a macOS server.
 
-See `docs/discovery-runbook.md` and `docs/certification-runbook.md` in the
-source repository for evidence and certification procedures.
+See `docs/windows-discovery-operator-runbook.md` for the Task 11A Windows
+backup/clone/restore/private-export gates, `docs/discovery-runbook.md` for
+Task 11B/Gate A evidence, and `docs/certification-runbook.md` for later client
+certification procedures. Task 11A source implementation does not authorize a
+real maintenance run until the elevated Windows PowerShell 5.1 synthetic suite
+reports `failures=0`.

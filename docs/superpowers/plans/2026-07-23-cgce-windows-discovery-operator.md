@@ -17,6 +17,18 @@ Gate A, fatal harness, mutation은 계속 차단한다.
 Windows PowerShell `5.1`, .NET Framework cmdlets, UE4SS `3.0.1` Lua mod,
 plain-PowerShell synthetic tests.
 
+## Implementation Status (2026-07-24)
+
+- Task 1–9 source is implemented, including restore, private export,
+  deterministic handoff scripts, full synthetic lifecycle coverage, and
+  `docs/windows-discovery-operator-runbook.md`.
+- Portable macOS verification can validate source/static/package behavior but
+  cannot substitute for the Windows PowerShell `5.1` behavior gate.
+- Tool implementation remains incomplete until the elevated Windows suite
+  reports `failures=0`; real maintenance and Task 11B remain blocked.
+- The staged Runbook design is
+  `docs/superpowers/specs/2026-07-24-cgce-windows-discovery-runbook-design.md`.
+
 ## Global Constraints
 
 - 구현 기준 spec은
@@ -60,7 +72,7 @@ Read-CgceRunState -RunRoot <string> -RunId <string> -> PSCustomObject
 Set-CgceRunPhase -State <PSCustomObject> -ExpectedPhase <string> -NextPhase <string> -> PSCustomObject
 Write-CgceJsonAtomic -Value <object> -Path <string> -> void
 Write-CgceRunState -State <PSCustomObject> -StatePath <string> -ExpectedPhase <string> -> void
-# Task 6 future output-free Contract exports:
+# Task 6 fixed-purpose output-free Contract exports:
 Write-CgceRecoveryRunState -StatePath <string> -RecoveryIntentPath <string> -> void
 Block-CgceRecoveryRunState -StatePath <string>
   -RecoveryIntentPath <string> -Code <string> -> void
@@ -2618,7 +2630,7 @@ artifact를 ZIP과 sidecar로 만든다.
   `CGCE-OPS-EXPORT-PHASE`, `CGCE-OPS-EXPORT-ALLOWLIST`,
   `CGCE-OPS-EXPORT-SENSITIVE`, `CGCE-OPS-EXPORT-EXISTS`.
 
-- [ ] **Step 1: Write failing export tests**
+- [x] **Step 1: Write failing export tests**
 
 ```powershell
 Invoke-CgceTest "exports only after restore" {
@@ -2645,7 +2657,7 @@ Invoke-CgceTest "export never contains Saved or config" {
 
 Run the Windows suite. Expected: export script missing.
 
-- [ ] **Step 3: Implement exact staging allowlist and manifest**
+- [x] **Step 3: Implement exact staging allowlist and manifest**
 
 Read provisional state only to locate `server_root`, acquire the same
 server-global lock, then re-read state and hold the lock through archive
@@ -2699,7 +2711,7 @@ archived RESTORED state all match the current local RESTORED state. It may then
 complete the same state transition without rebuilding or overwriting output.
 Any mismatch blocks for manual inspection.
 
-- [ ] **Step 4: Add rejection tests**
+- [x] **Step 4: Add rejection tests**
 
 Prove export rejects missing restored inventory, path escape, added `.sav`,
 structured secret field, unexpected existing output, resume checksum/entry
@@ -2736,7 +2748,7 @@ DLL/save/private artifact 혼입을 정적으로 차단한다.
   `dist/CGCE-Windows-Discovery-Handoff.zip.sha256`.
 - Consumes only the file map from the approved Task 11A spec.
 
-- [ ] **Step 1: Extend the failing Lua static contract**
+- [x] **Step 1: Extend the failing Lua static contract**
 
 Assert:
 
@@ -2783,7 +2795,7 @@ binary entries from text that verifies an externally installed dependency.
 Windows test files may mention forbidden names only as exact negative-test
 fixtures; they are not part of the operator-source scan.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -2793,7 +2805,7 @@ Run:
 
 Expected: missing builder/verifier.
 
-- [ ] **Step 3: Implement the static verifier**
+- [x] **Step 3: Implement the static verifier**
 
 `verify-discovery-handoff.sh` must:
 
@@ -2814,7 +2826,7 @@ hashes every extracted artifact source before prepare can create run state.
 Add tampered, re-signed, extra-entry, missing-entry, duplicate, and path-escape
 tests.
 
-- [ ] **Step 4: Implement the deterministic builder**
+- [x] **Step 4: Implement the deterministic builder**
 
 Follow existing `scripts/build-release.sh` conventions:
 
@@ -2860,7 +2872,7 @@ The verifier must run `git ls-files --error-unmatch -- "$path"` for every
 allowlisted input before this status check. This blocks both modified tracked
 files and untracked files from entering the handoff.
 
-- [ ] **Step 5: Run GREEN, commit, then verify from the clean commit**
+- [x] **Step 5: Run GREEN, commit, then verify from the clean commit**
 
 Run focused and full Lua tests before the commit:
 
@@ -2918,7 +2930,7 @@ prepare → fake invoke → restore → export 전체를 증명하고, operator�
 - Keeps Task 11A status `in progress` until Windows verification and the real
   restore-verified inventory run; Task 11B, Gate A, Tasks 12–14 remain blocked.
 
-- [ ] **Step 1: Write the failing full lifecycle test**
+- [x] **Step 1: Write the failing full lifecycle test**
 
 ```powershell
 Invoke-CgceTest "full synthetic lifecycle restores original bytes" {
@@ -3054,7 +3066,7 @@ the server's reviewed non-secret/non-public arguments. Unknown descendant
 images block the maintenance run; the operator does not guess the allowlist.
 The runbook never copies credentials into the argument file.
 
-- [ ] **Step 5: Align project status docs**
+- [x] **Step 5: Align project status docs**
 
 Confirm the master plan retains the already-established split and update only
 the evidence/status links:

@@ -449,6 +449,15 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 
 **Authoritative plan:**
 - `docs/superpowers/plans/2026-07-23-cgce-windows-discovery-operator.md`
+- Operator runbook:
+  `docs/windows-discovery-operator-runbook.md`
+
+**Current status (2026-07-24):**
+- Task 1–9 source, private exporter, deterministic handoff scripts, synthetic
+  lifecycle contract, and staged operator Runbook are implemented.
+- The elevated Windows PowerShell `5.1` suite has not run in the macOS
+  development environment, so tool implementation and real maintenance remain
+  incomplete.
 
 **Interfaces:**
 - Consumes an owner-controlled Windows Palworld Dedicated Server maintenance
