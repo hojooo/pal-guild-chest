@@ -37,11 +37,13 @@ function New-CgceSyntheticFixture {
     $ue4ssRoot = Join-Path $serverRoot "Pal\Binaries\Win64"
     $modsRoot = Join-Path $ue4ssRoot "Mods"
     $runRoot = Join-Path $base "runs"
+    $outputRoot = Join-Path $base "exports"
     $handoffRoot = Join-Path $base "handoff"
     $runId = "r-" + [guid]::NewGuid().ToString("N")
     New-Item -ItemType Directory -Path $savedPath -Force | Out-Null
     New-Item -ItemType Directory -Path $modsRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $runRoot | Out-Null
+    New-Item -ItemType Directory -Path $outputRoot | Out-Null
     New-Item -ItemType Directory -Path $handoffRoot | Out-Null
     Write-CgceLifecycleUtf8 (Join-Path $savedPath "WorldOption.sav") "synthetic-world"
     New-Item -ItemType Directory -Path (Join-Path $savedPath "Players") | Out-Null
@@ -118,6 +120,7 @@ function New-CgceSyntheticFixture {
         Ue4ssRoot = $ue4ssRoot
         ServerExecutable = $serverExecutable
         RunRoot = $runRoot
+        OutputRoot = $outputRoot
         RunId = $runId
         HandoffRoot = $handoffRoot
         SourceManifestPath = $sourceManifestPath
@@ -136,6 +139,9 @@ function New-CgceSyntheticFixture {
         RestoreScript = (Join-Path `
             $handoffRoot `
             "tools\windows-discovery\Restore-CgceProduction.ps1")
+        ExportScript = (Join-Path `
+            $handoffRoot `
+            "tools\windows-discovery\Export-CgceDiscoveryEvidence.ps1")
         FakeServerScript = (Join-Path `
             $handoffRoot `
             "tests\windows\fixtures\FakePalServer.cmd")
@@ -148,6 +154,9 @@ function New-CgceSyntheticFixture {
         RepositoryRestoreScript = (Join-Path `
             $repositoryRoot `
             "tools\windows-discovery\Restore-CgceProduction.ps1")
+        RepositoryExportScript = (Join-Path `
+            $repositoryRoot `
+            "tools\windows-discovery\Export-CgceDiscoveryEvidence.ps1")
     }
 }
 
@@ -561,6 +570,9 @@ function Relocate-CgceLifecycleHandoff($Fixture) {
     $Fixture.RestoreScript = Join-Path `
         $destinationRoot `
         "tools\windows-discovery\Restore-CgceProduction.ps1"
+    $Fixture.ExportScript = Join-Path `
+        $destinationRoot `
+        "tools\windows-discovery\Export-CgceDiscoveryEvidence.ps1"
     $Fixture.FakeServerScript = Join-Path `
         $destinationRoot `
         "tests\windows\fixtures\FakePalServer.cmd"
@@ -3124,6 +3136,719 @@ Invoke-CgceTest "invoke root PID receipt survives a post-creation crash without 
             -Expected $fixture.OriginalInventory `
             -Actual @(Get-CgceTreeInventory `
                 -Root $state.paths.inactive_original)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+function New-CgceRestoredFixture {
+    $fixture = New-CgceCapturedFixture
+    $restored = Invoke-CgceRestoreChild -Fixture $fixture
+    Assert-CgceRestoreTerminal `
+        -Result $restored `
+        -ExitCode 0 `
+        -Line "CGCE_WINDOWS_DISCOVERY_OK RESTORED $($fixture.RunId)"
+    Assert-CgceRestoredFixture $fixture
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name ExportPath `
+        -Value (Join-Path `
+            $fixture.OutputRoot `
+            "CGCE-Windows-Discovery-$($fixture.RunId).zip")
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name ExportSidecarPath `
+        -Value (Join-Path `
+            $fixture.OutputRoot `
+            "CGCE-Windows-Discovery-$($fixture.RunId).zip.sha256")
+    return $fixture
+}
+
+function Invoke-CgceExportChild(
+    $Fixture,
+    [switch]$Resume,
+    [string]$ModuleSetup = "",
+    [string]$OutputDirectory = ""
+) {
+    $stderrPath = Join-Path $Fixture.Base (
+        "export-stderr-" + [guid]::NewGuid().ToString("N")
+    )
+    $entryScript = $Fixture.ExportScript
+    if (-not [string]::IsNullOrWhiteSpace($ModuleSetup)) {
+        $entryScript = Join-Path $Fixture.Base (
+            "export-wrapper-" + [guid]::NewGuid().ToString("N") + ".ps1"
+        )
+        $toolRoot = Join-Path $Fixture.HandoffRoot "tools\windows-discovery"
+        $wrapper = @(
+            '$ErrorActionPreference = "Stop"'
+            ('$commonModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "CgceDiscovery.Common.psm1"
+                )) + ' -Global -PassThru')
+            ('$contractModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Contract.psm1"
+                )) + ' -Global -PassThru')
+            ('$filesModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Files.psm1"
+                )) + ' -Global -PassThru')
+            ('$runtimeModule = Import-Module ' +
+                (ConvertTo-CgceLifecycleSingleQuoted (
+                    Join-Path $toolRoot "modules\CgceDiscovery.Runtime.psm1"
+                )) + ' -Global -PassThru')
+            $ModuleSetup
+            ('& ' + (ConvertTo-CgceLifecycleSingleQuoted $Fixture.ExportScript) +
+                ' @args')
+            'exit $LASTEXITCODE'
+        ) -join "`r`n"
+        Write-CgceLifecycleUtf8 -Path $entryScript -Text ($wrapper + "`r`n")
+    }
+    $boundOutputDirectory = if ([string]::IsNullOrWhiteSpace(
+            $OutputDirectory
+        )) {
+        $Fixture.OutputRoot
+    } else {
+        $OutputDirectory
+    }
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $entryScript,
+        "-RunRoot", $Fixture.RunRoot,
+        "-RunId", $Fixture.RunId,
+        "-OutputDirectory", $boundOutputDirectory
+    )
+    if ($Resume) {
+        $arguments += "-Resume"
+    }
+    $stdout = @(& "$PSHOME\powershell.exe" @arguments 2> $stderrPath)
+    $exitCode = $LASTEXITCODE
+    $stderr = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+        [System.IO.File]::ReadAllText($stderrPath)
+    } else {
+        ""
+    }
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Stdout = $stdout
+        Stderr = $stderr
+    }
+}
+
+function Assert-CgceExportTerminal(
+    $Result,
+    [int]$ExitCode,
+    [string]$Line
+) {
+    Assert-CgceEqual $ExitCode $Result.ExitCode
+    Assert-CgceEqual 1 @($Result.Stdout).Count
+    Assert-CgceEqual $Line $Result.Stdout[0]
+    Assert-CgceEqual "" $Result.Stderr
+}
+
+function Get-CgceLifecycleArchiveEntries([string]$Path) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        return [string[]]@(
+            $archive.Entries |
+                ForEach-Object { $_.FullName } |
+                Sort-Object
+        )
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function Read-CgceLifecycleArchiveText(
+    [string]$Path,
+    [string]$EntryName
+) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entry = $archive.GetEntry($EntryName)
+        if ($null -eq $entry) {
+            throw "CGCE-TEST archive entry is missing"
+        }
+        $stream = $entry.Open()
+        try {
+            $reader = [System.IO.StreamReader]::new(
+                $stream,
+                (New-Object System.Text.UTF8Encoding($false, $true)),
+                $false
+            )
+            try {
+                return $reader.ReadToEnd()
+            } finally {
+                $reader.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function ConvertTo-CgceLifecycleUtf8Bytes([string]$Text) {
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $bytes = $encoding.GetBytes($Text)
+    return ,$bytes
+}
+
+function Get-CgceLifecycleBytesSha256([byte[]]$Bytes) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString(
+            $algorithm.ComputeHash($Bytes)
+        )).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Replace-CgceLifecycleArchiveText(
+    [string]$Path,
+    [string]$EntryName,
+    [string]$Text
+) {
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::Open(
+        $Path,
+        [IO.Compression.ZipArchiveMode]::Update
+    )
+    try {
+        $entry = $archive.GetEntry($EntryName)
+        if ($null -eq $entry) {
+            throw "CGCE-TEST archive entry is missing"
+        }
+        $entry.Delete()
+        $replacement = $archive.CreateEntry(
+            $EntryName,
+            [IO.Compression.CompressionLevel]::Optimal
+        )
+        $replacement.LastWriteTime = [DateTimeOffset]::new(
+            1980, 1, 1, 0, 0, 0,
+            [TimeSpan]::Zero
+        )
+        $bytes = ConvertTo-CgceLifecycleUtf8Bytes $Text
+        $stream = $replacement.Open()
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function Write-CgceLifecycleArchiveSidecar(
+    [string]$ArchivePath,
+    [string]$SidecarPath
+) {
+    Write-CgceLifecycleUtf8 `
+        -Path $SidecarPath `
+        -Text ((Get-CgceSha256 $ArchivePath) + "  " +
+            (Split-Path -Leaf $ArchivePath) + "`n")
+}
+
+function Write-CgceLifecycleAuthorityJson(
+    [string]$Path,
+    $Value
+) {
+    Write-CgceLifecycleUtf8 `
+        -Path $Path `
+        -Text ($Value | ConvertTo-Json -Depth 12)
+}
+
+function Update-CgceLifecycleGenesisAndState(
+    $Fixture,
+    [scriptblock]$Mutation
+) {
+    $genesis = Read-CgceJsonObject -Path $Fixture.Paths.genesis_state
+    $state = Read-CgceJsonObject -Path $Fixture.Paths.state
+    $null = & $Mutation $genesis $state $Fixture
+    Write-CgceLifecycleAuthorityJson `
+        -Path $Fixture.Paths.genesis_state `
+        -Value $genesis
+    Write-CgceLifecycleAuthorityJson `
+        -Path $Fixture.Paths.state `
+        -Value $state
+    $markerPath = if (Test-Path `
+            -LiteralPath $Fixture.Paths.completed_run_marker `
+            -PathType Leaf) {
+        $Fixture.Paths.completed_run_marker
+    } else {
+        $Fixture.Paths.active_run_marker
+    }
+    $marker = Read-CgceJsonObject -Path $markerPath
+    $marker.genesis_state_checksum = Get-CgceSha256 `
+        $Fixture.Paths.genesis_state
+    Write-CgceLifecycleAuthorityJson -Path $markerPath -Value $marker
+    $null = Read-CgceRunState `
+        -RunRoot $Fixture.RunRoot `
+        -RunId $Fixture.RunId
+}
+
+function Set-CgceLifecycleRestoredBlocked($Fixture) {
+    $state = Read-CgceJsonObject -Path $Fixture.Paths.state
+    $state.revision = [int64]$state.revision + 1
+    $state.updated_at_utc = [DateTime]::UtcNow.ToString(
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $state.outcome = "BLOCKED"
+    $state.errors = [object[]]@(
+        [pscustomobject][ordered]@{
+            code = "CGCE-OPS-EXPORT-ALLOWLIST"
+            at_utc = $state.updated_at_utc
+        }
+    )
+    Write-CgceLifecycleAuthorityJson `
+        -Path $Fixture.Paths.state `
+        -Value $state
+    $null = Read-CgceRunState `
+        -RunRoot $Fixture.RunRoot `
+        -RunId $Fixture.RunId
+}
+
+Invoke-CgceTest "export rejects non-restored and blocked runs without output" {
+    $captured = New-CgceCapturedFixture
+    try {
+        $captured | Add-Member `
+            -MemberType NoteProperty `
+            -Name ExportPath `
+            -Value (Join-Path `
+                $captured.OutputRoot `
+                "CGCE-Windows-Discovery-$($captured.RunId).zip")
+        $before = Get-CgceSha256 $captured.Paths.state
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild -Fixture $captured) `
+            -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-EXPORT-PHASE $($captured.RunId)"
+        Assert-CgceEqual $before (Get-CgceSha256 $captured.Paths.state)
+        Assert-CgceEqual $false (Test-Path -LiteralPath $captured.ExportPath)
+    } finally {
+        Remove-Item -LiteralPath $captured.Base -Recurse -Force
+    }
+
+    $blocked = New-CgceRestoredFixture
+    try {
+        Set-CgceLifecycleRestoredBlocked $blocked
+        $before = Get-CgceSha256 $blocked.Paths.state
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild -Fixture $blocked) `
+            -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-EXPORT-PHASE $($blocked.RunId)"
+        Assert-CgceEqual $before (Get-CgceSha256 $blocked.Paths.state)
+        Assert-CgceEqual $false (Test-Path -LiteralPath $blocked.ExportPath)
+    } finally {
+        Remove-Item -LiteralPath $blocked.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "export rejects missing, escaped, sensitive, and existing output" {
+    $cases = @(
+        [pscustomobject]@{
+            Name = "missing restored inventory"
+            Code = "CGCE-OPS-EXPORT-ALLOWLIST"
+            Setup = {
+                param($Fixture)
+                [IO.File]::Delete($Fixture.Paths.restored_inventory)
+            }
+        },
+        [pscustomobject]@{
+            Name = "escaped restored inventory path"
+            Code = "CGCE-OPS-EXPORT-ALLOWLIST"
+            Setup = {
+                param($Fixture)
+                $escaped = Join-Path `
+                    $Fixture.Base `
+                    "escaped-restored.json"
+                [IO.File]::Copy(
+                    $Fixture.Paths.restored_inventory,
+                    $escaped,
+                    $false
+                )
+                $mutation = {
+                    param($Genesis, $State, $Ignored)
+                    $Genesis.paths.restored_inventory = $escaped
+                    $State.paths.restored_inventory = $escaped
+                }.GetNewClosure()
+                Update-CgceLifecycleGenesisAndState `
+                    -Fixture $Fixture `
+                    -Mutation $mutation
+            }
+        },
+        [pscustomobject]@{
+            Name = "sensitive capture extension"
+            Code = "CGCE-OPS-EXPORT-SENSITIVE"
+            Setup = {
+                param($Fixture)
+                Write-CgceLifecycleUtf8 `
+                    -Path (Join-Path `
+                        $Fixture.Paths.capture `
+                        "CXXHeaderDump\player.sav") `
+                    -Text "synthetic sensitive bytes"
+            }
+        },
+        [pscustomobject]@{
+            Name = "structured secret field"
+            Code = "CGCE-OPS-EXPORT-SENSITIVE"
+            Setup = {
+                param($Fixture)
+                $control = Read-CgceJsonObject `
+                    -Path $Fixture.Paths.control_evidence
+                $control | Add-Member `
+                    -MemberType NoteProperty `
+                    -Name AdminPassword `
+                    -Value "synthetic-secret"
+                Write-CgceLifecycleAuthorityJson `
+                    -Path $Fixture.Paths.control_evidence `
+                    -Value $control
+                $checksum = Get-CgceSha256 `
+                    $Fixture.Paths.control_evidence
+                $mutation = {
+                    param($Genesis, $State, $Ignored)
+                    $Genesis.control_evidence_checksum = $checksum
+                    $State.control_evidence_checksum = $checksum
+                }.GetNewClosure()
+                Update-CgceLifecycleGenesisAndState `
+                    -Fixture $Fixture `
+                    -Mutation $mutation
+            }
+        },
+        [pscustomobject]@{
+            Name = "stale control evidence"
+            Code = "CGCE-OPS-CONTROL-EXPIRED"
+            Setup = {
+                param($Fixture)
+                $control = Read-CgceJsonObject `
+                    -Path $Fixture.Paths.control_evidence
+                $control.verified_at_utc = "2020-01-01T00:00:00Z"
+                $control.valid_until_utc = "2020-01-01T01:00:00Z"
+                Write-CgceLifecycleAuthorityJson `
+                    -Path $Fixture.Paths.control_evidence `
+                    -Value $control
+                $checksum = Get-CgceSha256 `
+                    $Fixture.Paths.control_evidence
+                $mutation = {
+                    param($Genesis, $State, $Ignored)
+                    $Genesis.control_evidence_checksum = $checksum
+                    $State.control_evidence_checksum = $checksum
+                }.GetNewClosure()
+                Update-CgceLifecycleGenesisAndState `
+                    -Fixture $Fixture `
+                    -Mutation $mutation
+            }
+        },
+        [pscustomobject]@{
+            Name = "existing output"
+            Code = "CGCE-OPS-EXPORT-EXISTS"
+            Setup = {
+                param($Fixture)
+                Write-CgceLifecycleUtf8 `
+                    -Path $Fixture.ExportPath `
+                    -Text "do-not-overwrite"
+            }
+        }
+    )
+    foreach ($case in $cases) {
+        $fixture = New-CgceRestoredFixture
+        try {
+            $null = & $case.Setup $fixture
+            $before = Get-CgceSha256 $fixture.Paths.state
+            Assert-CgceExportTerminal `
+                -Result (Invoke-CgceExportChild -Fixture $fixture) `
+                -ExitCode 1 `
+                -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED $($case.Code) $($fixture.RunId)"
+            Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
+            if ($case.Name -ceq "existing output") {
+                Assert-CgceEqual `
+                    "do-not-overwrite" `
+                    ([IO.File]::ReadAllText($fixture.ExportPath))
+            }
+        } catch {
+            throw "CGCE-TEST $($case.Name): $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "export rejects output overlap with handoff authority" {
+    $fixture = New-CgceRestoredFixture
+    try {
+        $before = Get-CgceSha256 $fixture.Paths.state
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild `
+                -Fixture $fixture `
+                -OutputDirectory $fixture.HandoffRoot) `
+            -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PATH-OVERLAP $($fixture.RunId)"
+        Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
+        Assert-CgceEqual `
+            $false `
+            (Test-Path -LiteralPath (Join-Path `
+                $fixture.HandoffRoot `
+                "CGCE-Windows-Discovery-$($fixture.RunId).zip"))
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "export archives the exact private allowlist after restore" {
+    $fixture = New-CgceRestoredFixture
+    try {
+        $restoredStateText = [IO.File]::ReadAllText($fixture.Paths.state)
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild -Fixture $fixture) `
+            -ExitCode 0 `
+            -Line "CGCE_WINDOWS_DISCOVERY_OK EXPORTED $($fixture.RunId)"
+
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        Assert-CgceEqual "EXPORTED" $state.phase
+        Assert-CgceEqual "SUCCEEDED" $state.outcome
+        Assert-CgceRunMarker -State $state -AllowCompleted
+        Assert-CgceEqual $true (Test-Path -LiteralPath $fixture.ExportPath)
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath $fixture.ExportSidecarPath)
+        Assert-CgceDeepEqual @(
+            "capture/CXXHeaderDump/Synthetic.hpp",
+            "capture/UE4SS_ObjectDump.txt",
+            "control-evidence.json",
+            "export-manifest.json",
+            "inventories/backup.json",
+            "inventories/clone.json",
+            "inventories/original.json",
+            "inventories/restored.json",
+            "run-state.json"
+        ) @(Get-CgceLifecycleArchiveEntries $fixture.ExportPath)
+        Assert-CgceEqual `
+            $restoredStateText `
+            (Read-CgceLifecycleArchiveText `
+                -Path $fixture.ExportPath `
+                -EntryName "run-state.json")
+        $manifest = (
+            Read-CgceLifecycleArchiveText `
+                -Path $fixture.ExportPath `
+                -EntryName "export-manifest.json"
+        ) | ConvertFrom-Json
+        Assert-CgceEqual `
+            "cgce_windows_discovery_export_manifest" `
+            $manifest.kind
+        Assert-CgceEqual "PRIVATE" $manifest.privacy
+        Assert-CgceEqual 8 @($manifest.payload).Count
+        $sidecar = [IO.File]::ReadAllText($fixture.ExportSidecarPath)
+        Assert-CgceEqual `
+            ((Get-CgceSha256 $fixture.ExportPath) + "  " +
+                (Split-Path -Leaf $fixture.ExportPath) + "`n") `
+            $sidecar
+        foreach ($entry in @(Get-CgceLifecycleArchiveEntries `
+                $fixture.ExportPath)) {
+            if ($entry -cmatch '(^|/)(Saved|Config)(/|$)' -or
+                $entry -cmatch '(?i)\.(sav|ini|key|pem)\z' -or
+                $entry -ceq "mods.txt") {
+                throw "CGCE-TEST sensitive export entry found"
+            }
+        }
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath $state.paths.backup_saved)
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath $state.paths.quarantined_clone)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "export resume accepts only its exact verified archive" {
+    $crashSetup = @'
+& $contractModule {
+    $script:CgceTestStatePersistenceSeam = {
+        param([string]$phase, $context)
+        if ($phase -ceq "before-state-replace" -and
+            $context.candidate.phase -ceq "EXPORTED") {
+            throw "CGCE-OPS-CHECKSUM synthetic export crash"
+        }
+    }
+}
+'@
+
+    $resume = New-CgceRestoredFixture
+    try {
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild `
+                -Fixture $resume `
+                -ModuleSetup $crashSetup) `
+            -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($resume.RunId)"
+        $state = Read-CgceRunState `
+            -RunRoot $resume.RunRoot `
+            -RunId $resume.RunId
+        Assert-CgceEqual "RESTORED" $state.phase
+        Assert-CgceEqual "ACTIVE" $state.outcome
+        Assert-CgceEqual $true (Test-Path -LiteralPath $resume.ExportPath)
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath $resume.ExportSidecarPath)
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild -Fixture $resume -Resume) `
+            -ExitCode 0 `
+            -Line "CGCE_WINDOWS_DISCOVERY_OK EXPORTED $($resume.RunId)"
+        $state = Read-CgceRunState `
+            -RunRoot $resume.RunRoot `
+            -RunId $resume.RunId
+        Assert-CgceEqual "EXPORTED" $state.phase
+        Assert-CgceEqual "SUCCEEDED" $state.outcome
+    } finally {
+        Remove-Item -LiteralPath $resume.Base -Recurse -Force
+    }
+
+    $tampered = New-CgceRestoredFixture
+    try {
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild `
+                -Fixture $tampered `
+                -ModuleSetup $crashSetup) `
+            -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($tampered.RunId)"
+        [IO.File]::AppendAllText(
+            $tampered.ExportPath,
+            "tamper",
+            (New-Object Text.UTF8Encoding($false))
+        )
+        $before = Get-CgceSha256 $tampered.Paths.state
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild -Fixture $tampered -Resume) `
+            -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($tampered.RunId)"
+        Assert-CgceEqual $before (Get-CgceSha256 $tampered.Paths.state)
+    } finally {
+        Remove-Item -LiteralPath $tampered.Base -Recurse -Force
+    }
+
+    $rebound = New-CgceRestoredFixture
+    try {
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild `
+                -Fixture $rebound `
+                -ModuleSetup $crashSetup) `
+            -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($rebound.RunId)"
+        $manifest = (
+            Read-CgceLifecycleArchiveText `
+                -Path $rebound.ExportPath `
+                -EntryName "export-manifest.json"
+        ) | ConvertFrom-Json
+        $record = @($manifest.payload | Where-Object {
+            $_.relative_path -ceq "control-evidence.json"
+        })
+        Assert-CgceEqual 1 $record.Count
+        $replacementText = '{"tampered":true}'
+        $replacementBytes = ConvertTo-CgceLifecycleUtf8Bytes `
+            $replacementText
+        $record[0].length = [int64]$replacementBytes.Length
+        $record[0].sha256 = Get-CgceLifecycleBytesSha256 `
+            $replacementBytes
+        Replace-CgceLifecycleArchiveText `
+            -Path $rebound.ExportPath `
+            -EntryName "control-evidence.json" `
+            -Text $replacementText
+        Replace-CgceLifecycleArchiveText `
+            -Path $rebound.ExportPath `
+            -EntryName "export-manifest.json" `
+            -Text ($manifest | ConvertTo-Json -Depth 12)
+        Write-CgceLifecycleArchiveSidecar `
+            -ArchivePath $rebound.ExportPath `
+            -SidecarPath $rebound.ExportSidecarPath
+        $before = Get-CgceSha256 $rebound.Paths.state
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild -Fixture $rebound -Resume) `
+            -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($rebound.RunId)"
+        Assert-CgceEqual $before (Get-CgceSha256 $rebound.Paths.state)
+    } finally {
+        Remove-Item -LiteralPath $rebound.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "full synthetic lifecycle restores original bytes and exports evidence" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $fixture | Add-Member `
+            -MemberType NoteProperty `
+            -Name CapturedCloneInventory `
+            -Value @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+        $fixture | Add-Member `
+            -MemberType NoteProperty `
+            -Name ExportPath `
+            -Value (Join-Path `
+                $fixture.OutputRoot `
+                "CGCE-Windows-Discovery-$($fixture.RunId).zip")
+        $fixture | Add-Member `
+            -MemberType NoteProperty `
+            -Name ExportSidecarPath `
+            -Value "$($fixture.ExportPath).sha256"
+
+        $before = @(Get-CgceTreeInventory -Root $fixture.Paths.inactive_original)
+        $captured = Invoke-CgceInvokeChild -Fixture $fixture
+        Assert-CgceEqual 0 $captured.ExitCode
+        Assert-CgceDeepEqual `
+            @("CGCE_WINDOWS_DISCOVERY_OK CAPTURED $($fixture.RunId)") `
+            @($captured.Stdout)
+        Assert-CgceEqual "" $captured.Stderr
+
+        Assert-CgceRestoreTerminal `
+            -Result (Invoke-CgceRestoreChild -Fixture $fixture) `
+            -ExitCode 0 `
+            -Line "CGCE_WINDOWS_DISCOVERY_OK RESTORED $($fixture.RunId)"
+        Assert-CgceRestoredFixture $fixture
+
+        Assert-CgceExportTerminal `
+            -Result (Invoke-CgceExportChild -Fixture $fixture) `
+            -ExitCode 0 `
+            -Line "CGCE_WINDOWS_DISCOVERY_OK EXPORTED $($fixture.RunId)"
+        $after = @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+        Compare-CgceInventory -Expected $before -Actual $after
+
+        $state = Read-CgceRunState `
+            -RunRoot $fixture.RunRoot `
+            -RunId $fixture.RunId
+        Assert-CgceEqual "EXPORTED" $state.phase
+        Assert-CgceEqual "SUCCEEDED" $state.outcome
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath $state.paths.quarantined_clone)
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath $state.paths.backup_saved)
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath $state.paths.completed_run_marker)
+        Assert-CgceEqual `
+            $false `
+            (Test-Path -LiteralPath $state.paths.active_run_marker)
+        Assert-CgceEqual $true (Test-Path -LiteralPath $fixture.ExportPath)
+        Assert-CgceEqual `
+            $true `
+            (Test-Path -LiteralPath $fixture.ExportSidecarPath)
+        Assert-CgceEqual `
+            (Get-CgceSha256 $fixture.ExportPath) `
+            (([IO.File]::ReadAllText(
+                $fixture.ExportSidecarPath
+            ).Trim() -split '\s+')[0])
     } finally {
         Remove-Item -LiteralPath $fixture.Base -Recurse -Force
     }
