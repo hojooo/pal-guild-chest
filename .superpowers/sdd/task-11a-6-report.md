@@ -174,3 +174,103 @@ The non-null probe fixture deliberately uses the public Runtime enable/restore
 APIs rather than handwritten probe receipts. Its PowerShell 5.1 behavior still
 requires the unavailable Windows gate; the portable result cannot validate
 Windows process, filesystem, or module semantics.
+
+## RED slice B: Runtime/Lifecycle recovery tests
+
+This append adds only the Task 11A.6 Runtime and Lifecycle RED tests. No
+production module, restore entry point, plan/spec, package, harness, portable
+test, or user-owned `.superpowers/sdd/progress.md` file was modified.
+
+### Added Runtime coverage
+
+- `probe restored validator is read-only over absent and completed authorities`
+- `probe restore rechecks inactivity before every mutation`
+- `probe restore manual barriers prevent the next move or receipt`
+
+The new validator test reserves the exact output-free public API and checks
+absent authority, a completed source-bound restore journal, semantic receipt
+tampering, and terminal residue without allowing any repair. Its snapshots
+include the run state, genesis, markers, process/probe receipt trees, staged
+and quarantined probe artifacts, before images, and output artifacts.
+
+The mutation-guard tests freeze the unchanged public restore parameter set;
+they inject a state-bound executable process, TCP listener, or UDP listener
+through only the Runtime module-private test seams immediately before restore
+root creation, intent publication, each cleanup operation/receipt, and the
+final receipt. The tests compare the exact captured filesystem/authority state
+at each injection point.
+
+The manual-barrier fixtures construct a state/genesis/active-marker authority
+with the state-bound executable and listener port. They separately install a
+persisted `CGCE-OPS-MANUAL-RECOVERY` state error or a schema-valid,
+`000-launch.json`-bound process sentinel. Each is asserted at next move, next
+receipt, resume, and completed paths with no subsequent write.
+
+### Added Lifecycle coverage
+
+- `restore bootstrap rejects oversized genesis and manifest before import`
+- `restore bootstrap rejects a wrong-origin preloaded handoff module`
+- `restore bootstrap accepts relocated byte-identical handoff`
+- `restore bootstrap rejects either-direction handoff RunRoot overlap`
+- `restore bootstrap rejects a re-signed module tree with no side effect`
+- `restore returns the exact original and quarantines the clone`
+- `restore resumes every intent operation inventory state and marker boundary`
+- `completed marker uses the read-only probe validator and performs no repair`
+- `restore completed-marker replay emits one terminal line and writes nothing`
+
+Lifecycle tests use the existing synthetic prepare/invoke child fixture only;
+they do not invoke a real Palworld server, save, or firewall. They reserve
+`RestoreScript` and `RepositoryRestoreScript` fixture properties and require
+one stdout terminal line, empty stderr, and exact exit `0` or `1`. The success
+case freezes the restored original, clone quarantine, inactive-original
+absence, backup preservation, marker completion, restored inventory, and the
+four restore-journal leaves. Crash cases enumerate the required intent, CAS,
+010/020, inventory, final receipt, state, and marker boundaries.
+
+### RED verification
+
+Portable focused command:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+```
+
+Result: the two existing Task 11A.6 portable RED surfaces remain deliberately
+unimplemented; the five pre-existing handoff cases passed.
+
+```text
+FAIL defines Task 6 Contract and Files public recovery surfaces
+FAIL defines the Task 6 restore entry point surface
+PASS five existing Windows discovery handoff checks
+```
+
+Required Windows command (attempted exactly):
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\windows\Run-CgceDiscoveryTests.ps1
+```
+
+Result: exit `127` on this macOS host:
+
+```text
+zsh:1: command not found: powershell.exe
+```
+
+`git diff --check` passed. This is not a Windows behavioral pass; an actual
+Windows PowerShell 5.1 run is still required after the production slice.
+
+### Static self-review
+
+- Reviewed the changed tests for PowerShell 5.1 compatibility: no ternary,
+  null-coalescing, null-conditional, class, or PowerShell 7-only syntax was
+  introduced. Here-string replacement is assigned in two statements so the
+  closing delimiter remains valid in Windows PowerShell 5.1.
+- Runtime assertions are state/filesystem/terminal observable assertions, not
+  mock-call assertions. The absent planned export causes the intended RED
+  failure now; positive completed authority, semantic-negative authority, and
+  no-write comparisons prevent an always-throw future implementation from
+  satisfying the full test.
+- Lifecycle child assertions distinguish terminal stdout, stderr, and exact
+  exit status, and replay snapshots exclude test wrapper/stderr artifacts.
+  The bootstrap, relocation, and re-signed-tree cases use copied handoff
+  bytes and side-effect sentinels rather than a real server.
