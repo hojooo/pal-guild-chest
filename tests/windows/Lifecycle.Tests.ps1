@@ -2763,6 +2763,9 @@ Invoke-CgceTest "restore returns the exact original and quarantines the clone" {
         Assert-CgceEqual $true (Test-Path -LiteralPath $state.paths.completed_run_marker)
         Assert-CgceEqual $false (Test-Path -LiteralPath $state.paths.active_run_marker)
         Assert-CgceEqual $true (Test-Path -LiteralPath $state.paths.restored_inventory)
+        Assert-CgceEqual `
+            $state.inventory_checksums.restored `
+            (Get-CgceSha256 $state.paths.restored_inventory)
         Assert-CgceDeepEqual @(
             "000-restore-intent.json",
             "010-quarantine-clone.json",
@@ -2781,6 +2784,16 @@ Invoke-CgceTest "restore returns the exact original and quarantines the clone" {
         Compare-CgceInventory `
             -Expected $fixture.OriginalInventory `
             -Actual @(Get-CgceTreeInventory -Root $state.paths.backup_saved)
+        $restoredInventory = Read-CgceInventory `
+            -Path $state.paths.restored_inventory -ExpectedKind "restored"
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @($restoredInventory.entries)
+        $probeOutput = @(Assert-CgceInventoryProbeRestored `
+            -Paths $state.paths -RunDirectory $state.paths.run_directory `
+            -RunId $fixture.RunId `
+            -ExpectedFinalReceiptChecksum $state.probe_receipt_checksum)
+        Assert-CgceEqual 0 $probeOutput.Count
     } finally {
         Remove-Item -LiteralPath $fixture.Base -Recurse -Force
     }
@@ -2788,9 +2801,16 @@ Invoke-CgceTest "restore returns the exact original and quarantines the clone" {
 
 Invoke-CgceTest "restore resumes every intent operation inventory state and marker boundary" {
     $boundaries = @(
-        "after-000-intent", "after-RESTORING-CAS", "before-010", "after-010",
-        "before-020", "after-020-already-active-original", "after-restored-inventory",
-        "after-999", "after-RESTORED-state", "before-marker", "after-marker"
+        [pscustomobject]@{ Point = "after-000-intent"; Phase = "CAPTURED"; Receipts = @("000-restore-intent.json"); Inactive = $true; Restored = $false; Completed = $false },
+        [pscustomobject]@{ Point = "after-RESTORING-CAS-before-010"; Phase = "RESTORING"; Receipts = @("000-restore-intent.json"); Inactive = $true; Restored = $false; Completed = $false },
+        [pscustomobject]@{ Point = "after-010-move-before-receipt"; Phase = "RESTORING"; Receipts = @("000-restore-intent.json"); Inactive = $true; Restored = $false; Completed = $false },
+        [pscustomobject]@{ Point = "after-010-receipt"; Phase = "RESTORING"; Receipts = @("000-restore-intent.json", "010-quarantine-clone.json"); Inactive = $true; Restored = $false; Completed = $false },
+        [pscustomobject]@{ Point = "after-020-move-before-receipt"; Phase = "RESTORING"; Receipts = @("000-restore-intent.json", "010-quarantine-clone.json"); Inactive = $false; Restored = $false; Completed = $false },
+        [pscustomobject]@{ Point = "after-020-receipt"; Phase = "RESTORING"; Receipts = @("000-restore-intent.json", "010-quarantine-clone.json", "020-restore-original.json"); Inactive = $false; Restored = $false; Completed = $false },
+        [pscustomobject]@{ Point = "after-restored-inventory"; Phase = "RESTORING"; Receipts = @("000-restore-intent.json", "010-quarantine-clone.json", "020-restore-original.json"); Inactive = $false; Restored = $true; Completed = $false },
+        [pscustomobject]@{ Point = "after-999"; Phase = "RESTORING"; Receipts = @("000-restore-intent.json", "010-quarantine-clone.json", "020-restore-original.json", "999-restore-final.json"); Inactive = $false; Restored = $true; Completed = $false },
+        [pscustomobject]@{ Point = "after-RESTORED-state-before-marker"; Phase = "RESTORED"; Receipts = @("000-restore-intent.json", "010-quarantine-clone.json", "020-restore-original.json", "999-restore-final.json"); Inactive = $false; Restored = $true; Completed = $false },
+        [pscustomobject]@{ Point = "after-completed-marker-before-terminal"; Phase = "RESTORED"; Receipts = @("000-restore-intent.json", "010-quarantine-clone.json", "020-restore-original.json", "999-restore-final.json"); Inactive = $false; Restored = $true; Completed = $true }
     )
     foreach ($boundary in $boundaries) {
         $fixture = New-CgceCapturedFixture
@@ -2806,20 +2826,29 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
 '@
             $setup = $setupTemplate.Replace(
                 "__POINT__",
-                (ConvertTo-CgceLifecycleSingleQuoted $boundary)
+                (ConvertTo-CgceLifecycleSingleQuoted $boundary.Point)
             )
             $first = Invoke-CgceRestoreChild -Fixture $fixture -ModuleSetup $setup
             Assert-CgceEqual 197 $first.ExitCode
             Assert-CgceEqual 0 @($first.Stdout).Count
             Assert-CgceEqual "" $first.Stderr
+            $current = Read-CgceRunState `
+                -RunRoot $fixture.RunRoot -RunId $fixture.RunId
+            Assert-CgceEqual $boundary.Phase $current.phase
+            Assert-CgceDeepEqual $boundary.Receipts @(
+                Get-ChildItem -LiteralPath $fixture.Paths.restore_receipts -Force |
+                    Sort-Object -Property Name | ForEach-Object { $_.Name }
+            )
             Assert-CgceEqual $true (Test-Path -LiteralPath $fixture.Paths.backup_saved)
-            $afterRestoreMove = @(
-                "after-020-already-active-original", "after-restored-inventory",
-                "after-999", "after-RESTORED-state", "before-marker", "after-marker"
-            ) -contains $boundary
             Assert-CgceEqual `
-                (-not $afterRestoreMove) `
+                $boundary.Inactive `
                 (Test-Path -LiteralPath $fixture.Paths.inactive_original)
+            Assert-CgceEqual $boundary.Restored `
+                (Test-Path -LiteralPath $fixture.Paths.restored_inventory)
+            Assert-CgceEqual $boundary.Completed `
+                (Test-Path -LiteralPath $fixture.Paths.completed_run_marker)
+            Assert-CgceEqual (-not $boundary.Completed) `
+                (Test-Path -LiteralPath $fixture.Paths.active_run_marker)
             $second = Invoke-CgceRestoreChild -Fixture $fixture
             Assert-CgceRestoreTerminal `
                 -Result $second -ExitCode 0 `
@@ -2843,7 +2872,7 @@ Invoke-CgceTest "completed marker uses the read-only probe validator and perform
         Assert-CgceEqual 1 $result.ExitCode
         Assert-CgceEqual 1 @($result.Stdout).Count
         Assert-CgceEqual `
-            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PROBE-RECEIPT $($fixture.RunId)" `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-MANUAL-RECOVERY $($fixture.RunId)" `
             $result.Stdout[0]
         Assert-CgceEqual "" $result.Stderr
         Assert-CgceDeepEqual $before (Get-CgceLifecycleRestoreSnapshot $fixture)

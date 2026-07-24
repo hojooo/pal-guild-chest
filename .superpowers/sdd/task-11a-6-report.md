@@ -304,3 +304,9 @@ creates the marker before publishing its staged current state. Semantic final
 receipt and terminal filesystem-residue validator negatives now assert their
 exact stable codes. Root/intent mutation-barrier cases also compare the full
 authority/filesystem snapshot before and after rejection.
+
+Lifecycle correction adds strict restored-inventory read/compare and checksum
+binding, a zero-output public probe-validator assertion after successful
+restore, exact terminal-matrix manual-recovery rejection, and separate
+operation move/receipt crash-cursor names with persisted phase, journal,
+layout, inventory, and marker assertions before resume.
