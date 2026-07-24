@@ -1,7 +1,9 @@
 # CGCE Windows Discovery Operator Stage 설계
 
-- 상태: 구현 계획 작성 완료, 구현 대기
+- 상태: Task 11A.5 휴대형 구현·정적 검토 완료, Windows PowerShell 5.1
+  gate 미실행, Task 11A.6 복구 계약 확정
 - 작성일: 2026-07-23
+- 갱신일: 2026-07-24
 - 단계: Task 11A
 - 상위 설계:
   `docs/superpowers/specs/2026-07-23-cgce-remote-discovery-handoff-design.md`
@@ -386,6 +388,239 @@ original inventory와 restored inventory가 같아야 `RESTORED`가 된다.
 `mods.txt`와 pre-existing dump outputs/`UE4SS.log`도 exact before-image로
 복원한다.
 
+Restore는 Invoke를 dot-source/import/call하지 않고 자체 private built-in-only
+bootstrap을 첫 handoff import 전에 실행한다. 자신의 `$PSScriptRoot`에서
+handoff root를 도출하고, allocation 전에 length를 검사하는 bounded strict
+UTF-8 genesis/manifest reader로 immutable `source_manifest_checksum`을 얻는다.
+자신의 `Restore-CgceProduction.ps1` leaf와 exact
+Common/Contract/Files/Runtime leaf checksum, no-reparse origin,
+handoff/RunRoot 양방향 non-overlap을 검증한다. 같은 이름의 module이 다른
+origin에서 preload되어 있으면 import 전에 차단한다. Exact absolute path로
+module을 import한 뒤 loaded origin, full current state, marker, genesis
+identity와 전체 payload를 다시 검증한다. Byte-identical verified handoff
+relocation은 허용하지만 re-signed tree는 어떤 module side effect도 실행하기
+전에 차단한다.
+
+#### Production restore journal
+
+Production restore journal은 `receipts\restore` 아래 다음 네 child만 허용한다.
+unknown child, directory child, sequence gap, overwrite는 자동 복구를 차단한다.
+
+```text
+000-restore-intent.json
+010-quarantine-clone.json
+020-restore-original.json
+999-restore-final.json
+```
+
+모든 source/destination state는 기존 Runtime과 같은 exact five-key
+`artifact_state`를 사용한다.
+
+```text
+artifact_type,present,length,sha256,tree_sha256
+```
+
+Directory absent state는
+`DIRECTORY,false,null,null,null`, present state는
+`DIRECTORY,true,null,null,<lowercase-sha256>`다. `tree_sha256`은 strict sorted
+inventory를 기존 domain-separated `CGCE-TREE-1` framing으로 계산한다. 전체
+inventory entries는 bounded receipt에 반복하지 않고 authoritative
+`inventories\original.json`과 `inventories\restored.json`에만 보존한다.
+Operation의 `before_state`와 `after_state`는 exact
+`source,destination` pair다.
+
+Task 11A.6은 Runtime-private digest 구현을 Contract-owned pure
+`Get-CgceInventoryTreeSha256 -Entries <object[]>`로 승격한다. Contract, Files,
+Runtime과 Restore는 이 한 구현만 사용하며 별도 framing 구현을 두지 않는다.
+Known vector, entry order, duplicate relative path와 strict entry shape를
+Contract test로 고정한다.
+
+`000-restore-intent.json`의 kind는
+`cgce_windows_discovery_restore_intent`이며 exact top-level keys는 다음과
+같다.
+
+```text
+schema_version,kind,run_id,sequence,created_at_utc,
+source_state_sha256,source_phase,source_outcome,source_revision,
+source_updated_at_utc,source_errors,
+genesis_state_sha256,
+original_inventory_sha256,original_tree_sha256,
+selected_case,paths,steps
+```
+
+`paths`의 exact keys는 다음과 같다.
+
+```text
+active_saved,inactive_original,quarantined_clone,
+original_inventory,restored_inventory,restore_receipts,
+probe_restore_final_receipt
+```
+
+`steps`는 항상 sequence 순서의 exact two-element array다. 각 item의 exact
+keys는 다음과 같다.
+
+```text
+sequence,step,operation,source_path,destination_path,
+before_state,after_state
+```
+
+Fresh `selected_case`는 다음 세 값만 허용한다.
+
+```text
+UNCHANGED_ORIGINAL
+CLONE_AND_INACTIVE_ORIGINAL
+NO_ACTIVE_AND_INACTIVE_ORIGINAL
+```
+
+Phase별 fresh case는 다음 matrix로 고정한다.
+
+```text
+CREATED:              UNCHANGED_ORIGINAL
+BACKUP_VERIFIED:      UNCHANGED_ORIGINAL | NO_ACTIVE_AND_INACTIVE_ORIGINAL
+ORIGINAL_DEACTIVATED: NO_ACTIVE_AND_INACTIVE_ORIGINAL |
+                      CLONE_AND_INACTIVE_ORIGINAL
+CLONE_ACTIVE:         CLONE_AND_INACTIVE_ORIGINAL
+PROBE_STAGED:         CLONE_AND_INACTIVE_ORIGINAL
+RUNNING:              CLONE_AND_INACTIVE_ORIGINAL
+CAPTURED:             CLONE_AND_INACTIVE_ORIGINAL
+```
+
+Symbolic `original`, `clone`, `absent`는 각각 intent가 checksum-bound한 exact
+directory state다. Case별 fixed step matrix는 다음과 같다.
+
+```text
+UNCHANGED_ORIGINAL
+  010 QUARANTINE_CLONE / VERIFY_RESTORED
+      (active_saved=original, quarantined_clone=absent) -> same
+  020 RESTORE_ORIGINAL / VERIFY_RESTORED
+      (inactive_original=absent, active_saved=original) -> same
+
+CLONE_AND_INACTIVE_ORIGINAL
+  010 QUARANTINE_CLONE / MOVE_DIRECTORY
+      (active_saved=clone, quarantined_clone=absent) ->
+      (active_saved=absent, quarantined_clone=clone)
+  020 RESTORE_ORIGINAL / MOVE_DIRECTORY
+      (inactive_original=original, active_saved=absent) ->
+      (inactive_original=absent, active_saved=original)
+
+NO_ACTIVE_AND_INACTIVE_ORIGINAL
+  010 QUARANTINE_CLONE / VERIFY_ABSENT
+      (active_saved=absent, quarantined_clone=absent) -> same
+  020 RESTORE_ORIGINAL / MOVE_DIRECTORY
+      (inactive_original=original, active_saved=absent) ->
+      (inactive_original=absent, active_saved=original)
+```
+
+`ORIGINAL_ALREADY_ACTIVE`는 persisted `selected_case`가 아니다. Step 020 뒤
+crash-before-receipt layout은 기존 immutable intent, valid `010` prefix,
+exact step-020 after-state가 모두 일치할 때만 원래 selected case의 resume
+position으로 인정한다.
+
+`010`과 `020` receipt의 kind는
+`cgce_windows_discovery_restore_operation`이며 exact keys는 다음과 같다.
+
+```text
+schema_version,kind,run_id,sequence,step,operation,
+source_path,destination_path,before_state,after_state,
+previous_receipt_sha256,completed_at_utc
+```
+
+`010.previous_receipt_sha256`은 exact intent checksum이고,
+`020.previous_receipt_sha256`은 exact `010` checksum이다.
+
+`999-restore-final.json`의 kind는
+`cgce_windows_discovery_restore_final`이며 exact keys는 다음과 같다.
+
+```text
+schema_version,kind,run_id,sequence,
+restore_intent_sha256,previous_receipt_sha256,
+operation_receipts,probe_restore_final_receipt,
+original_inventory,restored_inventory,completed_at_utc
+```
+
+`previous_receipt_sha256`은 exact `020` checksum이다.
+`operation_receipts`는 exact `sequence,path,sha256` keys를 가진 `010`, `020`
+binding 두 개다. `original_inventory`와 `restored_inventory`는 exact
+`path,sha256,tree_sha256` keys를 가진다. 별도 top-level restored tree
+checksum은 두지 않는다. 두 inventory의 semantic entries/tree digest와 fresh
+active Saved tree가 모두 일치해야 한다.
+
+`probe_restore_final_receipt`는 `null` 또는 exact `path,sha256` object다.
+Source state의 `probe_receipt_checksum`이 `null`일 때만 `null` binding을
+허용하며, 이 경우에도 Runtime이 probe intent, probe journal, before-image,
+staged/generated residue가 모두 없음을 검증해야 한다. Source state의
+`probe_receipt_checksum`이 non-null이면 object binding이 필수다. Object의
+path는 derived `999-probe-restore-final.json` path와 같고 `sha256`은 그
+파일의 checksum이어야 한다. Runtime은 probe restore intent의
+`stage_final_sha256`이 reconstructed source state의
+`probe_receipt_checksum`과 같은지, full gapless probe restore journal과
+terminal filesystem matrix가 유효한지 의미적으로 다시 검증한다.
+
+#### Recovery mutation authority
+
+Contract의 세 fixed-purpose recovery state writer는 caller boolean이나 callback을
+받지 않는다. 각 writer는 fresh state에서 executable allowlist, listener ports,
+partial process journal과 manual-recovery barrier를 도출하여 CAS 직전에
+module-private inactivity 검사를 직접 수행한다.
+
+Contract는 unexported state-derived
+`Assert-CgceRecoveryProbeCompletionAuthority`도 소유한다. 이 validator는
+Contract-private read-only filesystem code와 shared tree digest를 사용해
+source-bound probe intent/stage/final restore chain을 strict-read하고 probe
+terminal filesystem artifact를 fresh inventory한다. Runtime에 의존하지 않으며
+Runtime validator와 semantic parity test를 갖는다.
+`Complete-CgceRecoveryRunState`는 `RESTORED` CAS 직전에 이를 직접 호출한다.
+
+Runtime은 다음 output-free read-only export를 제공한다.
+
+```powershell
+Assert-CgceInventoryProbeRestored `
+    -Paths <PSCustomObject> `
+    -RunDirectory <string> `
+    -RunId <string> `
+    [-ExpectedFinalReceiptChecksum <string>] -> void
+```
+
+이 validator는 exact no-probe authority 또는 source-bound full gapless probe
+restore journal과 fresh terminal filesystem matrix만 허용하고 artifact를
+생성·복구·이동·수정하지 않는다. `Restore-CgceInventoryProbe`는 이미 완료된
+경로에서 이 validator를 호출한다. Completed marker helper도 active marker
+move 또는 completed-only no-op verdict 직전에 이를 호출한다. Contract의
+private validator와 Runtime의 이 export는 같은 fixture에서 semantic
+allow/block parity를 유지하되 구현을 공유하지 않는다.
+
+Restore-private intent, operation, inventory, final journal, marker helper도 모든
+실제 write/move/replace 직전에 같은 state-derived manual barrier와 Runtime
+process/listener 검사를 내부에서 다시 수행한다. `Restore-CgceInventoryProbe`
+public signature는 바꾸지 않는다. 대신 Runtime module-private guard가 fresh
+state/marker/path authority를 재도출하여 restore directory 생성, probe restore
+intent, 각 file/directory move, 각 operation receipt와 probe final receipt
+직전에 검사한다. `SkipSafety`, caller-provided success boolean, generic recovery
+callback은 허용하지 않는다.
+
+기존 state error 또는 process sentinel이 이미 manual recovery를 요구하면
+recovery blocker를 포함한 어떤 state/filesystem mutation도 수행하지 않는다.
+기존 barrier가 없으면 `ACTIVE` 또는 이미 `BLOCKED`였던 source 모두 initial
+RESTORING CAS 뒤 발생한 caught recovery failure를 fixed-purpose blocker로
+영속할 수 있다. Blocker는 source errors를 그대로 보존하고 exactly one
+normalized `CGCE-OPS-*` error를 revision + 2에 append한다. `ACTIVE` source는
+`RESTORING/BLOCKED`로 바뀌고 `BLOCKED` source는 그 outcome을 유지한다. 새
+filesystem-layout ambiguity의 normalized code는 반드시
+`CGCE-OPS-MANUAL-RECOVERY`다.
+
+Completed marker helper는 exact two-state idempotent contract다. Active-only
+layout에서는 fresh RESTORED completion authority와 inactivity를 검증한 뒤
+completed marker로 no-overwrite move한다. Completed-only layout에서는 exact
+completed marker와 같은 fresh authority를 검증하고 no-op한다. Both 또는
+neither layout은 control error다. 두 경로 모두 위 read-only Runtime
+validator를 호출하며 probe artifact를 repair하지 않는다. Fresh completion과
+completed-only replay 모두 helper가 끝난 뒤 하나의 공통 terminal section에
+도달한다. 성공은 stdout에 exactly one
+`CGCE_WINDOWS_DISCOVERY_OK RESTORED <run_id>` line과 exit `0`, 실패는 stdout에
+exactly one
+`CGCE_WINDOWS_DISCOVERY_BLOCKED <stable_error_code> <run_id>` line과 exit `1`을
+남긴다. Catch path는 rethrow하거나 추가 stderr terminal을 출력하지 않는다.
+
 복원 성공 후에도 server는 stopped, external-access-blocked 상태를 유지한다.
 
 ### 5. Export
@@ -432,6 +667,33 @@ evidence이므로 property-name 문자열을 secret key로 오인해 검사하�
     나며 sentinel이 생성되지 않는다(no module side effect). 동일한 verified
     bytes를 다른 handoff root로 옮긴 경우는 허용하고, derived handoff tree와
     RunRoot overlap은 module import 전에 거부한다.
+14. Restore intent는 exact source-state preimage, phase/case matrix와 fixed
+    010/020 steps만 허용하며 unknown/gapped/foreign receipt를 mutation 전에
+    거부한다.
+15. 이미 active인 original은 새 selected case로 허용하지 않고, existing
+    intent와 valid prefix가 exact operation after-state를 증명할 때만
+    crash-before-receipt resume로 인정한다.
+16. state-only manual error와 sentinel-only manual barrier가 각각 intent,
+    state CAS, directory creation, move, receipt, inventory, final state와
+    marker mutation을 모두 차단한다.
+17. process/TCP/UDP activity를 각 preceding check 뒤에 주입했을 때 다음
+    Contract, Files, Runtime 또는 Restore mutation이 발생하지 않는다.
+18. `000`, `010`, `020`, restored inventory, `999`, `RESTORED` state와 marker
+    경계마다 crash를 주입한 재실행이 정확한 original을 복원하거나
+    `CGCE-OPS-MANUAL-RECOVERY`로 차단하며 original과 backup을 삭제하지 않는다.
+19. Restore의 re-signed handoff tree도 module import 전에 차단되어 module
+    sentinel side effect가 발생하지 않는다.
+20. Restore는 oversized genesis/manifest를 allocation/import 전에 차단하고,
+    wrong-origin preloaded handoff module을 거부한다.
+21. Restore는 byte-identical verified handoff relocation을 허용하지만
+    handoff/RunRoot의 어느 방향 overlap도 import 전에 거부한다.
+22. Contract와 Runtime의 activity 및 probe-completion validator는 같은
+    process/port/journal/terminal fixture에서 동일한 allow/block verdict를 낸다.
+23. Completed-only marker replay는 filesystem/state를 쓰지 않고 exactly one
+    RESTORED terminal line을 출력하며, both/neither marker layout을 거부한다.
+24. Runtime의 restored-probe validator는 absent와 completed authority를
+    read-only로 검증하며, completed marker helper는 이를 호출해도 probe
+    artifact를 생성·repair·이동하지 않는다.
 
 ### 실제 Windows 서버 진입 조건
 
