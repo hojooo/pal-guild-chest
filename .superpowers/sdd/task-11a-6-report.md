@@ -310,3 +310,10 @@ binding, a zero-output public probe-validator assertion after successful
 restore, exact terminal-matrix manual-recovery rejection, and separate
 operation move/receipt crash-cursor names with persisted phase, journal,
 layout, inventory, and marker assertions before resume.
+
+The Lifecycle snapshot now records both recursive directories and file bytes,
+so empty-directory writes are visible. Bootstrap oversized and overlap cases
+compare the entire authority snapshot, not only state bytes. Successful restore
+compares the quarantined clone against the independently captured clone
+inventory; crash cursors assert the expected persisted phase/revision as well
+as receipt prefix, layout, inventory, and marker authority.

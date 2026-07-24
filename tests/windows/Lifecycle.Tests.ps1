@@ -2529,6 +2529,10 @@ Invoke-CgceTest "invoke process crash boundaries preserve partial receipts and f
 
 function New-CgceCapturedFixture {
     $fixture = New-CgcePreparedFixture
+    $fixture | Add-Member `
+        -MemberType NoteProperty `
+        -Name CapturedCloneInventory `
+        -Value @(Get-CgceTreeInventory -Root $fixture.SavedPath)
     $captured = Invoke-CgceInvokeChild -Fixture $fixture
     if ($captured.ExitCode -ne 0 -or @($captured.Stdout).Count -ne 1 -or
         $captured.Stdout[0] -cne
@@ -2594,11 +2598,18 @@ function Invoke-CgceRestoreChild(
 }
 
 function Get-CgceLifecycleRestoreSnapshot($Fixture) {
-    return @(Get-CgceTreeInventory -Root $Fixture.Base | Where-Object {
+    $values = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($directory in @(Get-ChildItem -LiteralPath $Fixture.Base `
+            -Directory -Force -Recurse | Sort-Object -Property FullName)) {
+        $relativePath = $directory.FullName.Substring($Fixture.Base.Length)
+        $values.Add("D|$($relativePath.TrimStart('\', '/'))")
+    }
+    foreach ($entry in @(Get-CgceTreeInventory -Root $Fixture.Base | Where-Object {
         $_.relative_path -cnotmatch '^(?:restore-stderr-|restore-wrapper-)'
     } | ForEach-Object {
-        "$($_.relative_path)|$($_.length)|$($_.sha256)"
-    })
+        "F|$($_.relative_path)|$($_.length)|$($_.sha256)"
+    })) { $values.Add($entry) }
+    return [string[]]$values.ToArray()
 }
 
 function Assert-CgceRestoreTerminal(
@@ -2619,7 +2630,7 @@ Invoke-CgceTest "restore bootstrap rejects oversized genesis and manifest before
     )) {
         $fixture = New-CgceCapturedFixture
         try {
-            $stateBefore = Get-CgceSha256 $fixture.Paths.state
+            $authorityBefore = Get-CgceLifecycleRestoreSnapshot $fixture
             $sentinel = Join-Path $fixture.Base (
                 "bootstrap-imported-" + [guid]::NewGuid().ToString("N")
             )
@@ -2649,7 +2660,8 @@ Invoke-CgceTest "restore bootstrap rejects oversized genesis and manifest before
                 $result.Stdout[0]
             Assert-CgceEqual "" $result.Stderr
             Assert-CgceEqual $false (Test-Path -LiteralPath $sentinel)
-            Assert-CgceEqual $stateBefore (Get-CgceSha256 $fixture.Paths.state)
+            Assert-CgceDeepEqual $authorityBefore `
+                (Get-CgceLifecycleRestoreSnapshot $fixture)
             Compare-CgceInventory `
                 -Expected $fixture.OriginalInventory `
                 -Actual @(Get-CgceTreeInventory -Root $fixture.Paths.inactive_original)
@@ -2698,7 +2710,7 @@ Invoke-CgceTest "restore bootstrap rejects either-direction handoff RunRoot over
     foreach ($direction in @("run-under-handoff", "handoff-under-run")) {
         $fixture = New-CgceCapturedFixture
         try {
-            $stateBefore = Get-CgceSha256 $fixture.Paths.state
+            $authorityBefore = Get-CgceLifecycleRestoreSnapshot $fixture
             if ($direction -ceq "run-under-handoff") {
                 $fixture.RunRoot = $fixture.HandoffRoot
             } else {
@@ -2711,7 +2723,8 @@ Invoke-CgceTest "restore bootstrap rejects either-direction handoff RunRoot over
                 "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PATH-OVERLAP $($fixture.RunId)" `
                 $result.Stdout[0]
             Assert-CgceEqual "" $result.Stderr
-            Assert-CgceEqual $stateBefore (Get-CgceSha256 $fixture.Paths.state)
+            Assert-CgceDeepEqual $authorityBefore `
+                (Get-CgceLifecycleRestoreSnapshot $fixture)
         } finally {
             Remove-Item -LiteralPath $fixture.Base -Recurse -Force
         }
@@ -2779,7 +2792,7 @@ Invoke-CgceTest "restore returns the exact original and quarantines the clone" {
             -Expected $fixture.OriginalInventory `
             -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
         Compare-CgceInventory `
-            -Expected $fixture.OriginalInventory `
+            -Expected $fixture.CapturedCloneInventory `
             -Actual @(Get-CgceTreeInventory -Root $state.paths.quarantined_clone)
         Compare-CgceInventory `
             -Expected $fixture.OriginalInventory `
@@ -2835,6 +2848,12 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
             $current = Read-CgceRunState `
                 -RunRoot $fixture.RunRoot -RunId $fixture.RunId
             Assert-CgceEqual $boundary.Phase $current.phase
+            $expectedRevision = if ($boundary.Phase -ceq "CAPTURED") {
+                6
+            } elseif ($boundary.Phase -ceq "RESTORING") {
+                7
+            } else { 8 }
+            Assert-CgceEqual $expectedRevision ([int64]$current.revision)
             Assert-CgceDeepEqual $boundary.Receipts @(
                 Get-ChildItem -LiteralPath $fixture.Paths.restore_receipts -Force |
                     Sort-Object -Property Name | ForEach-Object { $_.Name }
