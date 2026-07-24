@@ -3206,12 +3206,12 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
             $fixtureBefore = Get-CgceRuntimeRestoreSnapshot $fixture
             $activity = Set-CgceRuntimeRestoreActivityAfterSeam `
                 -ServerPath (Join-Path $fixture.Paths.server_root "PalServer.exe")
-            $before = $null
+            $capture = [pscustomobject]@{ before = $null }
             Set-CgceRuntimeTestProbeRestoreMutationSeam {
                 param($Point)
                 if ($Point -ceq ("before-" + $bootstrap)) {
                     $activity.armed = $true
-                    $before = Get-CgceRuntimeRestoreSnapshot $fixture
+                    $capture.before = Get-CgceRuntimeRestoreSnapshot $fixture
                 }
             }.GetNewClosure()
             Assert-CgceThrows "CGCE-OPS-PROCESS-ACTIVE" {
@@ -3221,7 +3221,7 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
                     -RunId $fixture.RunId `
                     -ExpectedFinalReceiptChecksum $receipt.checksum
             }
-            Assert-CgceEqual $true ($null -ne $before)
+            Assert-CgceEqual $true ($null -ne $capture.before)
             Assert-CgceDeepEqual $fixtureBefore `
                 (Get-CgceRuntimeRestoreSnapshot $fixture)
             if ($bootstrap -ceq "restore-root") {
@@ -3241,7 +3241,7 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
         try {
             $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
             Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
-            $before = $null
+            $capture = [pscustomobject]@{ before = $null }
             $activity = Set-CgceRuntimeRestoreActivityAfterSeam `
                 -ServerPath (Join-Path $fixture.Paths.server_root "PalServer.exe") `
                 -Kind $boundary.Kind
@@ -3249,7 +3249,7 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
                 param($Point)
                 if ($Point -ceq $boundary.Point) {
                     $activity.armed = $true
-                    $before = Get-CgceRuntimeRestoreSnapshot $fixture
+                    $capture.before = Get-CgceRuntimeRestoreSnapshot $fixture
                 }
             }.GetNewClosure()
             $expectedCode = if ($boundary.Kind -ceq "process") {
@@ -3262,8 +3262,8 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
                     -RunId $fixture.RunId `
                     -ExpectedFinalReceiptChecksum $receipt.checksum
             }
-            Assert-CgceEqual $true ($null -ne $before)
-            Assert-CgceDeepEqual $before (Get-CgceRuntimeRestoreSnapshot $fixture)
+            Assert-CgceEqual $true ($null -ne $capture.before)
+            Assert-CgceDeepEqual $capture.before (Get-CgceRuntimeRestoreSnapshot $fixture)
         } finally {
             Set-CgceRuntimeTestCrashSeam $null
             Set-CgceRuntimeTestActivitySeam $null
@@ -3301,7 +3301,7 @@ Invoke-CgceTest "probe restore manual barriers prevent the next move or receipt"
                     -RunId $fixture.RunId `
                     -ExpectedFinalReceiptChecksum $receipt.checksum
             }
-            $before = $null
+            $capture = [pscustomobject]@{ before = $null }
             $point = if ($position -ceq "next-receipt") {
                 "restore-before-receipt-010"
             } elseif ($position -ceq "next-move") {
@@ -3314,13 +3314,16 @@ Invoke-CgceTest "probe restore manual barriers prevent the next move or receipt"
                         if ($kind -ceq "state") {
                             Write-CgceRuntimeStateManualBarrier $fixture
                         } else { Write-CgceRuntimeExactManualBarrier $fixture }
-                        $before = Get-CgceRuntimeRestoreSnapshot $fixture
+                        $capture.before = Get-CgceRuntimeRestoreSnapshot $fixture
                     }
                 }.GetNewClosure()
             } elseif ($kind -ceq "state") {
                 Write-CgceRuntimeStateManualBarrier $fixture
             } else { Write-CgceRuntimeExactManualBarrier $fixture }
-            if ($null -eq $before) { $before = Get-CgceRuntimeRestoreSnapshot $fixture }
+            if ($null -eq $capture.before) {
+                $capture.before = Get-CgceRuntimeRestoreSnapshot $fixture
+            }
+            Assert-CgceEqual $true ($null -ne $capture.before)
             Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
                 Restore-CgceInventoryProbe `
                     -Paths $fixture.Paths `
@@ -3328,7 +3331,7 @@ Invoke-CgceTest "probe restore manual barriers prevent the next move or receipt"
                     -RunId $fixture.RunId `
                     -ExpectedFinalReceiptChecksum $receipt.checksum
             }
-            Assert-CgceDeepEqual $before (Get-CgceRuntimeRestoreSnapshot $fixture)
+            Assert-CgceDeepEqual $capture.before (Get-CgceRuntimeRestoreSnapshot $fixture)
         } finally {
             Set-CgceRuntimeTestCrashSeam $null
             Remove-Item -LiteralPath $fixture.Base -Recurse -Force

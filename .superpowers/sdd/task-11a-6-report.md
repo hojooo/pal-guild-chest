@@ -317,3 +317,10 @@ compare the entire authority snapshot, not only state bytes. Successful restore
 compares the quarantined clone against the independently captured clone
 inventory; crash cursors assert the expected persisted phase/revision as well
 as receipt prefix, layout, inventory, and marker authority.
+
+Final review correction: oversized bootstrap snapshots are captured only after
+the deliberate attack/rebind, so they prove no subsequent repair. Relocated
+handoff now receives the same restored-inventory, clone/backup, marker, and
+read-only probe assertions as normal success. Crash layouts explicitly compare
+active/quarantine/inactive inventories, and a separate ambiguous quarantine
+layout is required to return `CGCE-OPS-MANUAL-RECOVERY` without a write.

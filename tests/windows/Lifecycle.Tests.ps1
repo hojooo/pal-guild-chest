@@ -2630,7 +2630,6 @@ Invoke-CgceTest "restore bootstrap rejects oversized genesis and manifest before
     )) {
         $fixture = New-CgceCapturedFixture
         try {
-            $authorityBefore = Get-CgceLifecycleRestoreSnapshot $fixture
             $sentinel = Join-Path $fixture.Base (
                 "bootstrap-imported-" + [guid]::NewGuid().ToString("N")
             )
@@ -2652,6 +2651,7 @@ Invoke-CgceTest "restore bootstrap rejects oversized genesis and manifest before
                     -Path $fixture.Paths.genesis_state `
                     -Text ($genesis | ConvertTo-Json -Depth 20)
             }
+            $authorityBefore = Get-CgceLifecycleRestoreSnapshot $fixture
             $result = Invoke-CgceRestoreChild -Fixture $fixture
             Assert-CgceEqual 1 $result.ExitCode
             Assert-CgceEqual 1 @($result.Stdout).Count
@@ -2701,6 +2701,30 @@ Invoke-CgceTest "restore bootstrap accepts relocated byte-identical handoff" {
         Assert-CgceRestoreTerminal `
             -Result $result -ExitCode 0 `
             -Line "CGCE_WINDOWS_DISCOVERY_OK RESTORED $($fixture.RunId)"
+        $state = Read-CgceRunState -RunRoot $fixture.RunRoot -RunId $fixture.RunId
+        Assert-CgceEqual "RESTORED" $state.phase
+        Assert-CgceEqual $state.inventory_checksums.restored `
+            (Get-CgceSha256 $state.paths.restored_inventory)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+        Compare-CgceInventory `
+            -Expected $fixture.CapturedCloneInventory `
+            -Actual @(Get-CgceTreeInventory -Root $state.paths.quarantined_clone)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $state.paths.backup_saved)
+        $restoredInventory = Read-CgceInventory `
+            -Path $state.paths.restored_inventory -ExpectedKind "restored"
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @($restoredInventory.entries)
+        Assert-CgceEqual $true `
+            (Test-Path -LiteralPath $state.paths.completed_run_marker)
+        Assert-CgceEqual 0 @(Assert-CgceInventoryProbeRestored `
+            -Paths $state.paths -RunDirectory $state.paths.run_directory `
+            -RunId $fixture.RunId `
+            -ExpectedFinalReceiptChecksum $state.probe_receipt_checksum).Count
     } finally {
         Remove-Item -LiteralPath $fixture.Base -Recurse -Force
     }
@@ -2862,12 +2886,43 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
             Assert-CgceEqual `
                 $boundary.Inactive `
                 (Test-Path -LiteralPath $fixture.Paths.inactive_original)
+            if ($boundary.Inactive) {
+                Compare-CgceInventory `
+                    -Expected $fixture.OriginalInventory `
+                    -Actual @(Get-CgceTreeInventory `
+                        -Root $fixture.Paths.inactive_original)
+            }
             Assert-CgceEqual $boundary.Restored `
                 (Test-Path -LiteralPath $fixture.Paths.restored_inventory)
             Assert-CgceEqual $boundary.Completed `
                 (Test-Path -LiteralPath $fixture.Paths.completed_run_marker)
             Assert-CgceEqual (-not $boundary.Completed) `
                 (Test-Path -LiteralPath $fixture.Paths.active_run_marker)
+            $afterQuarantineMove = $boundary.Point -like "after-010-*" -or
+                $boundary.Point -like "after-020-*" -or
+                $boundary.Restored
+            $activeExists = -not ($boundary.Point -like "after-010-*")
+            Assert-CgceEqual $activeExists `
+                (Test-Path -LiteralPath $fixture.SavedPath)
+            Assert-CgceEqual $afterQuarantineMove `
+                (Test-Path -LiteralPath $fixture.Paths.quarantined_clone)
+            Compare-CgceInventory `
+                -Expected $fixture.OriginalInventory `
+                -Actual @(Get-CgceTreeInventory -Root $fixture.Paths.backup_saved)
+            if ($afterQuarantineMove) {
+                Compare-CgceInventory `
+                    -Expected $fixture.CapturedCloneInventory `
+                    -Actual @(Get-CgceTreeInventory `
+                        -Root $fixture.Paths.quarantined_clone)
+            }
+            if ($activeExists) {
+                $activeExpected = if ($afterQuarantineMove) {
+                    $fixture.OriginalInventory
+                } else { $fixture.CapturedCloneInventory }
+                Compare-CgceInventory `
+                    -Expected $activeExpected `
+                    -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+            }
             $second = Invoke-CgceRestoreChild -Fixture $fixture
             Assert-CgceRestoreTerminal `
                 -Result $second -ExitCode 0 `
@@ -2875,6 +2930,29 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
         } finally {
             Remove-Item -LiteralPath $fixture.Base -Recurse -Force
         }
+    }
+}
+
+Invoke-CgceTest "restore ambiguous quarantine layout fails closed without mutation" {
+    $fixture = New-CgceCapturedFixture
+    try {
+        $null = Copy-CgceTreeVerified `
+            -Source $fixture.SavedPath `
+            -Destination $fixture.Paths.quarantined_clone
+        $before = Get-CgceLifecycleRestoreSnapshot $fixture
+        $result = Invoke-CgceRestoreChild -Fixture $fixture
+        Assert-CgceRestoreTerminal `
+            -Result $result -ExitCode 1 `
+            -Line "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-MANUAL-RECOVERY $($fixture.RunId)"
+        Assert-CgceDeepEqual $before (Get-CgceLifecycleRestoreSnapshot $fixture)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.Paths.inactive_original)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $fixture.Paths.backup_saved)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Base -Recurse -Force
     }
 }
 
