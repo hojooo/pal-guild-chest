@@ -3282,24 +3282,20 @@ Invoke-CgceTest "probe restore manual barriers prevent the next move or receipt"
                 $restoreRoot = Join-Path $fixture.Paths.probe_receipts "restore"
                 if ($bootstrap -ceq "restore-intent") {
                     New-Item -ItemType Directory -Path $restoreRoot | Out-Null
-                    $capture = [pscustomobject]@{ before = $null }
-                    Set-CgceRuntimeTestProbeRestoreMutationSeam {
-                        param($Point)
-                        if ($Point -ceq "before-restore-intent") {
-                            if ($kind -ceq "state") {
-                                Write-CgceRuntimeStateManualBarrier $fixture
-                            } else { Write-CgceRuntimeExactManualBarrier $fixture }
-                            $capture.before = Get-CgceRuntimeRestoreSnapshot $fixture
-                        }
-                    }.GetNewClosure()
-                } else {
-                    if ($kind -ceq "state") {
-                        Write-CgceRuntimeStateManualBarrier $fixture
-                    } else { Write-CgceRuntimeExactManualBarrier $fixture }
-                    $capture = [pscustomobject]@{
-                        before = Get-CgceRuntimeRestoreSnapshot $fixture
-                    }
                 }
+                $capture = [pscustomobject]@{ before = $null }
+                $targetPoint = if ($bootstrap -ceq "restore-intent") {
+                    "before-restore-intent"
+                } else { "before-restore-root" }
+                Set-CgceRuntimeTestProbeRestoreMutationSeam {
+                    param($Point)
+                    if ($Point -ceq $targetPoint) {
+                        if ($kind -ceq "state") {
+                            Write-CgceRuntimeStateManualBarrier $fixture
+                        } else { Write-CgceRuntimeExactManualBarrier $fixture }
+                        $capture.before = Get-CgceRuntimeRestoreSnapshot $fixture
+                    }
+                }.GetNewClosure()
                 Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
                     Restore-CgceInventoryProbe `
                         -Paths $fixture.Paths `

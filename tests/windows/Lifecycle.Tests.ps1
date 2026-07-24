@@ -2634,6 +2634,7 @@ function Assert-CgceRestoredFixture($Fixture) {
     Assert-CgceEqual $true (Test-Path -LiteralPath $state.paths.backup_saved)
     Assert-CgceEqual $true (Test-Path -LiteralPath $state.paths.completed_run_marker)
     Assert-CgceEqual $false (Test-Path -LiteralPath $state.paths.active_run_marker)
+    Assert-CgceRunMarker -State $state -AllowCompleted
     Assert-CgceEqual $state.inventory_checksums.restored `
         (Get-CgceSha256 $state.paths.restored_inventory)
     Assert-CgceDeepEqual @(
@@ -2824,6 +2825,7 @@ Invoke-CgceTest "restore returns the exact original and quarantines the clone" {
         Assert-CgceRestoreTerminal `
             -Result $result -ExitCode 0 `
             -Line "CGCE_WINDOWS_DISCOVERY_OK RESTORED $($fixture.RunId)"
+        Assert-CgceRestoredFixture $fixture
         $state = Read-CgceRunState -RunRoot $fixture.RunRoot -RunId $fixture.RunId
         Assert-CgceEqual "RESTORED" $state.phase
         Assert-CgceEqual $true (Test-Path -LiteralPath $fixture.SavedPath)

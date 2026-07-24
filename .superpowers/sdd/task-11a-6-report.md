@@ -333,3 +333,8 @@ Final v2 correction uses one full restored-authority helper for relocated and
 crash-resume success paths. Runtime now tests both durable barrier forms before
 restore-root creation and at the private before-intent mutation cursor, with
 whole-fixture no-write snapshots.
+
+Final v3 correction injects both barrier forms at the private before-root and
+before-intent mutation cursors. The shared restored-authority assertion now
+also validates the completed marker and is invoked by normal, relocated, and
+crash-resume success paths.
