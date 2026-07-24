@@ -2872,6 +2872,8 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
             $current = Read-CgceRunState `
                 -RunRoot $fixture.RunRoot -RunId $fixture.RunId
             Assert-CgceEqual $boundary.Phase $current.phase
+            Assert-CgceEqual "ACTIVE" $current.outcome
+            Assert-CgceEqual 0 @($current.errors).Count
             $expectedRevision = if ($boundary.Phase -ceq "CAPTURED") {
                 6
             } elseif ($boundary.Phase -ceq "RESTORING") {
@@ -2894,10 +2896,32 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
             }
             Assert-CgceEqual $boundary.Restored `
                 (Test-Path -LiteralPath $fixture.Paths.restored_inventory)
+            if ($boundary.Restored) {
+                $restoredInventory = Read-CgceInventory `
+                    -Path $fixture.Paths.restored_inventory `
+                    -ExpectedKind "restored"
+                Compare-CgceInventory `
+                    -Expected $fixture.OriginalInventory `
+                    -Actual @($restoredInventory.entries)
+                $restoredChecksum = Get-CgceSha256 `
+                    $fixture.Paths.restored_inventory
+                if ($boundary.Phase -ceq "RESTORED") {
+                    Assert-CgceEqual `
+                        $restoredChecksum `
+                        $current.inventory_checksums.restored
+                } else {
+                    Assert-CgceEqual $null $current.inventory_checksums.restored
+                }
+            }
             Assert-CgceEqual $boundary.Completed `
                 (Test-Path -LiteralPath $fixture.Paths.completed_run_marker)
             Assert-CgceEqual (-not $boundary.Completed) `
                 (Test-Path -LiteralPath $fixture.Paths.active_run_marker)
+            if ($boundary.Completed) {
+                Assert-CgceRunMarker -State $current -AllowCompleted
+            } else {
+                Assert-CgceRunMarker -State $current
+            }
             $afterQuarantineMove = $boundary.Point -like "after-010-*" -or
                 $boundary.Point -like "after-020-*" -or
                 $boundary.Restored

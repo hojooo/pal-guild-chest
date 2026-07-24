@@ -324,3 +324,7 @@ handoff now receives the same restored-inventory, clone/backup, marker, and
 read-only probe assertions as normal success. Crash layouts explicitly compare
 active/quarantine/inactive inventories, and a separate ambiguous quarantine
 layout is required to return `CGCE-OPS-MANUAL-RECOVERY` without a write.
+
+Cursor rows now also strict-read restored inventory when present, bind its
+checksum only after the `RESTORED` state transition, and assert `ACTIVE`/
+error-free state plus the exact active or completed marker authority.
