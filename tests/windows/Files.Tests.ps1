@@ -1000,93 +1000,497 @@ Invoke-CgceTest "common module exposes contract and filesystem interfaces" {
     }
 }
 
-function New-CgceRecoveryMatrixFixture([string]$Phase, [string]$Layout) {
+function ConvertTo-CgceFilesTestJson($Value) {
+    return ($Value | ConvertTo-Json -Depth 12 -Compress)
+}
+
+function New-CgceFilesArtifactState([string]$TreeSha256, [bool]$Present) {
+    return [pscustomobject][ordered]@{
+        artifact_type = "DIRECTORY"; present = $Present
+        length = $null; sha256 = $null
+        tree_sha256 = if ($Present) { $TreeSha256 } else { $null }
+    }
+}
+
+function Assert-CgceFilesArtifactState($Expected, $Actual) {
+    Assert-CgceEqual `
+        "artifact_type,present,length,sha256,tree_sha256" `
+        ([string]::Join(",", @($Actual.PSObject.Properties.Name)))
+    foreach ($name in @("artifact_type", "present", "length", "sha256", "tree_sha256")) {
+        Assert-CgceDeepEqual $Expected.$name $Actual.$name
+    }
+}
+
+function Get-CgceFilesPhaseRevision([string]$Phase) {
+    return [Array]::IndexOf(@(
+        "CREATED", "BACKUP_VERIFIED", "ORIGINAL_DEACTIVATED",
+        "CLONE_ACTIVE", "PROBE_STAGED", "RUNNING", "CAPTURED"
+    ), $Phase)
+}
+
+function New-CgceFilesRecoveryFixture([string]$Phase, [string]$Layout) {
     $root = New-CgceFilesTestRoot
     $serverRoot = Join-Path $root "server"
-    $saved = Join-Path $serverRoot "Pal\Saved"
     $runRoot = Join-Path $root "runs"
     $runId = "r-0123456789abcdef0123456789abcdef"
     $paths = New-CgceRunPaths `
         -ServerRoot $serverRoot `
-        -SavedPath $saved `
+        -SavedPath (Join-Path $serverRoot "Pal\Saved") `
         -Ue4ssRoot (Join-Path $serverRoot "Pal\Binaries\Win64") `
-        -RunRoot $runRoot `
-        -RunId $runId
-    New-Item -ItemType Directory -Path $paths.run_directory -Force | Out-Null
-    New-Item -ItemType Directory -Path $paths.restore_receipts -Force | Out-Null
-    if ($Layout -ceq "unchanged") {
-        New-Item -ItemType Directory -Path $paths.active_saved -Force | Out-Null
-        Write-CgceFilesTestUtf8 (Join-Path $paths.active_saved "World.sav") "original"
-    } elseif ($Layout -ceq "clone") {
-        New-Item -ItemType Directory -Path $paths.active_saved -Force | Out-Null
-        New-Item -ItemType Directory -Path $paths.inactive_original -Force | Out-Null
-        Write-CgceFilesTestUtf8 (Join-Path $paths.active_saved "World.sav") "clone"
-        Write-CgceFilesTestUtf8 (Join-Path $paths.inactive_original "World.sav") "original"
-    } elseif ($Layout -ceq "inactive") {
-        New-Item -ItemType Directory -Path $paths.inactive_original -Force | Out-Null
-        Write-CgceFilesTestUtf8 (Join-Path $paths.inactive_original "World.sav") "original"
+        -RunRoot $runRoot -RunId $runId
+    foreach ($directory in @(
+            $paths.run_directory, $paths.restore_receipts,
+            (Split-Path -Parent $paths.original_inventory),
+            (Split-Path -Parent $paths.active_saved)
+        )) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
+    $originalSource = Join-Path $root "original-source"
+    $cloneSource = Join-Path $root "clone-source"
+    New-Item -ItemType Directory -Path $originalSource | Out-Null
+    New-Item -ItemType Directory -Path $cloneSource | Out-Null
+    Write-CgceFilesTestUtf8 (Join-Path $originalSource "World.sav") "original-world"
+    Write-CgceFilesTestUtf8 (Join-Path $cloneSource "World.sav") "test-clone"
+    $originalEntries = @(Get-CgceTreeInventory $originalSource)
+    $cloneEntries = @(Get-CgceTreeInventory $cloneSource)
+    $originalTree = Get-CgceInventoryTreeSha256 $originalEntries
+    $cloneTree = Get-CgceInventoryTreeSha256 $cloneEntries
+    if ($Layout -ceq "UNCHANGED_ORIGINAL") {
+        $null = Copy-CgceTreeVerified $originalSource $paths.active_saved
+    } elseif ($Layout -ceq "NO_ACTIVE_AND_INACTIVE_ORIGINAL") {
+        $null = Copy-CgceTreeVerified $originalSource $paths.inactive_original
+    } elseif ($Layout -ceq "CLONE_AND_INACTIVE_ORIGINAL") {
+        $null = Copy-CgceTreeVerified $cloneSource $paths.active_saved
+        $null = Copy-CgceTreeVerified $originalSource $paths.inactive_original
+    } else {
+        throw "CGCE-TEST unknown recovery layout"
+    }
+
+    $genesis = New-CgceRunState $runId "m-0123456789abcdef0123456789abcdef" $paths
+    $genesis.bundle_checksum = ("a" * 64)
+    $genesis.control_evidence_checksum = ("b" * 64)
+    $genesis.source_manifest_checksum = ("c" * 64)
+    $genesis.palserver_executable = (Join-Path $serverRoot "PalServer.exe")
+    $genesis.palserver_executable_checksum = ("d" * 64)
+    $genesis.ue4ss_version = "3.0.1"
+    $genesis.server_process_paths = @($genesis.palserver_executable)
+    $genesis.ue4ss_dll_checksum = ("e" * 64)
+    $genesis.listener_ports = @(49151)
+    $genesis.inventory_checksums.original = Write-CgceInventory `
+        $originalEntries $paths.original_inventory "original"
+    $cloneInventorySha = $null
+    if ($Layout -ceq "CLONE_AND_INACTIVE_ORIGINAL") {
+        $cloneInventorySha = Write-CgceInventory `
+            $cloneEntries $paths.clone_inventory "clone"
+    }
+    Write-CgceJsonAtomic $genesis $paths.genesis_state
+
+    $state = Read-CgceJsonObject $paths.genesis_state
+    $state.phase = $Phase
+    $state.revision = Get-CgceFilesPhaseRevision $Phase
+    if (@(
+            "BACKUP_VERIFIED", "ORIGINAL_DEACTIVATED", "CLONE_ACTIVE",
+            "PROBE_STAGED", "RUNNING", "CAPTURED"
+        ) -contains $Phase) {
+        $state.inventory_checksums.backup = Write-CgceInventory `
+            $originalEntries $paths.backup_inventory "backup"
+    }
+    if (@("CLONE_ACTIVE", "PROBE_STAGED", "RUNNING", "CAPTURED") -contains $Phase) {
+        if ($null -eq $cloneInventorySha) {
+            $cloneInventorySha = Write-CgceInventory `
+                $cloneEntries $paths.clone_inventory "clone"
+        }
+        $state.inventory_checksums.clone = $cloneInventorySha
+    }
+    if (@("PROBE_STAGED", "RUNNING", "CAPTURED") -contains $Phase) {
+        $state.probe_receipt_checksum = ("4" * 64)
+    }
+    if ($Phase -ceq "CAPTURED") {
+        $state.process_launch_receipt_checksum = ("5" * 64)
+        $state.process_result_receipt_checksum = ("6" * 64)
+        $state.capture_inventory_checksum = ("7" * 64)
+    }
+    Write-CgceJsonAtomic $state $paths.state
     return [pscustomobject]@{
-        Root = $root
-        Paths = $paths
-        State = [pscustomobject][ordered]@{
-            phase = $Phase
-            paths = $paths
-            run_id = $runId
-            inventory_checksums = [pscustomobject]@{ original = ("a" * 64) }
+        Root = $root; Paths = $paths; State = $state; Genesis = $genesis
+        SelectedCase = $Layout
+        Original = (New-CgceFilesArtifactState $originalTree $true)
+        Clone = (New-CgceFilesArtifactState $cloneTree $true)
+        Absent = (New-CgceFilesArtifactState "" $false)
+        OriginalTree = $originalTree
+    }
+}
+
+function New-CgceFilesExpectedSteps($Fixture, [string]$SelectedCase) {
+    $paths = $Fixture.Paths
+    if ($SelectedCase -ceq "UNCHANGED_ORIGINAL") {
+        return @(
+            [pscustomobject]@{
+                Sequence = 10; Step = "QUARANTINE_CLONE"; Operation = "VERIFY_RESTORED"
+                SourcePath = $paths.active_saved; DestinationPath = $paths.quarantined_clone
+                BeforeSource = $Fixture.Original; BeforeDestination = $Fixture.Absent
+                AfterSource = $Fixture.Original; AfterDestination = $Fixture.Absent
+            },
+            [pscustomobject]@{
+                Sequence = 20; Step = "RESTORE_ORIGINAL"; Operation = "VERIFY_RESTORED"
+                SourcePath = $paths.inactive_original; DestinationPath = $paths.active_saved
+                BeforeSource = $Fixture.Absent; BeforeDestination = $Fixture.Original
+                AfterSource = $Fixture.Absent; AfterDestination = $Fixture.Original
+            }
+        )
+    }
+    $firstOperation = if ($SelectedCase -ceq "NO_ACTIVE_AND_INACTIVE_ORIGINAL") {
+        "VERIFY_ABSENT"
+    } else { "MOVE_DIRECTORY" }
+    $firstSource = if ($SelectedCase -ceq "NO_ACTIVE_AND_INACTIVE_ORIGINAL") {
+        $Fixture.Absent
+    } else { $Fixture.Clone }
+    return @(
+        [pscustomobject]@{
+            Sequence = 10; Step = "QUARANTINE_CLONE"; Operation = $firstOperation
+            SourcePath = $paths.active_saved; DestinationPath = $paths.quarantined_clone
+            BeforeSource = $firstSource; BeforeDestination = $Fixture.Absent
+            AfterSource = $Fixture.Absent; AfterDestination = $firstSource
+        },
+        [pscustomobject]@{
+            Sequence = 20; Step = "RESTORE_ORIGINAL"; Operation = "MOVE_DIRECTORY"
+            SourcePath = $paths.inactive_original; DestinationPath = $paths.active_saved
+            BeforeSource = $Fixture.Original; BeforeDestination = $Fixture.Absent
+            AfterSource = $Fixture.Absent; AfterDestination = $Fixture.Original
+        }
+    )
+}
+
+function Assert-CgceFilesRecoveryMatrix($Fixture, $Matrix, [string]$SelectedCase) {
+    Assert-CgceEqual "selected_case,steps" `
+        ([string]::Join(",", @($Matrix.PSObject.Properties.Name)))
+    Assert-CgceEqual $SelectedCase $Matrix.selected_case
+    Assert-CgceEqual 2 @($Matrix.steps).Count
+    $expected = @(New-CgceFilesExpectedSteps $Fixture $SelectedCase)
+    for ($index = 0; $index -lt 2; $index += 1) {
+        $actual = @($Matrix.steps)[$index]
+        Assert-CgceEqual `
+            "sequence,step,operation,source_path,destination_path,before_state,after_state" `
+            ([string]::Join(",", @($actual.PSObject.Properties.Name)))
+        Assert-CgceEqual "source,destination" `
+            ([string]::Join(",", @($actual.before_state.PSObject.Properties.Name)))
+        Assert-CgceEqual "source,destination" `
+            ([string]::Join(",", @($actual.after_state.PSObject.Properties.Name)))
+        Assert-CgceEqual $expected[$index].Sequence ([int]$actual.sequence)
+        Assert-CgceEqual $expected[$index].Step $actual.step
+        Assert-CgceEqual $expected[$index].Operation $actual.operation
+        Assert-CgceEqual $expected[$index].SourcePath $actual.source_path
+        Assert-CgceEqual $expected[$index].DestinationPath $actual.destination_path
+        Assert-CgceFilesArtifactState $expected[$index].BeforeSource $actual.before_state.source
+        Assert-CgceFilesArtifactState $expected[$index].BeforeDestination $actual.before_state.destination
+        Assert-CgceFilesArtifactState $expected[$index].AfterSource $actual.after_state.source
+        Assert-CgceFilesArtifactState $expected[$index].AfterDestination $actual.after_state.destination
+    }
+}
+
+function New-CgceFilesRecoveryIntent($Fixture) {
+    $steps = New-Object 'Collections.Generic.List[object]'
+    foreach ($expected in @(New-CgceFilesExpectedSteps `
+            $Fixture $Fixture.SelectedCase)) {
+        $null = $steps.Add([pscustomobject][ordered]@{
+            sequence = $expected.Sequence; step = $expected.Step
+            operation = $expected.Operation
+            source_path = $expected.SourcePath; destination_path = $expected.DestinationPath
+            before_state = [pscustomobject][ordered]@{
+                source = $expected.BeforeSource; destination = $expected.BeforeDestination
+            }
+            after_state = [pscustomobject][ordered]@{
+                source = $expected.AfterSource; destination = $expected.AfterDestination
+            }
+        })
+    }
+    $state = $Fixture.State
+    return [pscustomobject][ordered]@{
+        schema_version = "1.0"; kind = "cgce_windows_discovery_restore_intent"
+        run_id = $state.run_id; sequence = 0
+        created_at_utc = "2026-07-24T00:00:01Z"
+        source_state_sha256 = (Get-CgceSha256 $Fixture.Paths.state)
+        source_phase = $state.phase; source_outcome = $state.outcome
+        source_revision = $state.revision; source_updated_at_utc = $state.updated_at_utc
+        source_errors = $state.errors
+        genesis_state_sha256 = (Get-CgceSha256 $Fixture.Paths.genesis_state)
+        original_inventory_sha256 = $state.inventory_checksums.original
+        original_tree_sha256 = $Fixture.OriginalTree
+        selected_case = $Fixture.SelectedCase
+        paths = [pscustomobject][ordered]@{
+            active_saved = $Fixture.Paths.active_saved
+            inactive_original = $Fixture.Paths.inactive_original
+            quarantined_clone = $Fixture.Paths.quarantined_clone
+            original_inventory = $Fixture.Paths.original_inventory
+            restored_inventory = $Fixture.Paths.restored_inventory
+            restore_receipts = $Fixture.Paths.restore_receipts
+            probe_restore_final_receipt = (Join-Path $Fixture.Paths.probe_receipts "restore\999-probe-restore-final.json")
+        }
+        steps = [object[]]$steps.ToArray()
+    }
+}
+
+function Write-CgceFilesRecoveryOperation($Fixture, $Intent, [int]$Index) {
+    $step = @($Intent.steps)[$Index]
+    $sequence = [int]$step.sequence
+    $previous = if ($Index -eq 0) {
+        Get-CgceSha256 (Join-Path $Fixture.Paths.restore_receipts "000-restore-intent.json")
+    } else {
+        Get-CgceSha256 (Join-Path $Fixture.Paths.restore_receipts "010-quarantine-clone.json")
+    }
+    $receipt = [pscustomobject][ordered]@{
+        schema_version = "1.0"; kind = "cgce_windows_discovery_restore_operation"
+        run_id = $Intent.run_id; sequence = $sequence
+        step = $step.step; operation = $step.operation
+        source_path = $step.source_path; destination_path = $step.destination_path
+        before_state = $step.before_state; after_state = $step.after_state
+        previous_receipt_sha256 = $previous
+        completed_at_utc = "2026-07-24T00:00:0$($Index + 2)Z"
+    }
+    $leaf = if ($Index -eq 0) {
+        "010-quarantine-clone.json"
+    } else { "020-restore-original.json" }
+    Write-CgceJsonAtomic $receipt (Join-Path $Fixture.Paths.restore_receipts $leaf)
+}
+
+function Get-CgceFilesRecoverySnapshot($Fixture) {
+    $records = New-Object 'Collections.Generic.List[string]'
+    foreach ($item in @(
+            Get-ChildItem -LiteralPath $Fixture.Root -Recurse -Force |
+                Sort-Object -Property FullName
+        )) {
+        $relative = $item.FullName.Substring($Fixture.Root.Length)
+        if ($relative.StartsWith("\")) {
+            $relative = $relative.Substring(1)
+        }
+        if ($item.PSIsContainer) {
+            $null = $records.Add("D|$relative")
+        } else {
+            $null = $records.Add(
+                "F|$relative|$($item.Length)|$(Get-CgceFilesTestSha256 $item.FullName)"
+            )
         }
     }
+    return [string]::Join("`n", [string[]]$records.ToArray())
 }
 
 Invoke-CgceTest "recovery matrix freezes the exact phase case and two-step contract" {
     foreach ($case in @(
-            [pscustomobject]@{ Phase = "CREATED"; Layout = "unchanged"; Selected = "UNCHANGED_ORIGINAL"; First = "VERIFY_RESTORED" },
-            [pscustomobject]@{ Phase = "CLONE_ACTIVE"; Layout = "clone"; Selected = "CLONE_AND_INACTIVE_ORIGINAL"; First = "MOVE_DIRECTORY" },
-            [pscustomobject]@{ Phase = "BACKUP_VERIFIED"; Layout = "inactive"; Selected = "NO_ACTIVE_AND_INACTIVE_ORIGINAL"; First = "VERIFY_ABSENT" }
+            [pscustomobject]@{ Phase = "CREATED"; Case = "UNCHANGED_ORIGINAL" },
+            [pscustomobject]@{ Phase = "BACKUP_VERIFIED"; Case = "UNCHANGED_ORIGINAL" },
+            [pscustomobject]@{ Phase = "BACKUP_VERIFIED"; Case = "NO_ACTIVE_AND_INACTIVE_ORIGINAL" },
+            [pscustomobject]@{ Phase = "ORIGINAL_DEACTIVATED"; Case = "NO_ACTIVE_AND_INACTIVE_ORIGINAL" },
+            [pscustomobject]@{ Phase = "ORIGINAL_DEACTIVATED"; Case = "CLONE_AND_INACTIVE_ORIGINAL" },
+            [pscustomobject]@{ Phase = "CLONE_ACTIVE"; Case = "CLONE_AND_INACTIVE_ORIGINAL" },
+            [pscustomobject]@{ Phase = "PROBE_STAGED"; Case = "CLONE_AND_INACTIVE_ORIGINAL" },
+            [pscustomobject]@{ Phase = "RUNNING"; Case = "CLONE_AND_INACTIVE_ORIGINAL" },
+            [pscustomobject]@{ Phase = "CAPTURED"; Case = "CLONE_AND_INACTIVE_ORIGINAL" }
         )) {
-        $fixture = New-CgceRecoveryMatrixFixture $case.Phase $case.Layout
+        $fixture = New-CgceFilesRecoveryFixture $case.Phase $case.Case
         try {
             $matrix = Assert-CgceRecoveryMatrix -State $fixture.State
-            Assert-CgceEqual $case.Selected $matrix.selected_case
-            Assert-CgceEqual 2 $matrix.steps.Count
-            Assert-CgceEqual 10 $matrix.steps[0].sequence
-            Assert-CgceEqual "QUARANTINE_CLONE" $matrix.steps[0].step
-            Assert-CgceEqual $case.First $matrix.steps[0].operation
-            Assert-CgceEqual 20 $matrix.steps[1].sequence
-            Assert-CgceEqual "RESTORE_ORIGINAL" $matrix.steps[1].step
+            Assert-CgceFilesRecoveryMatrix $fixture $matrix $case.Case
+        } finally {
+            Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+        }
+    }
+
+    $allowed = @{
+        "CREATED|UNCHANGED_ORIGINAL" = $true
+        "BACKUP_VERIFIED|UNCHANGED_ORIGINAL" = $true
+        "BACKUP_VERIFIED|NO_ACTIVE_AND_INACTIVE_ORIGINAL" = $true
+        "ORIGINAL_DEACTIVATED|NO_ACTIVE_AND_INACTIVE_ORIGINAL" = $true
+        "ORIGINAL_DEACTIVATED|CLONE_AND_INACTIVE_ORIGINAL" = $true
+        "CLONE_ACTIVE|CLONE_AND_INACTIVE_ORIGINAL" = $true
+        "PROBE_STAGED|CLONE_AND_INACTIVE_ORIGINAL" = $true
+        "RUNNING|CLONE_AND_INACTIVE_ORIGINAL" = $true
+        "CAPTURED|CLONE_AND_INACTIVE_ORIGINAL" = $true
+    }
+    foreach ($phase in @(
+            "CREATED", "BACKUP_VERIFIED", "ORIGINAL_DEACTIVATED",
+            "CLONE_ACTIVE", "PROBE_STAGED", "RUNNING", "CAPTURED"
+        )) {
+        foreach ($layout in @(
+                "UNCHANGED_ORIGINAL", "NO_ACTIVE_AND_INACTIVE_ORIGINAL",
+                "CLONE_AND_INACTIVE_ORIGINAL"
+            )) {
+            if ($allowed.ContainsKey("$phase|$layout")) { continue }
+            $fixture = New-CgceFilesRecoveryFixture $phase $layout
+            try {
+                Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+                    Assert-CgceRecoveryMatrix -State $fixture.State
+                }
+            } finally {
+                Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+            }
+        }
+    }
+}
+
+Invoke-CgceTest "recovery matrix resumes only intent-bound before or after states" {
+    foreach ($case in @(
+            [pscustomobject]@{ Phase = "CREATED"; Selected = "UNCHANGED_ORIGINAL" },
+            [pscustomobject]@{ Phase = "BACKUP_VERIFIED"; Selected = "NO_ACTIVE_AND_INACTIVE_ORIGINAL" },
+            [pscustomobject]@{ Phase = "CLONE_ACTIVE"; Selected = "CLONE_AND_INACTIVE_ORIGINAL" }
+        )) {
+        foreach ($position in @(
+                "before-010", "after-010", "before-020", "after-020", "completed-020"
+            )) {
+            $fixture = New-CgceFilesRecoveryFixture $case.Phase $case.Selected
+            try {
+                $intent = New-CgceFilesRecoveryIntent $fixture
+                $intentPath = Join-Path $fixture.Paths.restore_receipts "000-restore-intent.json"
+                Write-CgceJsonAtomic $intent $intentPath
+                if ($position -cne "before-010" -and
+                    $case.Selected -ceq "CLONE_AND_INACTIVE_ORIGINAL") {
+                    Move-CgceDirectoryNoOverwrite `
+                        $fixture.Paths.active_saved $fixture.Paths.quarantined_clone
+                }
+                if ($position -in @("before-020", "after-020", "completed-020")) {
+                    Write-CgceFilesRecoveryOperation $fixture $intent 0
+                }
+                if ($position -in @("after-020", "completed-020") -and
+                    $case.Selected -cne "UNCHANGED_ORIGINAL") {
+                    Move-CgceDirectoryNoOverwrite `
+                        $fixture.Paths.inactive_original $fixture.Paths.active_saved
+                }
+                if ($position -ceq "completed-020") {
+                    Write-CgceFilesRecoveryOperation $fixture $intent 1
+                }
+                $matrix = Assert-CgceRecoveryMatrix -State $fixture.State -Intent $intent
+                Assert-CgceFilesRecoveryMatrix $fixture $matrix $case.Selected
+                if ($position -in @("after-020", "completed-020")) {
+                    Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+                        Assert-CgceRecoveryMatrix -State $fixture.State
+                    }
+                }
+            } catch {
+                throw "CGCE-TEST $($case.Selected) resume $position: $($_.Exception.Message)"
+            } finally {
+                Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+            }
+        }
+    }
+}
+
+Invoke-CgceTest "recovery matrix rejects invalid resume authority without mutation" {
+    foreach ($case in @(
+            "020-without-010",
+            "wrong-previous-hash",
+            "foreign-child",
+            "mismatched-intent-path",
+            "mismatched-intent-case",
+            "mismatched-intent-state",
+            "already-active-without-intent",
+            "ambiguous-live-state"
+        )) {
+        $fixture = New-CgceFilesRecoveryFixture `
+            "CLONE_ACTIVE" "CLONE_AND_INACTIVE_ORIGINAL"
+        try {
+            $intent = New-CgceFilesRecoveryIntent $fixture
+            $intentPath = Join-Path `
+                $fixture.Paths.restore_receipts `
+                "000-restore-intent.json"
+            if ($case -cne "already-active-without-intent") {
+                Write-CgceJsonAtomic $intent $intentPath
+            }
+
+            switch ($case) {
+                "020-without-010" {
+                    Move-CgceDirectoryNoOverwrite `
+                        $fixture.Paths.active_saved `
+                        $fixture.Paths.quarantined_clone
+                    Write-CgceFilesRecoveryOperation $fixture $intent 0
+                    Move-CgceDirectoryNoOverwrite `
+                        $fixture.Paths.inactive_original `
+                        $fixture.Paths.active_saved
+                    Write-CgceFilesRecoveryOperation $fixture $intent 1
+                    Remove-Item -LiteralPath (
+                        Join-Path `
+                            $fixture.Paths.restore_receipts `
+                            "010-quarantine-clone.json"
+                    )
+                }
+                "wrong-previous-hash" {
+                    Move-CgceDirectoryNoOverwrite `
+                        $fixture.Paths.active_saved `
+                        $fixture.Paths.quarantined_clone
+                    Write-CgceFilesRecoveryOperation $fixture $intent 0
+                    $receiptPath = Join-Path `
+                        $fixture.Paths.restore_receipts `
+                        "010-quarantine-clone.json"
+                    $receipt = Read-CgceJsonObject $receiptPath
+                    $receipt.previous_receipt_sha256 = ("f" * 64)
+                    Write-CgceFilesTestUtf8 `
+                        $receiptPath `
+                        (ConvertTo-CgceFilesTestJson $receipt)
+                }
+                "foreign-child" {
+                    Write-CgceFilesTestUtf8 `
+                        (Join-Path `
+                            $fixture.Paths.restore_receipts `
+                            "011-foreign.json") `
+                        "{}"
+                }
+                "mismatched-intent-path" {
+                    $intent.paths.active_saved = Join-Path `
+                        $fixture.Paths.server_root `
+                        "Pal\ForeignSaved"
+                    Write-CgceFilesTestUtf8 `
+                        $intentPath `
+                        (ConvertTo-CgceFilesTestJson $intent)
+                }
+                "mismatched-intent-case" {
+                    $intent.selected_case = "UNCHANGED_ORIGINAL"
+                    Write-CgceFilesTestUtf8 `
+                        $intentPath `
+                        (ConvertTo-CgceFilesTestJson $intent)
+                }
+                "mismatched-intent-state" {
+                    $intent.steps[0].before_state.source.tree_sha256 = ("f" * 64)
+                    Write-CgceFilesTestUtf8 `
+                        $intentPath `
+                        (ConvertTo-CgceFilesTestJson $intent)
+                }
+                "already-active-without-intent" {
+                    Move-CgceDirectoryNoOverwrite `
+                        $fixture.Paths.active_saved `
+                        $fixture.Paths.quarantined_clone
+                    Move-CgceDirectoryNoOverwrite `
+                        $fixture.Paths.inactive_original `
+                        $fixture.Paths.active_saved
+                }
+                "ambiguous-live-state" {
+                    $null = Copy-CgceTreeVerified `
+                        $fixture.Paths.active_saved `
+                        $fixture.Paths.quarantined_clone
+                }
+            }
+
+            $before = Get-CgceFilesRecoverySnapshot $fixture
+            Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+                if ($case -ceq "already-active-without-intent") {
+                    Assert-CgceRecoveryMatrix -State $fixture.State
+                } else {
+                    Assert-CgceRecoveryMatrix `
+                        -State $fixture.State `
+                        -Intent $intent
+                }
+            }
+            Assert-CgceEqual `
+                $before `
+                (Get-CgceFilesRecoverySnapshot $fixture)
+        } catch {
+            throw "CGCE-TEST resume rejection $case: $($_.Exception.Message)"
         } finally {
             Remove-Item -LiteralPath $fixture.Root -Recurse -Force
         }
     }
 }
 
-Invoke-CgceTest "recovery matrix resumes only intent-bound before or after states" {
-    $fixture = New-CgceRecoveryMatrixFixture "CLONE_ACTIVE" "clone"
-    try {
-        $intent = [pscustomobject][ordered]@{
-            selected_case = "CLONE_AND_INACTIVE_ORIGINAL"
-            steps = @(
-                [pscustomobject][ordered]@{ sequence = 10; before_state = "before-010"; after_state = "after-010" },
-                [pscustomobject][ordered]@{ sequence = 20; before_state = "before-020"; after_state = "after-020" }
-            )
-        }
-        $matrix = Assert-CgceRecoveryMatrix -State $fixture.State -Intent $intent
-        Assert-CgceEqual "CLONE_AND_INACTIVE_ORIGINAL" $matrix.selected_case
-        Move-CgceDirectoryNoOverwrite `
-            -Source $fixture.Paths.active_saved `
-            -Destination $fixture.Paths.quarantined_clone
-        $resumed = Assert-CgceRecoveryMatrix -State $fixture.State -Intent $intent
-        Assert-CgceEqual "CLONE_AND_INACTIVE_ORIGINAL" $resumed.selected_case
-        Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
-            Assert-CgceRecoveryMatrix -State $fixture.State
-        }
-    } finally {
-        Remove-Item -LiteralPath $fixture.Root -Recurse -Force
-    }
-}
-
 Invoke-CgceTest "recovery matrix rejects foreign quarantine without mutation" {
-    $fixture = New-CgceRecoveryMatrixFixture "CLONE_ACTIVE" "clone"
+    $fixture = New-CgceFilesRecoveryFixture `
+        "CLONE_ACTIVE" "CLONE_AND_INACTIVE_ORIGINAL"
     try {
         New-Item -ItemType Directory -Path $fixture.Paths.quarantined_clone | Out-Null
         Write-CgceFilesTestUtf8 `

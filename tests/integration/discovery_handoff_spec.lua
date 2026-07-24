@@ -321,7 +321,7 @@ end
         end
     end)
 
-    it("defines Task 6 fixed-purpose recovery exports and restore entry point", function()
+    it("defines Task 6 Contract and Files public recovery surfaces", function()
         local contract = read(
             "tools/windows-discovery/modules/CgceDiscovery.Contract.psm1"
         )
@@ -334,6 +334,16 @@ end
             a.equal(true, contract:find(required, 1, true) ~= nil)
         end
 
+        local files = read(
+            "tools/windows-discovery/modules/CgceDiscovery.Files.psm1"
+        )
+        a.equal(
+            true,
+            files:find('"Assert-CgceRecoveryMatrix"', 1, true) ~= nil
+        )
+    end)
+
+    it("defines the Task 6 restore entry point surface", function()
         local restore = read(
             "tools/windows-discovery/Restore-CgceProduction.ps1"
         )

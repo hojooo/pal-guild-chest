@@ -85,3 +85,92 @@ run remains required after the Task 11A.6 production implementation.
 - The portable RED assertion fails specifically because the planned public
   exports are absent; Windows test execution is intentionally not represented
   as a pass.
+
+## Review correction
+
+The first RED fixture set was rejected in review because several cases could
+fail vacuously before reaching their claimed authority. The following
+corrections supersede the earlier fixture description:
+
+- Contract deliberately imports Files and Runtime before invoking their
+  public parity surfaces; missing Task 6 production remains the only intended
+  command-not-found RED.
+- Recovery fixtures now keep a pristine `CREATED/ACTIVE` genesis and write a
+  distinct current source state. Original inventory checksums and tree digests
+  come from the actual strict inventory bytes and live original tree.
+- Initial recovery CAS coverage now spans all seven source phases under both
+  `ACTIVE` and `BLOCKED`, asserting exact source bindings, `N+1`, output-free
+  behavior, and byte/value-preserved outcome, errors, and evidence.
+- The Files matrix covers all nine allowed phase/case rows and all twelve
+  disallowed pairs. Every allowed row asserts both complete steps, exact paths,
+  operations, sequences, and all five artifact-state fields.
+- Resume coverage uses a complete intent identity, valid receipt prefix, and
+  exact artifact objects at before-010, after-010, before-020, after-020, and
+  completed-020 boundaries. An already-active original is accepted only with
+  that bound intent and prefix, never as a fresh matrix choice.
+- Runtime/Contract inactivity parity uses a complete partial launch/PID chain
+  containing a durable unlisted PID, a real bounded-readiness process fixture,
+  and a separately reserved ephemeral listener port. Both allow and block
+  verdicts are compared and every rejection preserves state bytes.
+- Probe-completion parity invokes the future read-only Runtime validator and
+  Contract completion against matching absent-probe allow and residue-block
+  fixtures.
+- Manual state and schema-valid sentinel barriers each exercise initial CAS,
+  blocker, and completion. The state-only intent is created after the manual
+  error exists, and the sentinel is validated against Runtime's exact schema.
+- Blocker success asserts exact prior errors/evidence, one exact append,
+  `N+2`, and no success output. Rejections cover invalid/LF/CRLF codes,
+  pre-CAS, already-`N+2`, stale revision, changed evidence/errors, and
+  missing/mismatched intent with byte preservation.
+- Completion now has a fully valid `000/010/020/999` positive journal reaching
+  `RESTORED`, plus missing, gap, foreign-child, and tampered-chain negatives.
+  An always-throw completion implementation cannot satisfy the positive case.
+
+Corrected portable RED command:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+```
+
+The portable contract is now split into two independently actionable failures:
+
+```text
+FAIL defines Task 6 Contract and Files public recovery surfaces
+tests/integration/discovery_handoff_spec.lua:334: expected true, got false
+
+FAIL defines the Task 6 restore entry point surface
+tests/integration/discovery_handoff_spec.lua:5: tools/windows-discovery/Restore-CgceProduction.ps1: No such file or directory
+```
+
+The five pre-existing portable handoff cases still pass. The Windows command
+was attempted again after correction; the availability limitation recorded
+above is unchanged, so no behavioral Windows result is claimed.
+
+## Final review closure
+
+A second static gate found five remaining ways an incomplete validator could
+pass. The RED slice now closes them:
+
+- Intent rejection uses fresh fixtures for source phase/outcome/revision/time/
+  errors, source-state checksum, genesis/original inventory/tree authority,
+  selected case, paths, and exact intent/step/artifact key drift.
+- A whole-state comparator checks every source field across initial, blocked,
+  and completed writers while allowing only the specified phase, revision,
+  timestamp, append-only error, and restored-checksum deltas.
+- Probe parity now includes a real non-null public Runtime stage and complete
+  `010..090/999` probe restore journal. Both Runtime and Contract must allow
+  that authority and return the same stable rejection for a one-change inner
+  journal tamper or terminal filesystem tamper.
+- Files resume rejection now covers a missing `010` prefix, wrong previous
+  checksum, foreign child, intent path/case/artifact drift, already-active
+  state without intent, and ambiguous live state. Every case compares a full
+  recursive file/directory snapshot before and after rejection.
+- Every production completion negative starts from a valid
+  `000/010/020/999` authority and applies one missing, gap, foreign-child, or
+  semantic-tamper perturbation, then proves the complete fixture tree remains
+  byte-for-byte unchanged after rejection.
+
+The non-null probe fixture deliberately uses the public Runtime enable/restore
+APIs rather than handwritten probe receipts. Its PowerShell 5.1 behavior still
+requires the unavailable Windows gate; the portable result cannot validate
+Windows process, filesystem, or module semantics.
