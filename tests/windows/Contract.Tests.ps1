@@ -1706,3 +1706,303 @@ Start-Sleep -Seconds 30
         Remove-Item -LiteralPath $root -Recurse -Force
     }
 }
+
+function New-CgceRecoveryArtifactState(
+    [string]$TreeSha256,
+    [bool]$Present
+) {
+    return [pscustomobject][ordered]@{
+        artifact_type = "DIRECTORY"
+        present = $Present
+        length = $null
+        sha256 = $null
+        tree_sha256 = if ($Present) { $TreeSha256 } else { $null }
+    }
+}
+
+function New-CgceRecoveryContractFixture([string]$Outcome = "ACTIVE") {
+    $root = New-CgceContractTestRoot
+    $paths = New-CgceContractTestPaths $root
+    foreach ($directory in @(
+            $paths.run_directory,
+            $paths.server_root,
+            $paths.active_saved,
+            (Split-Path -Parent $paths.original_inventory),
+            $paths.restore_receipts,
+            $paths.process_receipts
+        )) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    Write-CgceContractTestUtf8 `
+        -Path (Join-Path $paths.active_saved "World.sav") `
+        -Text "original-world"
+    $state = New-CgceRunState `
+        -RunId "r-0123456789abcdef0123456789abcdef" `
+        -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+        -Paths $paths
+    $state.bundle_checksum = ("a" * 64)
+    $state.control_evidence_checksum = ("b" * 64)
+    $state.source_manifest_checksum = ("c" * 64)
+    $state.palserver_executable = (Join-Path $paths.server_root "PalServer.exe")
+    $state.palserver_executable_checksum = ("d" * 64)
+    $state.ue4ss_version = "3.0.1"
+    $state.server_process_paths = @($state.palserver_executable)
+    $state.ue4ss_dll_checksum = ("e" * 64)
+    $state.listener_ports = @(8211)
+    $entries = @(Get-CgceTreeInventory -Root $paths.active_saved)
+    $state.inventory_checksums.original = Write-CgceInventory `
+        -Entries $entries -Path $paths.original_inventory -Kind "original"
+    $state.outcome = $Outcome
+    if ($Outcome -ceq "BLOCKED") {
+        $state.errors = @(
+            [pscustomobject][ordered]@{
+                code = "CGCE-OPS-PRIOR-FAILURE"
+                at_utc = "2026-07-24T00:00:00Z"
+            }
+        )
+    }
+    Write-CgceJsonAtomic -Value $state -Path $paths.genesis_state
+    Write-CgceJsonAtomic -Value $state -Path $paths.state
+
+    $tree = Get-CgceInventoryTreeSha256 -Entries $entries
+    $present = New-CgceRecoveryArtifactState -TreeSha256 $tree -Present $true
+    $absent = New-CgceRecoveryArtifactState -TreeSha256 "" -Present $false
+    $intent = [pscustomobject][ordered]@{
+        schema_version = "1.0"
+        kind = "cgce_windows_discovery_restore_intent"
+        run_id = $state.run_id
+        sequence = 0
+        created_at_utc = "2026-07-24T00:00:00Z"
+        source_state_sha256 = (Get-CgceSha256 $paths.state)
+        source_phase = $state.phase
+        source_outcome = $state.outcome
+        source_revision = $state.revision
+        source_updated_at_utc = $state.updated_at_utc
+        source_errors = $state.errors
+        genesis_state_sha256 = (Get-CgceSha256 $paths.genesis_state)
+        original_inventory_sha256 = $state.inventory_checksums.original
+        original_tree_sha256 = $tree
+        selected_case = "UNCHANGED_ORIGINAL"
+        paths = [pscustomobject][ordered]@{
+            active_saved = $paths.active_saved
+            inactive_original = $paths.inactive_original
+            quarantined_clone = $paths.quarantined_clone
+            original_inventory = $paths.original_inventory
+            restored_inventory = $paths.restored_inventory
+            restore_receipts = $paths.restore_receipts
+            probe_restore_final_receipt = (Join-Path $paths.probe_receipts "999-probe-restore-final.json")
+        }
+        steps = @(
+            [pscustomobject][ordered]@{
+                sequence = 10; step = "QUARANTINE_CLONE"; operation = "VERIFY_RESTORED"
+                source_path = $paths.active_saved; destination_path = $paths.quarantined_clone
+                before_state = [pscustomobject][ordered]@{ source = $present; destination = $absent }
+                after_state = [pscustomobject][ordered]@{ source = $present; destination = $absent }
+            },
+            [pscustomobject][ordered]@{
+                sequence = 20; step = "RESTORE_ORIGINAL"; operation = "VERIFY_RESTORED"
+                source_path = $paths.inactive_original; destination_path = $paths.active_saved
+                before_state = [pscustomobject][ordered]@{ source = $absent; destination = $present }
+                after_state = [pscustomobject][ordered]@{ source = $absent; destination = $present }
+            }
+        )
+    }
+    $intentPath = Join-Path $paths.restore_receipts "000-restore-intent.json"
+    Write-CgceJsonAtomic -Value $intent -Path $intentPath
+    return [pscustomobject]@{ Root = $root; Paths = $paths; State = $state; IntentPath = $intentPath }
+}
+
+Invoke-CgceTest "shared inventory tree digest freezes framing ordering and strict entries" {
+    $entries = @(
+        [pscustomobject][ordered]@{ relative_path = "a.txt"; length = [int64]3; sha256 = ("a" * 64) },
+        [pscustomobject][ordered]@{ relative_path = "b/z.bin"; length = [int64]9; sha256 = ("b" * 64) }
+    )
+    Assert-CgceEqual `
+        "412f6bcca9f94ba03373a6180ba1749034ab11912708a725605af2b32bc06c6b" `
+        (Get-CgceInventoryTreeSha256 -Entries $entries)
+    foreach ($invalid in @(
+            @($entries[1], $entries[0]),
+            @($entries[0], [pscustomobject]@{ relative_path = "a.txt"; length = 3; sha256 = ("a" * 64) }),
+            @([pscustomobject]@{ relative_path = "a.txt"; length = 3; sha256 = ("a" * 64); foreign = $true })
+        )) {
+        Assert-CgceThrows "CGCE-OPS-INVENTORY" {
+            Get-CgceInventoryTreeSha256 -Entries $invalid
+        }
+    }
+}
+
+Invoke-CgceTest "recovery intent accepts only the exact source preimage and fixed step schema" {
+    $fixture = New-CgceRecoveryContractFixture
+    try {
+        Write-CgceRecoveryRunState `
+            -StatePath $fixture.Paths.state `
+            -RecoveryIntentPath $fixture.IntentPath
+        $restoring = Read-CgceJsonObject $fixture.Paths.state
+        Assert-CgceEqual "RESTORING" $restoring.phase
+        Assert-CgceEqual 1 $restoring.revision
+
+        $before = Get-CgceSha256 $fixture.Paths.state
+        $intent = Read-CgceJsonObject $fixture.IntentPath
+        $intent.steps = @($intent.steps[1], $intent.steps[0])
+        Write-CgceContractTestUtf8 $fixture.IntentPath ($intent | ConvertTo-Json -Depth 12)
+        Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+            Write-CgceRecoveryRunState `
+                -StatePath $fixture.Paths.state `
+                -RecoveryIntentPath $fixture.IntentPath
+        }
+        Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "recovery state inactivity matches Runtime over process PID and port fixtures" {
+    $fixture = New-CgceRecoveryContractFixture
+    try {
+        Assert-CgceNoServerActivity `
+            -ExecutablePaths $fixture.State.server_process_paths `
+            -Ports $fixture.State.listener_ports `
+            -ReceiptRoot $fixture.Paths.process_receipts
+        Write-CgceRecoveryRunState `
+            -StatePath $fixture.Paths.state `
+            -RecoveryIntentPath $fixture.IntentPath
+
+        Copy-Item `
+            -LiteralPath $env:ComSpec `
+            -Destination $fixture.State.palserver_executable
+        $process = Start-Process `
+            -FilePath $fixture.State.palserver_executable `
+            -ArgumentList @("/c", "ping -n 10 127.0.0.1 >nul") `
+            -PassThru
+        try {
+            Assert-CgceThrows "CGCE-OPS-PROCESS-ACTIVE" {
+                Assert-CgceNoServerActivity `
+                    -ExecutablePaths $fixture.State.server_process_paths `
+                    -Ports $fixture.State.listener_ports `
+                    -ReceiptRoot $fixture.Paths.process_receipts
+            }
+            Assert-CgceThrows "CGCE-OPS-PROCESS-ACTIVE" {
+                Block-CgceRecoveryRunState `
+                    -StatePath $fixture.Paths.state `
+                    -RecoveryIntentPath $fixture.IntentPath `
+                    -Code "CGCE-OPS-PROCESS-ACTIVE"
+            }
+        } finally {
+            if (-not $process.HasExited) {
+                Stop-Process -Id $process.Id -Force
+                $process.WaitForExit()
+            }
+        }
+
+        $listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback), 8211
+        try {
+            $listener.Start()
+            Assert-CgceThrows "CGCE-OPS-PORT-ACTIVE" {
+                Assert-CgceNoServerActivity `
+                    -ExecutablePaths $fixture.State.server_process_paths `
+                    -Ports $fixture.State.listener_ports `
+                    -ReceiptRoot $fixture.Paths.process_receipts
+            }
+            Assert-CgceThrows "CGCE-OPS-PORT-ACTIVE" {
+                Block-CgceRecoveryRunState `
+                    -StatePath $fixture.Paths.state `
+                    -RecoveryIntentPath $fixture.IntentPath `
+                    -Code "CGCE-OPS-PORT-ACTIVE"
+            }
+        } finally {
+            $listener.Stop()
+        }
+    } finally {
+        Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "recovery probe completion matches Runtime over journal and terminal fixtures" {
+    $fixture = New-CgceRecoveryContractFixture
+    try {
+        Write-CgceRecoveryRunState -StatePath $fixture.Paths.state -RecoveryIntentPath $fixture.IntentPath
+        $before = Get-CgceSha256 $fixture.Paths.state
+        Assert-CgceThrows "CGCE-OPS-PROBE-RECEIPT" {
+            Complete-CgceRecoveryRunState `
+                -StatePath $fixture.Paths.state `
+                -RecoveryIntentPath $fixture.IntentPath
+        }
+        Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "recovery state writers reject state-only and sentinel-only manual barriers" {
+    foreach ($barrier in @("state", "sentinel")) {
+        $fixture = New-CgceRecoveryContractFixture
+        try {
+            if ($barrier -ceq "state") {
+                $state = Read-CgceJsonObject $fixture.Paths.state
+                $state.outcome = "BLOCKED"
+                $state.errors = @([pscustomobject][ordered]@{
+                    code = "CGCE-OPS-MANUAL-RECOVERY"; at_utc = "2026-07-24T00:00:00Z"
+                })
+                Write-CgceContractTestUtf8 $fixture.Paths.state ($state | ConvertTo-Json -Depth 12)
+            } else {
+                Write-CgceContractTestUtf8 `
+                    (Join-Path $fixture.Paths.process_receipts "manual-recovery-required.json") `
+                    "{}"
+            }
+            $before = Get-CgceSha256 $fixture.Paths.state
+            Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+                Write-CgceRecoveryRunState `
+                    -StatePath $fixture.Paths.state `
+                    -RecoveryIntentPath $fixture.IntentPath
+            }
+            Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
+        } finally {
+            Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "recovery blocker owns exact ACTIVE and BLOCKED revision-plus-two deltas" {
+    foreach ($outcome in @("ACTIVE", "BLOCKED")) {
+        $fixture = New-CgceRecoveryContractFixture -Outcome $outcome
+        try {
+            Write-CgceRecoveryRunState -StatePath $fixture.Paths.state -RecoveryIntentPath $fixture.IntentPath
+            Block-CgceRecoveryRunState `
+                -StatePath $fixture.Paths.state `
+                -RecoveryIntentPath $fixture.IntentPath `
+                -Code "CGCE-OPS-RECOVERY-FAILED"
+            $blocked = Read-CgceJsonObject $fixture.Paths.state
+            Assert-CgceEqual "RESTORING" $blocked.phase
+            Assert-CgceEqual "BLOCKED" $blocked.outcome
+            Assert-CgceEqual 2 $blocked.revision
+            Assert-CgceEqual ($fixture.State.errors.Count + 1) $blocked.errors.Count
+        } finally {
+            Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+        }
+    }
+}
+
+Invoke-CgceTest "recovery completion requires exact 000 010 020 999 authority" {
+    $fixture = New-CgceRecoveryContractFixture
+    try {
+        Write-CgceRecoveryRunState -StatePath $fixture.Paths.state -RecoveryIntentPath $fixture.IntentPath
+        $before = Get-CgceSha256 $fixture.Paths.state
+        Assert-CgceThrows "CGCE-OPS-RESTORE-RECEIPT" {
+            Complete-CgceRecoveryRunState `
+                -StatePath $fixture.Paths.state `
+                -RecoveryIntentPath $fixture.IntentPath
+        }
+        Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
+        Write-CgceContractTestUtf8 `
+            (Join-Path $fixture.Paths.restore_receipts "021-foreign.json") `
+            "{}"
+        Assert-CgceThrows "CGCE-OPS-RESTORE-RECEIPT" {
+            Complete-CgceRecoveryRunState `
+                -StatePath $fixture.Paths.state `
+                -RecoveryIntentPath $fixture.IntentPath
+        }
+        Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
+    } finally {
+        Remove-Item -LiteralPath $fixture.Root -Recurse -Force
+    }
+}

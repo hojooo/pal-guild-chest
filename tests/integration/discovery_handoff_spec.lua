@@ -321,6 +321,33 @@ end
         end
     end)
 
+    it("defines Task 6 fixed-purpose recovery exports and restore entry point", function()
+        local contract = read(
+            "tools/windows-discovery/modules/CgceDiscovery.Contract.psm1"
+        )
+        for _, required in ipairs({
+            '"Get-CgceInventoryTreeSha256"',
+            '"Write-CgceRecoveryRunState"',
+            '"Block-CgceRecoveryRunState"',
+            '"Complete-CgceRecoveryRunState"',
+        }) do
+            a.equal(true, contract:find(required, 1, true) ~= nil)
+        end
+
+        local restore = read(
+            "tools/windows-discovery/Restore-CgceProduction.ps1"
+        )
+        for _, required in ipairs({
+            "Write-OrResume-CgceRestoredInventory",
+            "Complete-CgceRecoveryJournal",
+            "Complete-CgceRunMarker",
+            "CGCE_WINDOWS_DISCOVERY_OK",
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED",
+        }) do
+            a.equal(true, restore:find(required, 1, true) ~= nil)
+        end
+    end)
+
     it("binds invoke bootstrap to immutable source-manifest authority", function()
         local contract = read(
             "tools/windows-discovery/modules/CgceDiscovery.Contract.psm1"
