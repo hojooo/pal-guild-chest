@@ -328,3 +328,8 @@ layout is required to return `CGCE-OPS-MANUAL-RECOVERY` without a write.
 Cursor rows now also strict-read restored inventory when present, bind its
 checksum only after the `RESTORED` state transition, and assert `ACTIVE`/
 error-free state plus the exact active or completed marker authority.
+
+Final v2 correction uses one full restored-authority helper for relocated and
+crash-resume success paths. Runtime now tests both durable barrier forms before
+restore-root creation and at the private before-intent mutation cursor, with
+whole-fixture no-write snapshots.

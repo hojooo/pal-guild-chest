@@ -3274,6 +3274,52 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
 
 Invoke-CgceTest "probe restore manual barriers prevent the next move or receipt" {
     foreach ($kind in @("state", "sentinel")) {
+        foreach ($bootstrap in @("restore-root", "restore-intent")) {
+            $fixture = New-CgceRuntimeProbeFixture
+            try {
+                $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
+                Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
+                $restoreRoot = Join-Path $fixture.Paths.probe_receipts "restore"
+                if ($bootstrap -ceq "restore-intent") {
+                    New-Item -ItemType Directory -Path $restoreRoot | Out-Null
+                    $capture = [pscustomobject]@{ before = $null }
+                    Set-CgceRuntimeTestProbeRestoreMutationSeam {
+                        param($Point)
+                        if ($Point -ceq "before-restore-intent") {
+                            if ($kind -ceq "state") {
+                                Write-CgceRuntimeStateManualBarrier $fixture
+                            } else { Write-CgceRuntimeExactManualBarrier $fixture }
+                            $capture.before = Get-CgceRuntimeRestoreSnapshot $fixture
+                        }
+                    }.GetNewClosure()
+                } else {
+                    if ($kind -ceq "state") {
+                        Write-CgceRuntimeStateManualBarrier $fixture
+                    } else { Write-CgceRuntimeExactManualBarrier $fixture }
+                    $capture = [pscustomobject]@{
+                        before = Get-CgceRuntimeRestoreSnapshot $fixture
+                    }
+                }
+                Assert-CgceThrows "CGCE-OPS-MANUAL-RECOVERY" {
+                    Restore-CgceInventoryProbe `
+                        -Paths $fixture.Paths `
+                        -RunDirectory $fixture.Paths.run_directory `
+                        -RunId $fixture.RunId `
+                        -ExpectedFinalReceiptChecksum $receipt.checksum
+                }
+                Assert-CgceEqual $true ($null -ne $capture.before)
+                Assert-CgceDeepEqual $capture.before `
+                    (Get-CgceRuntimeRestoreSnapshot $fixture)
+                Assert-CgceEqual $false (Test-Path -LiteralPath (
+                    Join-Path $restoreRoot "000-probe-restore-intent.json"
+                ))
+            } finally {
+                Set-CgceRuntimeTestProbeRestoreMutationSeam $null
+                Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+            }
+        }
+    }
+    foreach ($kind in @("state", "sentinel")) {
         foreach ($position in @("next-move", "next-receipt", "resume", "completed")) {
         $fixture = New-CgceRuntimeProbeFixture
         try {

@@ -2623,6 +2623,40 @@ function Assert-CgceRestoreTerminal(
     Assert-CgceEqual "" $Result.Stderr
 }
 
+function Assert-CgceRestoredFixture($Fixture) {
+    $state = Read-CgceRunState -RunRoot $Fixture.RunRoot -RunId $Fixture.RunId
+    Assert-CgceEqual "RESTORED" $state.phase
+    Assert-CgceEqual "ACTIVE" $state.outcome
+    Assert-CgceEqual 0 @($state.errors).Count
+    Assert-CgceEqual $true (Test-Path -LiteralPath $Fixture.SavedPath)
+    Assert-CgceEqual $false (Test-Path -LiteralPath $state.paths.inactive_original)
+    Assert-CgceEqual $true (Test-Path -LiteralPath $state.paths.quarantined_clone)
+    Assert-CgceEqual $true (Test-Path -LiteralPath $state.paths.backup_saved)
+    Assert-CgceEqual $true (Test-Path -LiteralPath $state.paths.completed_run_marker)
+    Assert-CgceEqual $false (Test-Path -LiteralPath $state.paths.active_run_marker)
+    Assert-CgceEqual $state.inventory_checksums.restored `
+        (Get-CgceSha256 $state.paths.restored_inventory)
+    Assert-CgceDeepEqual @(
+        "000-restore-intent.json", "010-quarantine-clone.json",
+        "020-restore-original.json", "999-restore-final.json"
+    ) @(Get-ChildItem -LiteralPath $state.paths.restore_receipts -Force |
+        Sort-Object -Property Name | ForEach-Object { $_.Name })
+    Compare-CgceInventory -Expected $Fixture.OriginalInventory `
+        -Actual @(Get-CgceTreeInventory -Root $Fixture.SavedPath)
+    Compare-CgceInventory -Expected $Fixture.CapturedCloneInventory `
+        -Actual @(Get-CgceTreeInventory -Root $state.paths.quarantined_clone)
+    Compare-CgceInventory -Expected $Fixture.OriginalInventory `
+        -Actual @(Get-CgceTreeInventory -Root $state.paths.backup_saved)
+    $restored = Read-CgceInventory -Path $state.paths.restored_inventory `
+        -ExpectedKind "restored"
+    Compare-CgceInventory -Expected $Fixture.OriginalInventory `
+        -Actual @($restored.entries)
+    Assert-CgceEqual 0 @(Assert-CgceInventoryProbeRestored `
+        -Paths $state.paths -RunDirectory $state.paths.run_directory `
+        -RunId $Fixture.RunId `
+        -ExpectedFinalReceiptChecksum $state.probe_receipt_checksum).Count
+}
+
 Invoke-CgceTest "restore bootstrap rejects oversized genesis and manifest before import" {
     foreach ($case in @(
         [pscustomobject]@{ Name = "genesis"; Rebind = $false },
@@ -2701,6 +2735,7 @@ Invoke-CgceTest "restore bootstrap accepts relocated byte-identical handoff" {
         Assert-CgceRestoreTerminal `
             -Result $result -ExitCode 0 `
             -Line "CGCE_WINDOWS_DISCOVERY_OK RESTORED $($fixture.RunId)"
+        Assert-CgceRestoredFixture $fixture
         $state = Read-CgceRunState -RunRoot $fixture.RunRoot -RunId $fixture.RunId
         Assert-CgceEqual "RESTORED" $state.phase
         Assert-CgceEqual $state.inventory_checksums.restored `
@@ -2951,6 +2986,7 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
             Assert-CgceRestoreTerminal `
                 -Result $second -ExitCode 0 `
                 -Line "CGCE_WINDOWS_DISCOVERY_OK RESTORED $($fixture.RunId)"
+            Assert-CgceRestoredFixture $fixture
         } finally {
             Remove-Item -LiteralPath $fixture.Base -Recurse -Force
         }
