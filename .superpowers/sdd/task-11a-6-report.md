@@ -259,6 +259,150 @@ zsh:1: command not found: powershell.exe
 `git diff --check` passed. This is not a Windows behavioral pass; an actual
 Windows PowerShell 5.1 run is still required after the production slice.
 
+## GREEN implementation closure
+
+The RED-only scope statements above describe the committed test slices that
+preceded implementation. Task 11A.6 production code is now implemented, while
+the elevated Windows PowerShell 5.1 behavior gate remains pending.
+
+### Implemented production surfaces
+
+- `CgceDiscovery.Contract.psm1` now owns the shared `CGCE-TREE-1` digest and
+  the three output-free, fixed-purpose recovery state writers:
+  `Write-CgceRecoveryRunState`, `Block-CgceRecoveryRunState`, and
+  `Complete-CgceRecoveryRunState`.
+- Contract independently validates the exact source preimage, process and
+  listener inactivity, durable process-receipt identities, manual barriers,
+  the complete production recovery journal, probe restoration authority, and
+  the original/restored/live inventory equality before a state CAS.
+- `CgceDiscovery.Files.psm1` now exports the read-only
+  `Assert-CgceRecoveryMatrix`. It freezes the three allowed cases, two exact
+  operations, phase/case matrix, intent-bound resume positions, receipt
+  prefix, same-volume move pairs, and no-overwrite quarantine authority.
+- `CgceDiscovery.Runtime.psm1` now exports the output-free, read-only
+  `Assert-CgceInventoryProbeRestored`. Probe restoration rechecks fresh
+  state-bound process, port, marker, and manual-barrier authority immediately
+  before restore-root creation, intent publication, every operation, every
+  operation receipt, and the final receipt. Its completed path invokes the
+  read-only validator and performs no repair.
+- `Restore-CgceProduction.ps1` now provides the administrator-only recovery
+  entry point. Its built-in-only bootstrap verifies the bounded strict-UTF-8
+  genesis and manifest before imports, its own leaf and the exact four module
+  leaves, no-reparse origins, module origins before and after import,
+  relocation identity, and both-direction handoff/RunRoot separation.
+- The entry point writes the exact `000/010/020/999` no-overwrite journal,
+  unconditionally restores or disproves probe residue, publishes and validates
+  the restored inventory, completes the state with a checksum CAS, and moves
+  the active marker only after fresh completion and inactivity validation.
+  Every declared crash boundary resumes deterministically; completed-only
+  replay validates all authority and writes nothing.
+- Six Contract test strings and two Files test strings use `${name}:`
+  interpolation so the test source parses unambiguously on PowerShell.
+
+No client artifact, save file, mutation implementation, Gate A acceptance, or
+release claim was added. The user-owned `.superpowers/sdd/progress.md` remains
+untouched.
+
+### Portable GREEN verification
+
+All commands below ran from the Task 11A worktree on macOS.
+
+```text
+/private/tmp/cgce-pwsh-7.6.4/pwsh -NoProfile \
+  -File /private/tmp/cgce-parse-all.ps1 -Root .
+```
+
+Result:
+
+```text
+POWERSHELL_PARSE_OK
+```
+
+This is an official PowerShell 7.6.4 ARM64 parser check, not a Windows
+PowerShell 5.1 behavior result.
+
+The temporary Contract, Files, and entry-point adapters exercised only
+platform-neutral JSON, checksum, matrix, journal, CAS, filesystem, and replay
+behavior:
+
+```text
+SMOKE_OK block=False revision=2
+SMOKE_OK block=True revision=3
+PROBE_SMOKE_OK
+
+FILES_FRESH_OK phase=CREATED case=UNCHANGED_ORIGINAL
+FILES_FRESH_OK phase=BACKUP_VERIFIED case=NO_ACTIVE_AND_INACTIVE_ORIGINAL
+FILES_FRESH_OK phase=ORIGINAL_DEACTIVATED case=CLONE_AND_INACTIVE_ORIGINAL
+FILES_FRESH_OK phase=CLONE_ACTIVE case=CLONE_AND_INACTIVE_ORIGINAL
+FILES_RESUME_OK
+
+RESTORE_ENTRYPOINT_SMOKE_OK case=unchanged
+RESTORE_ENTRYPOINT_SMOKE_OK case=clone
+RESTORE_ENTRYPOINT_SMOKE_OK case=probe
+```
+
+The `probe` case combines a real public Runtime
+`Enable-CgceInventoryProbe` authority with the production entry-point flow. It
+covered clone quarantine, original restoration, the complete nine-operation
+probe restore chain, read-only probe completion validation, production
+`000/010/020/999`, RESTORED CAS, marker completion, and byte-unchanged replay.
+The adapters replace Windows-only path, process, port, and robocopy behavior,
+so these results do not certify those Windows boundaries.
+
+```text
+./scripts/run-tests.sh
+```
+
+Result: exit `0`; the complete Lua suite passed, including all seven Windows
+discovery portable contract checks.
+
+```text
+./scripts/verify-package.sh discovery
+```
+
+Result:
+
+```text
+DISCOVERY_PACKAGE_VERIFIED
+```
+
+`git diff --check` also passed.
+
+### Required Windows gate
+
+The required post-implementation command was attempted again exactly:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File \
+  .\tests\windows\Run-CgceDiscoveryTests.ps1
+```
+
+Result: exit `127` because this macOS host has no Windows PowerShell:
+
+```text
+zsh:1: command not found: powershell.exe
+```
+
+Therefore the correct status is **code complete, Windows verification
+pending**. Task 11A.6 must not be reported as tool-complete until the full
+suite reports `failures=0` from an elevated Windows PowerShell 5.1 session.
+
+### Final implementation review
+
+- Rechecked every mutation boundary against the immutable intent and fresh
+  state-derived activity/manual-barrier guard.
+- Rechecked all allowed fresh and resume layouts, including move-completed
+  before-receipt states and completed-marker replay.
+- Rechecked that completion CAS validates rather than creates or repairs
+  filesystem and journal authority.
+- Rechecked exact public exports and unchanged public Runtime restore
+  parameters; no skip, bypass, caller boolean, or generic recovery callback
+  was added.
+- Rechecked terminal behavior: one stdout line, exit `0` or `1`, no catch
+  rethrow, and lock disposal in `finally`.
+- Rechecked the diff for unrelated changes and kept the user-owned progress
+  file outside the implementation scope.
+
 ### Static self-review
 
 - Reviewed the changed tests for PowerShell 5.1 compatibility: no ternary,

@@ -1365,7 +1365,7 @@ Invoke-CgceTest "recovery matrix resumes only intent-bound before or after state
                     }
                 }
             } catch {
-                throw "CGCE-TEST $($case.Selected) resume $position: $($_.Exception.Message)"
+                throw "CGCE-TEST $($case.Selected) resume ${position}: $($_.Exception.Message)"
             } finally {
                 Remove-Item -LiteralPath $fixture.Root -Recurse -Force
             }
@@ -1481,7 +1481,7 @@ Invoke-CgceTest "recovery matrix rejects invalid resume authority without mutati
                 $before `
                 (Get-CgceFilesRecoverySnapshot $fixture)
         } catch {
-            throw "CGCE-TEST resume rejection $case: $($_.Exception.Message)"
+            throw "CGCE-TEST resume rejection ${case}: $($_.Exception.Message)"
         } finally {
             Remove-Item -LiteralPath $fixture.Root -Recurse -Force
         }

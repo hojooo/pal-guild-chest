@@ -1031,6 +1031,932 @@ function Move-CgceDirectoryNoOverwrite([string]$Source, [string]$Destination) {
     }
 }
 
+# This classifier is intentionally read-only. It freezes the initial
+# production layout or validates a journal-bound resume position. It never
+# creates a directory, inventory, receipt, or quarantine target.
+function New-CgceFilesRecoveryAbsentState {
+    return [pscustomobject][ordered]@{
+        artifact_type = "DIRECTORY"
+        present = $false
+        length = $null
+        sha256 = $null
+        tree_sha256 = $null
+    }
+}
+
+function New-CgceFilesRecoveryPresentState([string]$TreeSha256) {
+    if ($TreeSha256 -cnotmatch '^[0-9a-f]{64}\z') {
+        throw "CGCE-OPS-MANUAL-RECOVERY invalid directory tree checksum"
+    }
+    return [pscustomobject][ordered]@{
+        artifact_type = "DIRECTORY"
+        present = $true
+        length = $null
+        sha256 = $null
+        tree_sha256 = $TreeSha256
+    }
+}
+
+function New-CgceFilesRecoveryDirectoryState([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return New-CgceFilesRecoveryAbsentState
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "CGCE-OPS-MANUAL-RECOVERY recovery artifact is not a directory"
+    }
+    Assert-CgceNoReparseInPath -Path $Path
+    Assert-CgceTreeHasNoReparsePoints -Root $Path
+    $entries = @(Get-CgceTreeInventory -Root $Path)
+    return New-CgceFilesRecoveryPresentState `
+        (Get-CgceInventoryTreeSha256 -Entries $entries)
+}
+
+function Assert-CgceFilesRecoveryExactKeys(
+    $Value,
+    [string[]]$Expected
+) {
+    if ($null -eq $Value -or $Value -is [string]) {
+        throw "CGCE-OPS-MANUAL-RECOVERY object required"
+    }
+    $actual = @($Value.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($actual.Count -ne $Expected.Count) {
+        throw "CGCE-OPS-MANUAL-RECOVERY exact key set required"
+    }
+    for ($index = 0; $index -lt $Expected.Count; $index += 1) {
+        if ($actual[$index] -cne $Expected[$index]) {
+            throw "CGCE-OPS-MANUAL-RECOVERY exact key order required"
+        }
+    }
+}
+
+function Test-CgceFilesRecoveryInteger(
+    $Value,
+    [int64]$Minimum,
+    [int64]$Maximum
+) {
+    if ($null -eq $Value -or $Value -is [bool]) { return $false }
+    $typeCode = [Type]::GetTypeCode($Value.GetType())
+    if (@(
+            [TypeCode]::SByte,
+            [TypeCode]::Byte,
+            [TypeCode]::Int16,
+            [TypeCode]::UInt16,
+            [TypeCode]::Int32,
+            [TypeCode]::UInt32,
+            [TypeCode]::Int64,
+            [TypeCode]::UInt64,
+            [TypeCode]::Decimal
+        ) -notcontains $typeCode) {
+        return $false
+    }
+    try {
+        $number = [decimal]$Value
+        return [decimal]::Truncate($number) -eq $number -and
+            $number -ge [decimal]$Minimum -and
+            $number -le [decimal]$Maximum
+    } catch {
+        return $false
+    }
+}
+
+function Test-CgceFilesRecoveryUtc($Value) {
+    if ($Value -isnot [string]) { return $false }
+    $parsed = [DateTime]::MinValue
+    return [DateTime]::TryParseExact(
+        $Value,
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal -bor
+            [Globalization.DateTimeStyles]::AdjustToUniversal,
+        [ref]$parsed
+    )
+}
+
+function Test-CgceFilesRecoveryChecksum($Value) {
+    return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}\z'
+}
+
+function Get-CgceFilesRecoveryTextSha256([string]$Text) {
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString(
+            $algorithm.ComputeHash($encoding.GetBytes($Text))
+        )).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Test-CgceFilesRecoveryNumericValue($Value) {
+    if ($null -eq $Value -or $Value -is [bool]) { return $false }
+    return @(
+        [TypeCode]::SByte,
+        [TypeCode]::Byte,
+        [TypeCode]::Int16,
+        [TypeCode]::UInt16,
+        [TypeCode]::Int32,
+        [TypeCode]::UInt32,
+        [TypeCode]::Int64,
+        [TypeCode]::UInt64,
+        [TypeCode]::Single,
+        [TypeCode]::Double,
+        [TypeCode]::Decimal
+    ) -contains [Type]::GetTypeCode($Value.GetType())
+}
+
+function Test-CgceFilesRecoveryEqual($Left, $Right) {
+    if ($null -eq $Left -or $null -eq $Right) {
+        return $null -eq $Left -and $null -eq $Right
+    }
+    $leftArray = $Left -is [System.Array]
+    $rightArray = $Right -is [System.Array]
+    if ($leftArray -or $rightArray) {
+        if (-not ($leftArray -and $rightArray) -or
+            @($Left).Count -ne @($Right).Count) {
+            return $false
+        }
+        for ($index = 0; $index -lt @($Left).Count; $index += 1) {
+            if (-not (Test-CgceFilesRecoveryEqual `
+                    @($Left)[$index] `
+                    @($Right)[$index])) {
+                return $false
+            }
+        }
+        return $true
+    }
+    $leftNumber = Test-CgceFilesRecoveryNumericValue $Left
+    $rightNumber = Test-CgceFilesRecoveryNumericValue $Right
+    if ($leftNumber -or $rightNumber) {
+        if (-not ($leftNumber -and $rightNumber)) { return $false }
+        try {
+            return [decimal]$Left -eq [decimal]$Right
+        } catch {
+            return $false
+        }
+    }
+    if ($Left -is [string] -or $Right -is [string]) {
+        return $Left -is [string] -and
+            $Right -is [string] -and
+            $Left -ceq $Right
+    }
+    if ($Left -is [bool] -or $Right -is [bool]) {
+        return $Left -is [bool] -and
+            $Right -is [bool] -and
+            $Left -eq $Right
+    }
+    $leftNames = @(
+        $Left.PSObject.Properties |
+            ForEach-Object { $_.Name }
+    )
+    $rightNames = @(
+        $Right.PSObject.Properties |
+            ForEach-Object { $_.Name }
+    )
+    if ($leftNames.Count -ne $rightNames.Count) { return $false }
+    for ($index = 0; $index -lt $leftNames.Count; $index += 1) {
+        if ($leftNames[$index] -cne $rightNames[$index] -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $Left.($leftNames[$index]) `
+                $Right.($rightNames[$index]))) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-CgceFilesRecoveryPathEqual(
+    [string]$Left,
+    [string]$Right
+) {
+    $canonicalLeft = Resolve-CgceCanonicalPath -Path $Left -MustExist $false
+    $canonicalRight = Resolve-CgceCanonicalPath -Path $Right -MustExist $false
+    return $canonicalLeft.Equals(
+        $canonicalRight,
+        [StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Assert-CgceFilesRecoveryArtifact($Value) {
+    Assert-CgceFilesRecoveryExactKeys $Value @(
+        "artifact_type", "present", "length", "sha256", "tree_sha256"
+    )
+    if ($Value.artifact_type -cne "DIRECTORY" -or
+        $Value.present -isnot [bool] -or
+        $null -ne $Value.length -or
+        $null -ne $Value.sha256 -or
+        ($Value.present -and
+            -not (Test-CgceFilesRecoveryChecksum $Value.tree_sha256)) -or
+        (-not $Value.present -and $null -ne $Value.tree_sha256)) {
+        throw "CGCE-OPS-MANUAL-RECOVERY invalid recovery artifact state"
+    }
+}
+
+function Assert-CgceFilesRecoveryStatePair($Pair) {
+    Assert-CgceFilesRecoveryExactKeys $Pair @("source", "destination")
+    Assert-CgceFilesRecoveryArtifact $Pair.source
+    Assert-CgceFilesRecoveryArtifact $Pair.destination
+}
+
+function Assert-CgceFilesRecoveryErrorArray($Errors) {
+    if ($Errors -isnot [System.Array]) {
+        throw "CGCE-OPS-MANUAL-RECOVERY source errors must be an array"
+    }
+    foreach ($record in @($Errors)) {
+        Assert-CgceFilesRecoveryExactKeys $record @("code", "at_utc")
+        if ($record.code -isnot [string] -or
+            $record.code -cnotmatch '^CGCE-OPS-[A-Z0-9-]+\z' -or
+            -not (Test-CgceFilesRecoveryUtc $record.at_utc)) {
+            throw "CGCE-OPS-MANUAL-RECOVERY invalid source error"
+        }
+    }
+}
+
+function New-CgceFilesRecoverySteps(
+    $Paths,
+    [string]$SelectedCase,
+    $Original,
+    $Clone,
+    $Absent
+) {
+    switch ($SelectedCase) {
+        "UNCHANGED_ORIGINAL" {
+            return [object[]]@(
+                [pscustomobject][ordered]@{
+                    sequence = 10
+                    step = "QUARANTINE_CLONE"
+                    operation = "VERIFY_RESTORED"
+                    source_path = $Paths.active_saved
+                    destination_path = $Paths.quarantined_clone
+                    before_state = [pscustomobject][ordered]@{
+                        source = $Original; destination = $Absent
+                    }
+                    after_state = [pscustomobject][ordered]@{
+                        source = $Original; destination = $Absent
+                    }
+                },
+                [pscustomobject][ordered]@{
+                    sequence = 20
+                    step = "RESTORE_ORIGINAL"
+                    operation = "VERIFY_RESTORED"
+                    source_path = $Paths.inactive_original
+                    destination_path = $Paths.active_saved
+                    before_state = [pscustomobject][ordered]@{
+                        source = $Absent; destination = $Original
+                    }
+                    after_state = [pscustomobject][ordered]@{
+                        source = $Absent; destination = $Original
+                    }
+                }
+            )
+        }
+        "NO_ACTIVE_AND_INACTIVE_ORIGINAL" {
+            return [object[]]@(
+                [pscustomobject][ordered]@{
+                    sequence = 10
+                    step = "QUARANTINE_CLONE"
+                    operation = "VERIFY_ABSENT"
+                    source_path = $Paths.active_saved
+                    destination_path = $Paths.quarantined_clone
+                    before_state = [pscustomobject][ordered]@{
+                        source = $Absent; destination = $Absent
+                    }
+                    after_state = [pscustomobject][ordered]@{
+                        source = $Absent; destination = $Absent
+                    }
+                },
+                [pscustomobject][ordered]@{
+                    sequence = 20
+                    step = "RESTORE_ORIGINAL"
+                    operation = "MOVE_DIRECTORY"
+                    source_path = $Paths.inactive_original
+                    destination_path = $Paths.active_saved
+                    before_state = [pscustomobject][ordered]@{
+                        source = $Original; destination = $Absent
+                    }
+                    after_state = [pscustomobject][ordered]@{
+                        source = $Absent; destination = $Original
+                    }
+                }
+            )
+        }
+        "CLONE_AND_INACTIVE_ORIGINAL" {
+            if ($null -eq $Clone) {
+                throw "CGCE-OPS-MANUAL-RECOVERY clone authority is missing"
+            }
+            return [object[]]@(
+                [pscustomobject][ordered]@{
+                    sequence = 10
+                    step = "QUARANTINE_CLONE"
+                    operation = "MOVE_DIRECTORY"
+                    source_path = $Paths.active_saved
+                    destination_path = $Paths.quarantined_clone
+                    before_state = [pscustomobject][ordered]@{
+                        source = $Clone; destination = $Absent
+                    }
+                    after_state = [pscustomobject][ordered]@{
+                        source = $Absent; destination = $Clone
+                    }
+                },
+                [pscustomobject][ordered]@{
+                    sequence = 20
+                    step = "RESTORE_ORIGINAL"
+                    operation = "MOVE_DIRECTORY"
+                    source_path = $Paths.inactive_original
+                    destination_path = $Paths.active_saved
+                    before_state = [pscustomobject][ordered]@{
+                        source = $Original; destination = $Absent
+                    }
+                    after_state = [pscustomobject][ordered]@{
+                        source = $Absent; destination = $Original
+                    }
+                }
+            )
+        }
+        default {
+            throw "CGCE-OPS-MANUAL-RECOVERY unsupported recovery case"
+        }
+    }
+}
+
+function Assert-CgceFilesRecoveryPaths($State) {
+    foreach ($name in @(
+            "active_saved", "inactive_original", "quarantined_clone"
+        )) {
+        $null = Resolve-CgceCanonicalPath `
+            -Path $State.paths.$name `
+            -MustExist $false
+        Assert-CgceNoReparseInPath -Path $State.paths.$name
+    }
+    Assert-CgceDistinctRoots -Paths @(
+        $State.paths.active_saved,
+        $State.paths.inactive_original,
+        $State.paths.quarantined_clone
+    )
+    $volume = $null
+    foreach ($name in @(
+            "active_saved", "inactive_original", "quarantined_clone"
+        )) {
+        $canonical = Resolve-CgceCanonicalPath `
+            -Path $State.paths.$name `
+            -MustExist $false
+        $current = [IO.Path]::GetPathRoot($canonical)
+        if ($null -eq $volume) {
+            $volume = $current
+        } elseif (-not $volume.Equals(
+                $current,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "CGCE-OPS-MANUAL-RECOVERY recovery move crosses volumes"
+        }
+    }
+}
+
+function Get-CgceFilesRecoveryInventoryState(
+    $State,
+    [string]$Name,
+    [bool]$RequireStateChecksum
+) {
+    $path = $State.paths.($Name + "_inventory")
+    $entries = @(Read-CgceInventory -Path $path -ExpectedKind $Name)
+    $checksum = Get-CgceSha256 -Path $path
+    $recorded = $State.inventory_checksums.$Name
+    if (($RequireStateChecksum -and
+            -not (Test-CgceFilesRecoveryChecksum $recorded)) -or
+        ($null -ne $recorded -and $checksum -cne $recorded)) {
+        throw "CGCE-OPS-MANUAL-RECOVERY inventory checksum drift"
+    }
+    return New-CgceFilesRecoveryPresentState `
+        (Get-CgceInventoryTreeSha256 -Entries $entries)
+}
+
+function Test-CgceFilesRecoveryCaseAllowed(
+    [string]$Phase,
+    [string]$SelectedCase
+) {
+    $allowed = @{
+        CREATED = @("UNCHANGED_ORIGINAL")
+        BACKUP_VERIFIED = @(
+            "UNCHANGED_ORIGINAL",
+            "NO_ACTIVE_AND_INACTIVE_ORIGINAL"
+        )
+        ORIGINAL_DEACTIVATED = @(
+            "NO_ACTIVE_AND_INACTIVE_ORIGINAL",
+            "CLONE_AND_INACTIVE_ORIGINAL"
+        )
+        CLONE_ACTIVE = @("CLONE_AND_INACTIVE_ORIGINAL")
+        PROBE_STAGED = @("CLONE_AND_INACTIVE_ORIGINAL")
+        RUNNING = @("CLONE_AND_INACTIVE_ORIGINAL")
+        CAPTURED = @("CLONE_AND_INACTIVE_ORIGINAL")
+    }
+    return $allowed.ContainsKey($Phase) -and
+        $allowed[$Phase] -ccontains $SelectedCase
+}
+
+function Assert-CgceFilesRecoveryRestoringPreimage($State, $Intent) {
+    $sourceRevision = [int64]$Intent.source_revision
+    $currentRevision = [int64]$State.revision
+    $legal = $false
+    if ($currentRevision -eq $sourceRevision + 1 -and
+        $State.outcome -ceq $Intent.source_outcome -and
+        (Test-CgceFilesRecoveryEqual $State.errors $Intent.source_errors)) {
+        $legal = $true
+    } elseif ($currentRevision -eq $sourceRevision + 2 -and
+        $State.outcome -ceq "BLOCKED") {
+        $sourceErrors = @($Intent.source_errors)
+        $currentErrors = @($State.errors)
+        if ($currentErrors.Count -eq $sourceErrors.Count + 1) {
+            $legal = $true
+            for ($index = 0; $index -lt $sourceErrors.Count; $index += 1) {
+                if (-not (Test-CgceFilesRecoveryEqual `
+                        $sourceErrors[$index] `
+                        $currentErrors[$index])) {
+                    $legal = $false
+                }
+            }
+            if ($legal) {
+                Assert-CgceFilesRecoveryExactKeys `
+                    $currentErrors[-1] `
+                    @("code", "at_utc")
+                if ($currentErrors[-1].code -cnotmatch
+                        '^CGCE-OPS-[A-Z0-9-]+\z' -or
+                    -not (Test-CgceFilesRecoveryUtc `
+                        $currentErrors[-1].at_utc)) {
+                    $legal = $false
+                }
+            }
+        }
+    }
+    if (-not $legal) {
+        throw "CGCE-OPS-MANUAL-RECOVERY RESTORING state delta drift"
+    }
+
+    $preimage = New-Object PSObject
+    foreach ($property in @($State.PSObject.Properties)) {
+        $preimage | Add-Member `
+            -MemberType NoteProperty `
+            -Name $property.Name `
+            -Value $property.Value
+    }
+    $preimage.phase = $Intent.source_phase
+    $preimage.outcome = $Intent.source_outcome
+    $preimage.revision = [int64]$Intent.source_revision
+    $preimage.updated_at_utc = $Intent.source_updated_at_utc
+    $preimage.errors = [object[]]@($Intent.source_errors)
+    $matched = $false
+    foreach ($text in @(
+            ($preimage | ConvertTo-Json -Depth 12),
+            ($preimage | ConvertTo-Json -Depth 12 -Compress)
+        )) {
+        if ((Get-CgceFilesRecoveryTextSha256 $text) -ceq
+            $Intent.source_state_sha256) {
+            $matched = $true
+        }
+    }
+    if (-not $matched) {
+        throw "CGCE-OPS-MANUAL-RECOVERY source preimage checksum drift"
+    }
+}
+
+function Assert-CgceFilesRecoveryIntentShape(
+    $State,
+    $Intent,
+    $Original,
+    $Clone
+) {
+    Assert-CgceFilesRecoveryExactKeys $Intent @(
+        "schema_version", "kind", "run_id", "sequence", "created_at_utc",
+        "source_state_sha256", "source_phase", "source_outcome",
+        "source_revision", "source_updated_at_utc", "source_errors",
+        "genesis_state_sha256", "original_inventory_sha256",
+        "original_tree_sha256", "selected_case", "paths", "steps"
+    )
+    if ($Intent.schema_version -cne "1.0" -or
+        $Intent.kind -cne "cgce_windows_discovery_restore_intent" -or
+        $Intent.run_id -cne $State.run_id -or
+        -not (Test-CgceFilesRecoveryInteger $Intent.sequence 0 0) -or
+        -not (Test-CgceFilesRecoveryUtc $Intent.created_at_utc) -or
+        -not (Test-CgceFilesRecoveryUtc $Intent.source_updated_at_utc) -or
+        -not (Test-CgceFilesRecoveryChecksum `
+            $Intent.source_state_sha256) -or
+        -not (Test-CgceFilesRecoveryChecksum `
+            $Intent.genesis_state_sha256) -or
+        -not (Test-CgceFilesRecoveryChecksum `
+            $Intent.original_inventory_sha256) -or
+        -not (Test-CgceFilesRecoveryChecksum `
+            $Intent.original_tree_sha256) -or
+        -not (Test-CgceFilesRecoveryInteger `
+            $Intent.source_revision 0 ([int64]::MaxValue)) -or
+        @("ACTIVE", "BLOCKED") -cnotcontains $Intent.source_outcome -or
+        -not (Test-CgceFilesRecoveryCaseAllowed `
+            $Intent.source_phase `
+            $Intent.selected_case)) {
+        throw "CGCE-OPS-MANUAL-RECOVERY invalid recovery intent"
+    }
+    Assert-CgceFilesRecoveryErrorArray $Intent.source_errors
+
+    Assert-CgceFilesRecoveryExactKeys $Intent.paths @(
+        "active_saved", "inactive_original", "quarantined_clone",
+        "original_inventory", "restored_inventory", "restore_receipts",
+        "probe_restore_final_receipt"
+    )
+    foreach ($name in @(
+            "active_saved", "inactive_original", "quarantined_clone",
+            "original_inventory", "restored_inventory", "restore_receipts"
+        )) {
+        if ($Intent.paths.$name -isnot [string] -or
+            -not (Test-CgceFilesRecoveryPathEqual `
+                $Intent.paths.$name `
+                $State.paths.$name)) {
+            throw "CGCE-OPS-MANUAL-RECOVERY intent path mismatch"
+        }
+    }
+    $expectedProbeFinal = Join-Path `
+        (Join-Path $State.paths.probe_receipts "restore") `
+        "999-probe-restore-final.json"
+    if (-not (Test-CgceFilesRecoveryPathEqual `
+            $Intent.paths.probe_restore_final_receipt `
+            $expectedProbeFinal)) {
+        throw "CGCE-OPS-MANUAL-RECOVERY probe final path mismatch"
+    }
+
+    if ((Get-CgceSha256 $State.paths.genesis_state) -cne
+            $Intent.genesis_state_sha256 -or
+        $State.inventory_checksums.original -cne
+            $Intent.original_inventory_sha256 -or
+        $Original.tree_sha256 -cne $Intent.original_tree_sha256) {
+        throw "CGCE-OPS-MANUAL-RECOVERY immutable recovery authority drift"
+    }
+
+    if ($State.phase -ceq $Intent.source_phase) {
+        if ((Get-CgceSha256 $State.paths.state) -cne
+                $Intent.source_state_sha256 -or
+            $State.outcome -cne $Intent.source_outcome -or
+            [int64]$State.revision -ne [int64]$Intent.source_revision -or
+            $State.updated_at_utc -cne $Intent.source_updated_at_utc -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $State.errors `
+                $Intent.source_errors)) {
+            throw "CGCE-OPS-MANUAL-RECOVERY source state authority drift"
+        }
+    } elseif ($State.phase -ceq "RESTORING") {
+        Assert-CgceFilesRecoveryRestoringPreimage $State $Intent
+    } else {
+        throw "CGCE-OPS-MANUAL-RECOVERY state/intent phase drift"
+    }
+
+    if ($Intent.steps -isnot [System.Array] -or
+        @($Intent.steps).Count -ne 2) {
+        throw "CGCE-OPS-MANUAL-RECOVERY fixed recovery steps required"
+    }
+    foreach ($step in @($Intent.steps)) {
+        Assert-CgceFilesRecoveryExactKeys $step @(
+            "sequence", "step", "operation", "source_path",
+            "destination_path", "before_state", "after_state"
+        )
+        Assert-CgceFilesRecoveryStatePair $step.before_state
+        Assert-CgceFilesRecoveryStatePair $step.after_state
+    }
+    $absent = New-CgceFilesRecoveryAbsentState
+    $expected = @(New-CgceFilesRecoverySteps `
+        $State.paths `
+        $Intent.selected_case `
+        $Original `
+        $Clone `
+        $absent)
+    for ($index = 0; $index -lt 2; $index += 1) {
+        if (-not (Test-CgceFilesRecoveryEqual `
+                $expected[$index] `
+                @($Intent.steps)[$index])) {
+            throw "CGCE-OPS-MANUAL-RECOVERY intent step authority drift"
+        }
+    }
+    return [object[]]$expected
+}
+
+function Assert-CgceFilesRecoveryReceiptPrefix(
+    $State,
+    $Intent
+) {
+    $root = $State.paths.restore_receipts
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        throw "CGCE-OPS-MANUAL-RECOVERY restore receipt root missing"
+    }
+    $allowed = @(
+        "000-restore-intent.json",
+        "010-quarantine-clone.json",
+        "020-restore-original.json",
+        "999-restore-final.json"
+    )
+    foreach ($child in @(Get-ChildItem -LiteralPath $root -Force)) {
+        if ($child.PSIsContainer -or
+            $allowed -cnotcontains $child.Name) {
+            throw "CGCE-OPS-MANUAL-RECOVERY foreign recovery receipt"
+        }
+    }
+
+    $intentPath = Join-Path $root "000-restore-intent.json"
+    if (-not (Test-Path -LiteralPath $intentPath -PathType Leaf)) {
+        throw "CGCE-OPS-MANUAL-RECOVERY missing recovery intent"
+    }
+    $onDisk = Read-CgceJsonObject $intentPath
+    if (-not (Test-CgceFilesRecoveryEqual $onDisk $Intent)) {
+        throw "CGCE-OPS-MANUAL-RECOVERY intent file mismatch"
+    }
+
+    $path010 = Join-Path $root "010-quarantine-clone.json"
+    $path020 = Join-Path $root "020-restore-original.json"
+    $path999 = Join-Path $root "999-restore-final.json"
+    $has010 = Test-Path -LiteralPath $path010 -PathType Leaf
+    $has020 = Test-Path -LiteralPath $path020 -PathType Leaf
+    $has999 = Test-Path -LiteralPath $path999 -PathType Leaf
+    if (($has020 -and -not $has010) -or
+        ($has999 -and -not ($has010 -and $has020))) {
+        throw "CGCE-OPS-MANUAL-RECOVERY recovery receipt sequence gap"
+    }
+
+    $previous = Get-CgceSha256 $intentPath
+    $bindings = New-Object 'Collections.Generic.List[object]'
+    foreach ($index in 0, 1) {
+        $exists = if ($index -eq 0) { $has010 } else { $has020 }
+        if (-not $exists) { continue }
+        $step = @($Intent.steps)[$index]
+        $path = if ($index -eq 0) { $path010 } else { $path020 }
+        $receipt = Read-CgceJsonObject $path
+        Assert-CgceFilesRecoveryExactKeys $receipt @(
+            "schema_version", "kind", "run_id", "sequence", "step",
+            "operation", "source_path", "destination_path",
+            "before_state", "after_state", "previous_receipt_sha256",
+            "completed_at_utc"
+        )
+        if ($receipt.schema_version -cne "1.0" -or
+            $receipt.kind -cne
+                "cgce_windows_discovery_restore_operation" -or
+            $receipt.run_id -cne $State.run_id -or
+            -not (Test-CgceFilesRecoveryInteger `
+                $receipt.sequence `
+                ([int64]$step.sequence) `
+                ([int64]$step.sequence)) -or
+            -not (Test-CgceFilesRecoveryUtc `
+                $receipt.completed_at_utc) -or
+            $receipt.previous_receipt_sha256 -cne $previous -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $receipt.step $step.step) -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $receipt.operation $step.operation) -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $receipt.source_path $step.source_path) -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $receipt.destination_path $step.destination_path) -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $receipt.before_state $step.before_state) -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $receipt.after_state $step.after_state)) {
+            throw "CGCE-OPS-MANUAL-RECOVERY recovery receipt authority drift"
+        }
+        $previous = Get-CgceSha256 $path
+        $null = $bindings.Add([pscustomobject][ordered]@{
+            sequence = [int]$step.sequence
+            path = $path
+            sha256 = $previous
+        })
+    }
+
+    if ($has999) {
+        $final = Read-CgceJsonObject $path999
+        Assert-CgceFilesRecoveryExactKeys $final @(
+            "schema_version", "kind", "run_id", "sequence",
+            "restore_intent_sha256", "previous_receipt_sha256",
+            "operation_receipts", "probe_restore_final_receipt",
+            "original_inventory", "restored_inventory",
+            "completed_at_utc"
+        )
+        if ($final.schema_version -cne "1.0" -or
+            $final.kind -cne
+                "cgce_windows_discovery_restore_final" -or
+            $final.run_id -cne $State.run_id -or
+            -not (Test-CgceFilesRecoveryInteger `
+                $final.sequence 999 999) -or
+            $final.restore_intent_sha256 -cne
+                (Get-CgceSha256 $intentPath) -or
+            $final.previous_receipt_sha256 -cne $previous -or
+            -not (Test-CgceFilesRecoveryUtc $final.completed_at_utc) -or
+            -not (Test-CgceFilesRecoveryEqual `
+                $final.operation_receipts `
+                ([object[]]$bindings.ToArray()))) {
+            throw "CGCE-OPS-MANUAL-RECOVERY final recovery receipt drift"
+        }
+    }
+    return [pscustomobject]@{
+        has010 = $has010
+        has020 = $has020
+        has999 = $has999
+    }
+}
+
+function Get-CgceFilesRecoveryLiveLayout($Paths) {
+    return [pscustomobject][ordered]@{
+        active_saved = (
+            New-CgceFilesRecoveryDirectoryState $Paths.active_saved
+        )
+        inactive_original = (
+            New-CgceFilesRecoveryDirectoryState $Paths.inactive_original
+        )
+        quarantined_clone = (
+            New-CgceFilesRecoveryDirectoryState $Paths.quarantined_clone
+        )
+    }
+}
+
+function Get-CgceFilesRecoveryExpectedLayout(
+    [string]$SelectedCase,
+    [ValidateSet("INITIAL", "AFTER_010", "AFTER_020")]
+    [string]$Position,
+    $Original,
+    $Clone,
+    $Absent
+) {
+    if ($SelectedCase -ceq "UNCHANGED_ORIGINAL") {
+        return [pscustomobject][ordered]@{
+            active_saved = $Original
+            inactive_original = $Absent
+            quarantined_clone = $Absent
+        }
+    }
+    if ($SelectedCase -ceq "NO_ACTIVE_AND_INACTIVE_ORIGINAL") {
+        if ($Position -ceq "AFTER_020") {
+            return [pscustomobject][ordered]@{
+                active_saved = $Original
+                inactive_original = $Absent
+                quarantined_clone = $Absent
+            }
+        }
+        return [pscustomobject][ordered]@{
+            active_saved = $Absent
+            inactive_original = $Original
+            quarantined_clone = $Absent
+        }
+    }
+    if ($SelectedCase -ceq "CLONE_AND_INACTIVE_ORIGINAL") {
+        if ($Position -ceq "INITIAL") {
+            return [pscustomobject][ordered]@{
+                active_saved = $Clone
+                inactive_original = $Original
+                quarantined_clone = $Absent
+            }
+        }
+        if ($Position -ceq "AFTER_010") {
+            return [pscustomobject][ordered]@{
+                active_saved = $Absent
+                inactive_original = $Original
+                quarantined_clone = $Clone
+            }
+        }
+        return [pscustomobject][ordered]@{
+            active_saved = $Original
+            inactive_original = $Absent
+            quarantined_clone = $Clone
+        }
+    }
+    throw "CGCE-OPS-MANUAL-RECOVERY unsupported recovery case"
+}
+
+function Assert-CgceFilesRecoveryResumeLayout(
+    $State,
+    $Intent,
+    $Prefix,
+    $Original,
+    $Clone,
+    $Absent
+) {
+    $positions = if (-not $Prefix.has010) {
+        @("INITIAL", "AFTER_010")
+    } elseif (-not $Prefix.has020) {
+        @("AFTER_010", "AFTER_020")
+    } else {
+        @("AFTER_020")
+    }
+    $live = Get-CgceFilesRecoveryLiveLayout $State.paths
+    $matched = $false
+    foreach ($position in $positions) {
+        $expected = Get-CgceFilesRecoveryExpectedLayout `
+            $Intent.selected_case `
+            $position `
+            $Original `
+            $Clone `
+            $Absent
+        if (Test-CgceFilesRecoveryEqual $live $expected) {
+            $matched = $true
+        }
+    }
+    if (-not $matched) {
+        throw "CGCE-OPS-MANUAL-RECOVERY live recovery layout is not intent-bound"
+    }
+}
+
+function Assert-CgceRecoveryMatrix($State, $Intent = $null) {
+    try {
+        if ($null -eq $State -or
+            $null -eq $State.paths -or
+            $null -eq $State.inventory_checksums) {
+            throw "CGCE-OPS-MANUAL-RECOVERY invalid state"
+        }
+        Assert-CgceFilesRecoveryPaths $State
+        $original = Get-CgceFilesRecoveryInventoryState `
+            $State `
+            "original" `
+            $true
+        $absent = New-CgceFilesRecoveryAbsentState
+
+        if ($null -ne $Intent) {
+            $clone = $null
+            if ($Intent.selected_case -ceq
+                "CLONE_AND_INACTIVE_ORIGINAL") {
+                $clone = Get-CgceFilesRecoveryInventoryState `
+                    $State `
+                    "clone" `
+                    ($null -ne $State.inventory_checksums.clone)
+            }
+            $steps = @(Assert-CgceFilesRecoveryIntentShape `
+                $State `
+                $Intent `
+                $original `
+                $clone)
+            $prefix = Assert-CgceFilesRecoveryReceiptPrefix `
+                $State `
+                $Intent
+            Assert-CgceFilesRecoveryResumeLayout `
+                $State `
+                $Intent `
+                $prefix `
+                $original `
+                $clone `
+                $absent
+            return [pscustomobject][ordered]@{
+                selected_case = $Intent.selected_case
+                steps = [object[]]$steps
+            }
+        }
+
+        $live = Get-CgceFilesRecoveryLiveLayout $State.paths
+        if ($live.quarantined_clone.present) {
+            throw "CGCE-OPS-MANUAL-RECOVERY quarantine target is occupied"
+        }
+        $selectedCase = $null
+        $clone = $null
+        if ((Test-CgceFilesRecoveryEqual `
+                $live.active_saved `
+                $original) -and
+            -not $live.inactive_original.present) {
+            $selectedCase = "UNCHANGED_ORIGINAL"
+        } elseif (-not $live.active_saved.present -and
+            (Test-CgceFilesRecoveryEqual `
+                $live.inactive_original `
+                $original)) {
+            $selectedCase = "NO_ACTIVE_AND_INACTIVE_ORIGINAL"
+        } elseif ($live.active_saved.present -and
+            (Test-CgceFilesRecoveryEqual `
+                $live.inactive_original `
+                $original) -and
+            $live.active_saved.tree_sha256 -cne
+                $original.tree_sha256) {
+            $clone = Get-CgceFilesRecoveryInventoryState `
+                $State `
+                "clone" `
+                ($null -ne $State.inventory_checksums.clone)
+            if (-not (Test-CgceFilesRecoveryEqual `
+                    $live.active_saved `
+                    $clone)) {
+                throw "CGCE-OPS-MANUAL-RECOVERY live clone inventory drift"
+            }
+            $selectedCase = "CLONE_AND_INACTIVE_ORIGINAL"
+        } else {
+            throw "CGCE-OPS-MANUAL-RECOVERY ambiguous recovery layout"
+        }
+        if (-not (Test-CgceFilesRecoveryCaseAllowed `
+                $State.phase `
+                $selectedCase)) {
+            throw "CGCE-OPS-MANUAL-RECOVERY phase/layout recovery authority mismatch"
+        }
+        $steps = @(New-CgceFilesRecoverySteps `
+            $State.paths `
+            $selectedCase `
+            $original `
+            $clone `
+            $absent)
+        return [pscustomobject][ordered]@{
+            selected_case = $selectedCase
+            steps = [object[]]$steps
+        }
+    } catch {
+        if ($_.Exception.Message -cmatch
+            '^CGCE-OPS-MANUAL-RECOVERY(?: |\z)') {
+            throw
+        }
+        throw "CGCE-OPS-MANUAL-RECOVERY recovery matrix authority rejected"
+    }
+}
+
 Export-ModuleMember -Function @(
     "Resolve-CgceCanonicalPath",
     "Assert-CgceEqualCanonicalPath",
@@ -1047,5 +1973,6 @@ Export-ModuleMember -Function @(
     "Read-CgceInventory",
     "Copy-CgceFileVerified",
     "Copy-CgceTreeVerified",
-    "Move-CgceDirectoryNoOverwrite"
+    "Move-CgceDirectoryNoOverwrite",
+    "Assert-CgceRecoveryMatrix"
 )

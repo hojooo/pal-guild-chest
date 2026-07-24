@@ -12,6 +12,7 @@ $script:CgceTestRootProcessRecordSeam = $null
 $script:CgceTestProcessRecordsSeam = $null
 $script:CgceTestLaunchReceiptSeam = $null
 $script:CgceTestProcessCrashSeam = $null
+$script:CgceTestProbeRestoreMutationSeam = $null
 $script:CgceFreshModsText = "CGCEDiscoveryInventory : 1`r`n"
 $script:CgceSnapshotNames = @(
     "MODS_TXT",
@@ -1153,6 +1154,43 @@ function Invoke-CgceProbeCrash([string]$Point) {
     }
 }
 
+function Assert-CgceProbeRestoreFreshGuard(
+    $Paths,
+    [string]$RunDirectory,
+    [string]$RunId
+) {
+    $state = Read-CgceRunState `
+        -RunRoot $Paths.run_root `
+        -RunId $RunId
+    Assert-CgceRuntimePaths $state.paths $RunDirectory $RunId
+    foreach ($record in @($state.errors)) {
+        if ($record.code -ceq "CGCE-OPS-MANUAL-RECOVERY") {
+            throw "CGCE-OPS-MANUAL-RECOVERY persisted manual recovery barrier"
+        }
+    }
+    Assert-CgceRunMarker $state
+    Assert-CgceNoServerActivity `
+        -ExecutablePaths @($state.server_process_paths) `
+        -Ports @($state.listener_ports) `
+        -ReceiptRoot $state.paths.process_receipts
+}
+
+function Invoke-CgceProbeRestoreMutationGuard(
+    [string]$Point,
+    $Context
+) {
+    if ($null -eq $Context) {
+        throw "CGCE-OPS-PROBE-RECEIPT recovery guard context required"
+    }
+    if ($null -ne $script:CgceTestProbeRestoreMutationSeam) {
+        $null = & $script:CgceTestProbeRestoreMutationSeam $Point
+    }
+    Assert-CgceProbeRestoreFreshGuard `
+        $Context.paths `
+        $Context.run_directory `
+        $Context.run_id
+}
+
 function Invoke-CgceProcessCrash([string]$Point) {
     if ($null -ne $script:CgceTestProcessCrashSeam) {
         $null = & $script:CgceTestProcessCrashSeam $Point
@@ -1220,9 +1258,10 @@ function New-CgceSnapshot(
     [string]$Path
 ) {
     $state = New-CgceArtifactState -Path $Path -Type $Type
-    $entries = if ($state.present -and $Type -ceq "DIRECTORY") {
-        [object[]]@(Get-CgceTreeInventory -Root $Path)
-    } else { $null }
+    $entries = $null
+    if ($state.present -and $Type -ceq "DIRECTORY") {
+        $entries = [object[]]@(Get-CgceTreeInventory -Root $Path)
+    }
     return [pscustomobject][ordered]@{
         schema_version = "1.0"
         kind = "cgce_windows_discovery_artifact_snapshot"
@@ -1274,7 +1313,8 @@ function Write-CgceProbeOperationReceipt(
     $DestinationPath,
     $Before,
     $After,
-    [string]$Previous
+    [string]$Previous,
+    $RecoveryGuardContext = $null
 ) {
     $receipt = [pscustomobject][ordered]@{
         schema_version = "1.0"
@@ -1289,6 +1329,12 @@ function Write-CgceProbeOperationReceipt(
         after_state = $After
         previous_receipt_sha256 = $Previous
         completed_at_utc = (Get-CgceRuntimeUtcNow)
+    }
+    if ($null -ne $RecoveryGuardContext) {
+        Assert-CgceProbeRestoreFreshGuard `
+            $RecoveryGuardContext.paths `
+            $RecoveryGuardContext.run_directory `
+            $RecoveryGuardContext.run_id
     }
     return Write-CgceRuntimeJson `
         -Value $receipt -Path $Path -Code "CGCE-OPS-PROBE-RECEIPT"
@@ -2508,7 +2554,8 @@ function Invoke-CgceRestoreStep(
     [string]$Type,
     [string]$Previous,
     $ExpectedBefore,
-    $ExpectedAfter
+    $ExpectedAfter,
+    $RecoveryGuardContext
 ) {
     $padded = $Sequence.ToString("000")
     $receiptPath = Join-Path $ReceiptRoot "$padded-$($Step.ToLowerInvariant().Replace('_','-')).json"
@@ -2522,6 +2569,10 @@ function Invoke-CgceRestoreStep(
         throw "CGCE-OPS-MANUAL-RECOVERY restore live state drift"
     }
     Invoke-CgceProbeCrash "restore-before-operation-$padded"
+    Assert-CgceProbeRestoreFreshGuard `
+        $RecoveryGuardContext.paths `
+        $RecoveryGuardContext.run_directory `
+        $RecoveryGuardContext.run_id
     if (-not $operationAlreadyCompleted -and $Operation -ceq "MOVE_FILE") {
         if ($liveBefore.source.present -and -not $liveBefore.destination.present) {
             Move-CgceFileNoOverwrite $Source $Destination
@@ -2551,7 +2602,8 @@ function Invoke-CgceRestoreStep(
         -Operation $Operation -SourcePath $Source `
         -DestinationPath $Destination -Before $ExpectedBefore `
         -After $ExpectedAfter `
-        -Previous $Previous
+        -Previous $Previous `
+        -RecoveryGuardContext $RecoveryGuardContext
     Invoke-CgceProbeCrash "restore-after-receipt-$padded"
     return [pscustomobject]@{
         path = $receiptPath
@@ -2811,6 +2863,86 @@ function Read-CgceProbeIntentAuthority(
     }
 }
 
+function Assert-CgceInventoryProbeRestored(
+    $Paths,
+    [string]$RunDirectory,
+    [string]$RunId,
+    [string]$ExpectedFinalReceiptChecksum = ""
+) {
+    Assert-CgceRuntimePaths $Paths $RunDirectory $RunId
+    if (-not (Test-Path -LiteralPath $Paths.probe_intent -PathType Leaf)) {
+        if (-not [string]::IsNullOrEmpty(
+                $ExpectedFinalReceiptChecksum
+            )) {
+            throw "CGCE-OPS-PROBE-RECEIPT expected probe authority is missing"
+        }
+        Assert-CgceNoProbeResidueWithoutIntent $Paths
+        return
+    }
+
+    $intentAuthority = Read-CgceProbeIntentAuthority `
+        $Paths `
+        $RunDirectory `
+        $RunId
+    $intent = $intentAuthority.intent
+    $snapshots = $intentAuthority.snapshots
+    $stage = Read-CgceProbeStageAuthority `
+        $Paths `
+        $RunId `
+        $intent `
+        $snapshots
+    if (-not [string]::IsNullOrEmpty(
+            $ExpectedFinalReceiptChecksum
+        ) -and
+        ($null -eq $stage.final_checksum -or
+            $stage.final_checksum -cne
+                $ExpectedFinalReceiptChecksum)) {
+        throw "CGCE-OPS-PROBE-RECEIPT expected final receipt mismatch"
+    }
+
+    $restoreRoot = $intent.paths.probe_restore_receipts
+    if (-not (Test-Path -LiteralPath $restoreRoot -PathType Container)) {
+        throw "CGCE-OPS-PROBE-RECEIPT probe restore journal is missing"
+    }
+    $prefix = Read-CgceProbeRestorePrefix `
+        $restoreRoot `
+        $RunId `
+        $Paths `
+        $intent.paths
+    Assert-CgceProbePathObjectsEqual `
+        $intent.paths `
+        $prefix.intent.paths
+    if ($prefix.intent.stage_intent_sha256 -cne
+            $intentAuthority.checksum -or
+        $prefix.intent.stage_final_sha256 -ne
+            $stage.final_checksum -or
+        [int]$prefix.intent.stage_chain_last_sequence -ne
+            [int]$stage.last_sequence -or
+        $prefix.intent.stage_chain_last_sha256 -cne
+            $stage.last_checksum) {
+        throw "CGCE-OPS-PROBE-RECEIPT restore intent stage binding drift"
+    }
+    $plans = [object[]]@($prefix.intent.plans)
+    if ($plans[0].before_present -ne $false -or
+        $plans[1].before_present -ne $true -or
+        $plans[2].before_present -ne
+            [bool]$snapshots.OBJECT_DUMP.present -or
+        $plans[3].before_present -ne
+            [bool]$snapshots.CXX_HEADER_DUMP.present -or
+        $plans[4].before_present -ne
+            [bool]$snapshots.UE4SS_LOG.present) {
+        throw "CGCE-OPS-PROBE-RECEIPT restore intent snapshot binding drift"
+    }
+    Assert-CgceRestorePlansBoundToSnapshots `
+        $plans `
+        $snapshots `
+        $true
+    if (-not $prefix.complete) {
+        throw "CGCE-OPS-PROBE-RECEIPT probe restore journal is incomplete"
+    }
+    Assert-CgceRestoreTerminalMatrix $plans $Paths
+}
+
 function Restore-CgceInventoryProbe(
     $Paths,
     [string]$RunDirectory,
@@ -2822,6 +2954,15 @@ function Restore-CgceInventoryProbe(
         Assert-CgceNoProbeResidueWithoutIntent $Paths
         return
     }
+    $guardContext = [pscustomobject]@{
+        paths = $Paths
+        run_directory = $RunDirectory
+        run_id = $RunId
+    }
+    Assert-CgceProbeRestoreFreshGuard `
+        $Paths `
+        $RunDirectory `
+        $RunId
     $intentAuthority = Read-CgceProbeIntentAuthority `
         $Paths $RunDirectory $RunId
     $intent = $intentAuthority.intent
@@ -2838,6 +2979,9 @@ function Restore-CgceInventoryProbe(
     $restoreRoot = $intent.paths.probe_restore_receipts
     $resumePrefix = $null
     if (-not (Test-Path -LiteralPath $restoreRoot)) {
+        Invoke-CgceProbeRestoreMutationGuard `
+            "before-restore-root" `
+            $guardContext
         [IO.Directory]::CreateDirectory($restoreRoot) | Out-Null
     } elseif (@(Get-ChildItem -LiteralPath $restoreRoot -Force).Count -gt 0) {
         $resumePrefix = Read-CgceProbeRestorePrefix `
@@ -2866,7 +3010,11 @@ function Restore-CgceInventoryProbe(
         Assert-CgceRestorePlansBoundToSnapshots `
             $resumePlans $snapshots $true
         if ($resumePrefix.complete) {
-            Assert-CgceRestoreTerminalMatrix $resumePlans $Paths
+            Assert-CgceInventoryProbeRestored `
+                -Paths $Paths `
+                -RunDirectory $RunDirectory `
+                -RunId $RunId `
+                -ExpectedFinalReceiptChecksum $ExpectedFinalReceiptChecksum
             return
         }
     }
@@ -2933,6 +3081,9 @@ function Restore-CgceInventoryProbe(
     }
     $restoreIntentPath = Join-Path $restoreRoot "000-probe-restore-intent.json"
     if ($null -eq $resumePrefix) {
+        Invoke-CgceProbeRestoreMutationGuard `
+            "before-restore-intent" `
+            $guardContext
         $restoreIntentWrite = Write-CgceRuntimeJson `
             $restoreIntent $restoreIntentPath "CGCE-OPS-PROBE-RECEIPT"
         $previous = $restoreIntentWrite.checksum
@@ -2960,7 +3111,8 @@ function Restore-CgceInventoryProbe(
             $restoreRoot $RunId $Definition.sequence $Definition.step `
             $Definition.operation $Definition.source $Definition.destination `
             $Definition.type $script:restorePrevious `
-            $Definition.before $Definition.after
+            $Definition.before $Definition.after `
+            $guardContext
         $script:restorePrevious = $result.checksum
         $null = $script:restoreBindings.Add([pscustomobject][ordered]@{
             sequence = $Definition.sequence
@@ -2995,6 +3147,10 @@ function Restore-CgceInventoryProbe(
             completed_at_utc = (Get-CgceRuntimeUtcNow)
         }
         Invoke-CgceProbeCrash "restore-before-receipt-999"
+        Assert-CgceProbeRestoreFreshGuard `
+            $guardContext.paths `
+            $guardContext.run_directory `
+            $guardContext.run_id
         $null = Write-CgceRuntimeJson `
             $restoreFinal (Join-Path $restoreRoot "999-probe-restore-final.json") `
             "CGCE-OPS-PROBE-RECEIPT"
@@ -3686,6 +3842,7 @@ function Invoke-CgceChildProcess(
 Export-ModuleMember -Function @(
     "Assert-CgceNoServerActivity",
     "Assert-CgceNoForeignRunArtifacts",
+    "Assert-CgceInventoryProbeRestored",
     "Assert-CgceInventoryProbeStaged",
     "Assert-CgceServerArguments",
     "Enable-CgceInventoryProbe",

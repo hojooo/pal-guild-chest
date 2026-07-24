@@ -1034,7 +1034,7 @@ Invoke-CgceTest "recovery checkpoint validator accepts exact source profiles wit
                 "RESTORED" `
                 (Read-CgceRunState $root $restored.run_id).phase
         } catch {
-            throw "CGCE-TEST source phase $sourcePhase: $($_.Exception.Message)"
+            throw "CGCE-TEST source phase ${sourcePhase}: $($_.Exception.Message)"
         } finally {
             Remove-Item -LiteralPath $root -Recurse -Force
         }
@@ -1160,7 +1160,7 @@ Invoke-CgceTest "normal state writer rejects fixed-purpose recovery edges for ac
                 Assert-CgceEqual $case.Revision $current.revision
             } catch {
                 throw (
-                    "CGCE-TEST $($case.Source) $outcome: " +
+                    "CGCE-TEST $($case.Source) ${outcome}: " +
                     $_.Exception.Message
                 )
             } finally {
@@ -2401,7 +2401,7 @@ Invoke-CgceTest "recovery intent accepts only the exact source preimage and fixe
                         (ConvertTo-CgceContractTestJson $restoring.$field)
                 }
             } catch {
-                throw "CGCE-TEST $phase/$outcome: $($_.Exception.Message)"
+                throw "CGCE-TEST $phase/${outcome}: $($_.Exception.Message)"
             } finally {
                 Remove-Item -LiteralPath $fixture.Root -Recurse -Force
             }
@@ -2764,7 +2764,7 @@ Invoke-CgceTest "recovery probe completion matches Runtime over journal and term
             Assert-CgceEqual $runtimeCode $contractCode
             Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
         } catch {
-            throw "CGCE-TEST probe parity $tamper: $($_.Exception.Message)"
+            throw "CGCE-TEST probe parity ${tamper}: $($_.Exception.Message)"
         } finally {
             Remove-Item -LiteralPath $fixture.Root -Recurse -Force
         }
@@ -2907,7 +2907,7 @@ Invoke-CgceTest "recovery blocker owns exact ACTIVE and BLOCKED revision-plus-tw
             }
             Assert-CgceEqual $before (Get-CgceSha256 $fixture.Paths.state)
         } catch {
-            throw "CGCE-TEST blocker rejection $case: $($_.Exception.Message)"
+            throw "CGCE-TEST blocker rejection ${case}: $($_.Exception.Message)"
         } finally {
             Remove-Item -LiteralPath $fixture.Root -Recurse -Force
         }
@@ -3000,7 +3000,7 @@ Invoke-CgceTest "recovery completion requires exact 000 010 020 999 authority" {
                 $snapshotBefore `
                 (Get-CgceContractFixtureSnapshot $fixture)
         } catch {
-            throw "CGCE-TEST completion rejection $case: $($_.Exception.Message)"
+            throw "CGCE-TEST completion rejection ${case}: $($_.Exception.Message)"
         } finally {
             Remove-Item -LiteralPath $fixture.Root -Recurse -Force
         }
