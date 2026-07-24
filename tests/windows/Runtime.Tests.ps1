@@ -53,6 +53,14 @@ function Set-CgceRuntimeTestActivitySeam($Seam) {
     } $Seam
 }
 
+function Set-CgceRuntimeTestProbeRestoreMutationSeam($Seam) {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    & $module {
+        param($Value)
+        $script:CgceTestProbeRestoreMutationSeam = $Value
+    } $Seam
+}
+
 function Set-CgceRuntimeTestRootProcessRecordSeam($Seam) {
     $module = Get-Module "CgceDiscovery.Runtime"
     & $module {
@@ -1657,12 +1665,7 @@ Invoke-CgceTest "probe restore rejects tampered frozen plans operations paths an
     foreach ($tamper in @("plan", "operation", "path", "state")) {
         $fixture = New-CgceRuntimeProbeFixture
         try {
-            $receipt = Enable-CgceInventoryProbe `
-                -Ue4ssRoot $fixture.Ue4ssRoot `
-                -ProbeSource $fixture.ProbeSource `
-                -RunDirectory $fixture.Paths.run_directory `
-                -RunId $fixture.RunId `
-                -Paths $fixture.Paths
+            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
             $crashPoint = if ($tamper -ceq "plan") {
                 "restore-before-operation-010"
             } else {
@@ -1719,12 +1722,7 @@ Invoke-CgceTest "completed restore revalidates final bindings and live terminal 
     foreach ($tamper in @("final-binding", "restored-state", "live-probe")) {
         $fixture = New-CgceRuntimeProbeFixture
         try {
-            $receipt = Enable-CgceInventoryProbe `
-                -Ue4ssRoot $fixture.Ue4ssRoot `
-                -ProbeSource $fixture.ProbeSource `
-                -RunDirectory $fixture.Paths.run_directory `
-                -RunId $fixture.RunId `
-                -Paths $fixture.Paths
+            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
             Restore-CgceInventoryProbe `
                 -Paths $fixture.Paths `
                 -RunDirectory $fixture.Paths.run_directory `
@@ -2939,6 +2937,16 @@ Invoke-CgceTest "runtime module exports only its approved Task 3 surface" {
 }
 
 function Get-CgceRuntimeRestoreSnapshot($Fixture) {
+    $values = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($directory in @(Get-ChildItem -LiteralPath $Fixture.Base `
+            -Directory -Force -Recurse | Sort-Object -Property FullName)) {
+        $relativePath = $directory.FullName.Substring($Fixture.Base.Length)
+        $relative = $relativePath.TrimStart('\', '/')
+        $values.Add("D|$relative")
+    }
+    foreach ($entry in @(Get-CgceTreeInventory -Root $Fixture.Base)) {
+        $values.Add("F|$($entry.relative_path)|$($entry.length)|$($entry.sha256)")
+    }
     $paths = @(
         $Fixture.Paths.probe_staged,
         $Fixture.Paths.probe_quarantine,
@@ -2956,7 +2964,6 @@ function Get-CgceRuntimeRestoreSnapshot($Fixture) {
         $Fixture.Paths.ue4ss_log_quarantine,
         (Join-Path $Fixture.Paths.probe_receipts "restore")
     )
-    $values = New-Object 'System.Collections.Generic.List[string]'
     foreach ($path in $paths) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             $values.Add("FILE|$path|$(Get-CgceRuntimeTestSha256 $path)")
@@ -3000,6 +3007,10 @@ function Initialize-CgceRuntimeRecoveryAuthority($Fixture, $Receipt) {
     $state.inventory_checksums.original = Get-CgceRuntimeTestSha256 `
         $Fixture.Paths.original_inventory
     Write-CgceJsonAtomic -Value $state -Path $Fixture.Paths.genesis_state
+    Write-CgceActiveRunMarker `
+        -State $state `
+        -GenesisStateChecksum (Get-CgceRuntimeTestSha256 $Fixture.Paths.genesis_state) `
+        -Path $Fixture.Paths.active_run_marker
     $state.phase = "PROBE_STAGED"
     $state.revision = 4
     $state.inventory_checksums.backup = Get-CgceRuntimeTestSha256 `
@@ -3014,10 +3025,6 @@ function Initialize-CgceRuntimeRecoveryAuthority($Fixture, $Receipt) {
     Write-CgceRuntimeTestUtf8 `
         -Path $Fixture.Paths.state `
         -Text ($state | ConvertTo-Json -Depth 12)
-    Write-CgceActiveRunMarker `
-        -State $state `
-        -GenesisStateChecksum (Get-CgceRuntimeTestSha256 $Fixture.Paths.genesis_state) `
-        -Path $Fixture.Paths.active_run_marker
 }
 
 function Write-CgceRuntimeExactManualBarrier($Fixture) {
@@ -3062,15 +3069,9 @@ function Write-CgceRuntimeExactManualBarrier($Fixture) {
 }
 
 function Write-CgceRuntimeStateManualBarrier($Fixture) {
-    $state = Read-CgceJsonObject -Path $Fixture.Paths.state
-    $state.outcome = "BLOCKED"
-    $state.errors = @([pscustomobject][ordered]@{
-        code = "CGCE-OPS-MANUAL-RECOVERY"
-        at_utc = "2026-07-24T00:00:00Z"
-    })
-    Write-CgceRuntimeTestUtf8 `
-        -Path $Fixture.Paths.state `
-        -Text ($state | ConvertTo-Json -Depth 12)
+    $null = Block-CgceRunState `
+        -StatePath $Fixture.Paths.state `
+        -Code "CGCE-OPS-MANUAL-RECOVERY"
 }
 
 function Set-CgceRuntimeRestoreActivityAfterSeam(
@@ -3118,12 +3119,7 @@ Invoke-CgceTest "probe restored validator is read-only over absent and completed
     foreach ($tamper in @("semantic", "terminal-residue")) {
         $fixture = New-CgceRuntimeProbeFixture
         try {
-            $receipt = Enable-CgceInventoryProbe `
-                -Ue4ssRoot $fixture.Ue4ssRoot `
-                -ProbeSource $fixture.ProbeSource `
-                -RunDirectory $fixture.Paths.run_directory `
-                -RunId $fixture.RunId `
-                -Paths $fixture.Paths
+            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
             Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
             Restore-CgceInventoryProbe `
                 -Paths $fixture.Paths `
@@ -3147,10 +3143,8 @@ Invoke-CgceTest "probe restored validator is read-only over absent and completed
                     -Path $finalPath `
                     -Text ($final | ConvertTo-Json -Depth 12)
             } else {
-                Write-CgceRuntimeTestUtf8 `
-                    -Path (Join-Path $fixture.Paths.probe_receipts `
-                        "restore\foreign.json") `
-                    -Text "{}"
+                Move-Item -LiteralPath $fixture.Paths.probe_quarantine `
+                    -Destination $fixture.Paths.probe_staged
             }
             $tampered = Get-CgceRuntimeRestoreSnapshot $fixture
             Assert-CgceThrows "CGCE-OPS-" {
@@ -3196,23 +3190,21 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
     foreach ($bootstrap in @("restore-root", "restore-intent")) {
         $fixture = New-CgceRuntimeProbeFixture
         try {
-            $receipt = Enable-CgceInventoryProbe `
-                -Ue4ssRoot $fixture.Ue4ssRoot `
-                -ProbeSource $fixture.ProbeSource `
-                -RunDirectory $fixture.Paths.run_directory `
-                -RunId $fixture.RunId `
-                -Paths $fixture.Paths
+            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
             Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
             $restoreRoot = Join-Path $fixture.Paths.probe_receipts "restore"
             if ($bootstrap -ceq "restore-intent") {
                 New-Item -ItemType Directory -Path $restoreRoot | Out-Null
             }
-            Set-CgceRuntimeTestActivitySeam {
-                New-CgceRuntimeActivitySnapshot `
-                    -Processes @([pscustomobject]@{
-                        ProcessId = 4242
-                        ExecutablePath = (Join-Path $fixture.Paths.server_root "PalServer.exe")
-                    }) -Tcp @() -Udp @()
+            $activity = Set-CgceRuntimeRestoreActivityAfterSeam `
+                -ServerPath (Join-Path $fixture.Paths.server_root "PalServer.exe")
+            $before = $null
+            Set-CgceRuntimeTestProbeRestoreMutationSeam {
+                param($Point)
+                if ($Point -ceq ("before-" + $bootstrap)) {
+                    $activity.armed = $true
+                    $before = Get-CgceRuntimeRestoreSnapshot $fixture
+                }
             }.GetNewClosure()
             Assert-CgceThrows "CGCE-OPS-PROCESS-ACTIVE" {
                 Restore-CgceInventoryProbe `
@@ -3221,6 +3213,7 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
                     -RunId $fixture.RunId `
                     -ExpectedFinalReceiptChecksum $receipt.checksum
             }
+            Assert-CgceEqual $true ($null -ne $before)
             if ($bootstrap -ceq "restore-root") {
                 Assert-CgceEqual $false (Test-Path -LiteralPath $restoreRoot)
             }
@@ -3229,18 +3222,14 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
             ))
         } finally {
             Set-CgceRuntimeTestActivitySeam $null
+            Set-CgceRuntimeTestProbeRestoreMutationSeam $null
             Remove-Item -LiteralPath $fixture.Base -Recurse -Force
         }
     }
     foreach ($boundary in $boundaries) {
         $fixture = New-CgceRuntimeProbeFixture
         try {
-            $receipt = Enable-CgceInventoryProbe `
-                -Ue4ssRoot $fixture.Ue4ssRoot `
-                -ProbeSource $fixture.ProbeSource `
-                -RunDirectory $fixture.Paths.run_directory `
-                -RunId $fixture.RunId `
-                -Paths $fixture.Paths
+            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
             Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
             $before = $null
             $activity = Set-CgceRuntimeRestoreActivityAfterSeam `
@@ -3253,7 +3242,10 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
                     $before = Get-CgceRuntimeRestoreSnapshot $fixture
                 }
             }.GetNewClosure()
-            Assert-CgceThrows "CGCE-OPS-PROCESS-ACTIVE" {
+            $expectedCode = if ($boundary.Kind -ceq "process") {
+                "CGCE-OPS-PROCESS-ACTIVE"
+            } else { "CGCE-OPS-PORT-ACTIVE" }
+            Assert-CgceThrows $expectedCode {
                 Restore-CgceInventoryProbe `
                     -Paths $fixture.Paths `
                     -RunDirectory $fixture.Paths.run_directory `
@@ -3275,12 +3267,7 @@ Invoke-CgceTest "probe restore manual barriers prevent the next move or receipt"
         foreach ($position in @("next-move", "next-receipt", "resume", "completed")) {
         $fixture = New-CgceRuntimeProbeFixture
         try {
-            $receipt = Enable-CgceInventoryProbe `
-                -Ue4ssRoot $fixture.Ue4ssRoot `
-                -ProbeSource $fixture.ProbeSource `
-                -RunDirectory $fixture.Paths.run_directory `
-                -RunId $fixture.RunId `
-                -Paths $fixture.Paths
+            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
             Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
             if ($position -ceq "resume") {
                 Set-CgceRuntimeTestCrashSeam {

@@ -2527,17 +2527,6 @@ Invoke-CgceTest "invoke process crash boundaries preserve partial receipts and f
     }
 }
 
-Invoke-CgceTest "invoke root PID receipt survives a post-creation crash without relaunch" {
-    $fixture = New-CgcePreparedFixture
-    try {
-        $moduleSetup = @'
-& $runtimeModule {
-    $script:CgceTestRootProcessRecordSeam = {
-        param($Process, [string]$CanonicalPath)
-        throw "CGCE-OPS-PROCESS-QUERY synthetic crash after process creation"
-    }
-}
-
 function New-CgceCapturedFixture {
     $fixture = New-CgcePreparedFixture
     $captured = Invoke-CgceInvokeChild -Fixture $fixture
@@ -2655,9 +2644,9 @@ Invoke-CgceTest "restore bootstrap rejects oversized genesis and manifest before
             $result = Invoke-CgceRestoreChild -Fixture $fixture
             Assert-CgceEqual 1 $result.ExitCode
             Assert-CgceEqual 1 @($result.Stdout).Count
-            Assert-CgceEqual $true ($result.Stdout[0] -clike (
-                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-* $($fixture.RunId)"
-            ))
+            Assert-CgceEqual `
+                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($fixture.RunId)" `
+                $result.Stdout[0]
             Assert-CgceEqual "" $result.Stderr
             Assert-CgceEqual $false (Test-Path -LiteralPath $sentinel)
             Assert-CgceEqual $stateBefore (Get-CgceSha256 $fixture.Paths.state)
@@ -2682,9 +2671,9 @@ Invoke-CgceTest "restore bootstrap rejects a wrong-origin preloaded handoff modu
         $result = Invoke-CgceRestoreChild -Fixture $fixture -ModuleSetup $setup
         Assert-CgceEqual 1 $result.ExitCode
         Assert-CgceEqual 1 @($result.Stdout).Count
-        Assert-CgceEqual $true ($result.Stdout[0] -clike (
-            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-* $($fixture.RunId)"
-        ))
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($fixture.RunId)" `
+            $result.Stdout[0]
         Assert-CgceEqual "" $result.Stderr
         Assert-CgceDeepEqual $before (Get-CgceLifecycleRestoreSnapshot $fixture)
     } finally {
@@ -2745,9 +2734,9 @@ Invoke-CgceTest "restore bootstrap rejects a re-signed module tree with no side 
         $result = Invoke-CgceRestoreChild -Fixture $fixture
         Assert-CgceEqual 1 $result.ExitCode
         Assert-CgceEqual 1 @($result.Stdout).Count
-        Assert-CgceEqual $true ($result.Stdout[0] -clike (
-            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-* $($fixture.RunId)"
-        ))
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-CHECKSUM $($fixture.RunId)" `
+            $result.Stdout[0]
         Assert-CgceEqual "" $result.Stderr
         Assert-CgceEqual $false (Test-Path -LiteralPath $sentinel)
         Assert-CgceDeepEqual $before (Get-CgceLifecycleRestoreSnapshot $fixture)
@@ -2786,6 +2775,12 @@ Invoke-CgceTest "restore returns the exact original and quarantines the clone" {
         Compare-CgceInventory `
             -Expected $fixture.OriginalInventory `
             -Actual @(Get-CgceTreeInventory -Root $fixture.SavedPath)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $state.paths.quarantined_clone)
+        Compare-CgceInventory `
+            -Expected $fixture.OriginalInventory `
+            -Actual @(Get-CgceTreeInventory -Root $state.paths.backup_saved)
     } finally {
         Remove-Item -LiteralPath $fixture.Base -Recurse -Force
     }
@@ -2805,7 +2800,7 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
     param([string]$point)
     $script:CgceTestRestoreCrashSeam = {
         param([string]$actual)
-        if ($actual -ceq $point) { throw "CGCE-TEST-RESTORE-CRASH $actual" }
+        if ($actual -ceq $point) { [Environment]::Exit(197) }
     }.GetNewClosure()
 } __POINT__
 '@
@@ -2814,21 +2809,21 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
                 (ConvertTo-CgceLifecycleSingleQuoted $boundary)
             )
             $first = Invoke-CgceRestoreChild -Fixture $fixture -ModuleSetup $setup
-            Assert-CgceEqual 1 $first.ExitCode
-            Assert-CgceEqual 1 @($first.Stdout).Count
-            Assert-CgceEqual `
-                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-TEST-RESTORE-CRASH $($fixture.RunId)" `
-                $first.Stdout[0]
+            Assert-CgceEqual 197 $first.ExitCode
+            Assert-CgceEqual 0 @($first.Stdout).Count
             Assert-CgceEqual "" $first.Stderr
-            Assert-CgceEqual $true (Test-Path -LiteralPath $fixture.Paths.inactive_original)
             Assert-CgceEqual $true (Test-Path -LiteralPath $fixture.Paths.backup_saved)
-            $second = Invoke-CgceRestoreChild -Fixture $fixture
-            Assert-CgceEqual 1 $second.ExitCode
-            Assert-CgceEqual 1 @($second.Stdout).Count
-            Assert-CgceEqual "" $second.Stderr
+            $afterRestoreMove = @(
+                "after-020-already-active-original", "after-restored-inventory",
+                "after-999", "after-RESTORED-state", "before-marker", "after-marker"
+            ) -contains $boundary
             Assert-CgceEqual `
-                "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-MANUAL-RECOVERY $($fixture.RunId)" `
-                $second.Stdout[0]
+                (-not $afterRestoreMove) `
+                (Test-Path -LiteralPath $fixture.Paths.inactive_original)
+            $second = Invoke-CgceRestoreChild -Fixture $fixture
+            Assert-CgceRestoreTerminal `
+                -Result $second -ExitCode 0 `
+                -Line "CGCE_WINDOWS_DISCOVERY_OK RESTORED $($fixture.RunId)"
         } finally {
             Remove-Item -LiteralPath $fixture.Base -Recurse -Force
         }
@@ -2847,9 +2842,9 @@ Invoke-CgceTest "completed marker uses the read-only probe validator and perform
         $result = Invoke-CgceRestoreChild -Fixture $fixture
         Assert-CgceEqual 1 $result.ExitCode
         Assert-CgceEqual 1 @($result.Stdout).Count
-        Assert-CgceEqual $true ($result.Stdout[0] -clike (
-            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-* $($fixture.RunId)"
-        ))
+        Assert-CgceEqual `
+            "CGCE_WINDOWS_DISCOVERY_BLOCKED CGCE-OPS-PROBE-RECEIPT $($fixture.RunId)" `
+            $result.Stdout[0]
         Assert-CgceEqual "" $result.Stderr
         Assert-CgceDeepEqual $before (Get-CgceLifecycleRestoreSnapshot $fixture)
     } finally {
@@ -2870,6 +2865,17 @@ Invoke-CgceTest "restore completed-marker replay emits one terminal line and wri
         Assert-CgceDeepEqual $before (Get-CgceLifecycleRestoreSnapshot $fixture)
     } finally {
         Remove-Item -LiteralPath $fixture.Base -Recurse -Force
+    }
+}
+
+Invoke-CgceTest "invoke root PID receipt survives a post-creation crash without relaunch" {
+    $fixture = New-CgcePreparedFixture
+    try {
+        $moduleSetup = @'
+& $runtimeModule {
+    $script:CgceTestRootProcessRecordSeam = {
+        param($Process, [string]$CanonicalPath)
+        throw "CGCE-OPS-PROCESS-QUERY synthetic crash after process creation"
     }
 }
 '@

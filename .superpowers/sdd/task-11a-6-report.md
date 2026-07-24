@@ -274,3 +274,22 @@ Windows PowerShell 5.1 run is still required after the production slice.
   exit status, and replay snapshots exclude test wrapper/stderr artifacts.
   The bootstrap, relocation, and re-signed-tree cases use copied handoff
   bytes and side-effect sentinels rather than a real server.
+
+## RED slice B correction
+
+Independent review found that the initial Lifecycle insertion was accidentally
+placed inside an existing child-module here-string. The corrective commit moves
+the helper/test block to the top-level suite and restores the pre-existing root
+PID crash fixture. It also replaces the Runtime partial fixture with the
+prepared inventory fixture, publishes the active marker from pristine genesis
+before the staged current state, captures whole-fixture authority snapshots,
+uses terminal filesystem residue, and distinguishes process from TCP/UDP
+activity error codes. The earlier commit is superseded by this correction and
+is not an approved RED gate.
+
+Correction verification repeated the same portable focused command: the two
+intended absent Task 11A.6 recovery surfaces still fail and the five existing
+handoff checks pass. The required Windows command was retried and again exits
+`127` because `powershell.exe` is unavailable on this macOS host. `git diff
+--check` passes after the structural correction. These results remain RED/static
+evidence only, not Windows behavioral execution.
