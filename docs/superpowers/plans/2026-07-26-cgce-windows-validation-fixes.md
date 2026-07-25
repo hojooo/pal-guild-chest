@@ -8,6 +8,13 @@
 > Lua suite, discovery package verifier, handoff integration과 shell/static
 > 검증은 통과했다. 현재 source의 Windows full/smoke pass transcript는 아직
 > 없으므로 실제 maintenance는 계속 차단한다.
+>
+> 후속 Windows RED (2026-07-26): commit `00f2b10`의 현재 179-test suite는
+> 125개 결과(`117 PASS / 8 FAIL`)까지만 출력된 뒤 operator가 중단했다.
+> `CGCE_WINDOWS_TESTS failures=<N>` 최종 줄과 smoke 결과가 없으므로 완료
+> baseline이 아니다. 아래 follow-up은 해당 8개 실패를 수정하지만, exact
+> source의 Windows full/smoke GREEN transcript가 생길 때까지 gate 상태는
+> 바뀌지 않는다.
 
 ## 목표
 
@@ -49,7 +56,10 @@ Production `Assert-CgceNoServerActivity`의 실제 process/listener 차단 동�
 | restore receipt가 있는데 intent 없이 재판정 가능 | recovery matrix | non-empty receipt root는 explicit intent 없으면 차단 |
 | 고정된 2026-07-24 fixture 시간 | recovery state time ordering | genesis timestamp에서 단조 증가하는 fixture 시간 생성 |
 | Runtime restore fixture의 state/marker authority 누락 | probe restore `missing file` | valid restore fixture에 genesis/state/marker를 명시적으로 생성 |
-| Process.StartTime과 WMI DMTF 정밀도 차이 | root identity verification drift | 양쪽을 DMTF microsecond 정밀도로 canonicalize |
+| Active marker보다 먼저 진행 state를 기록한 test fixture | `blocked transition...` | byte-identical CREATED state에서 marker를 만든 뒤 RUNNING fixture 기록 |
+| PowerShell function의 unary-comma array 반환 | handoff exact allowlist | caller의 array capture가 flat string sequence를 받도록 반환 |
+| Process.StartTime과 WMI DMTF 정밀도 차이 | root identity verification drift | 양쪽 FILETIME을 DMTF microsecond 경계로 내림 |
+| PowerShell `5.1` method binder에 전달한 untyped wait slice | `인수 형식이 일치하지 않습니다` | wait slice 계산과 `WaitForExit` 인수를 explicit `Int32`로 고정 |
 | synthetic test가 실제 `8211` telemetry를 읽음 | `CGCE-OPS-PORT-ACTIVE` | mock empty telemetry 또는 동적 임시 port 사용 |
 
 74개 중 `CGCE-TEST synthetic prepare failed` 30건은 독립 결함으로 취급하지

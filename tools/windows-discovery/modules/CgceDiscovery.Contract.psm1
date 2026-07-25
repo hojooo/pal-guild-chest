@@ -670,7 +670,7 @@ function Get-CgceHandoffRelativeFiles([string]$HandoffRoot) {
             }
         }
     }
-    return ,$files.ToArray()
+    return $files.ToArray()
 }
 
 function Assert-CgceHandoffSource(

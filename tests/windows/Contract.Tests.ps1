@@ -1367,17 +1367,20 @@ Invoke-CgceTest "blocked transition cannot introduce a compatible null checksum"
             -Paths $paths
         Set-CgceContractCreatedEvidence $genesis
         Write-CgceJsonAtomic $genesis $paths.genesis_state
+        Write-CgceJsonAtomic $genesis $paths.state
+        Write-CgceActiveRunMarker `
+            -State $genesis `
+            -GenesisStateChecksum (Get-CgceSha256 $paths.genesis_state) `
+            -Path $paths.active_run_marker
         $running = Read-CgceJsonObject $paths.genesis_state
         $running.phase = "RUNNING"
         $running.revision = 5
         $running.inventory_checksums.backup = ("2" * 64)
         $running.inventory_checksums.clone = ("3" * 64)
         $running.probe_receipt_checksum = ("4" * 64)
-        Write-CgceJsonAtomic $running $paths.state
-        Write-CgceActiveRunMarker `
-            -State $genesis `
-            -GenesisStateChecksum (Get-CgceSha256 $paths.genesis_state) `
-            -Path $paths.active_run_marker
+        Write-CgceContractTestUtf8 `
+            -Path $paths.state `
+            -Text ($running | ConvertTo-Json -Depth 12)
 
         $blocked = Read-CgceJsonObject $paths.state
         $blocked.outcome = "BLOCKED"

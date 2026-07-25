@@ -62,3 +62,53 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\windows\Run-Cgce
 Only `CGCE_WINDOWS_TESTS failures=0` may promote the real maintenance command
 block. A separate user-approved real run is still required for Task 11A
 operational completion.
+
+## 2026-07-26 Windows PowerShell 5.1 follow-up
+
+### RED evidence
+
+Commit `00f2b10` was executed in Windows PowerShell `5.1`. The run was
+interrupted after 125 completed test results:
+
+- `117 PASS`;
+- `8 FAIL`;
+- no final `CGCE_WINDOWS_TESTS failures=<N>` line;
+- no operator smoke result.
+
+The eight observed failures covered one invalid blocked-state fixture setup,
+one nested handoff payload array, and six process identity/wait descendants.
+Because 54 of the current 179 tests did not complete, this transcript is not a
+full baseline or pass artifact.
+
+### Follow-up implementation
+
+- The blocked-transition fixture now creates its active marker from
+  byte-identical `CREATED` genesis/current state before writing the progressed
+  `RUNNING` fixture.
+- Handoff enumeration returns a flat PowerShell string sequence.
+- Process FILETIME normalization floors both sources to the same DMTF
+  microsecond boundary while retaining exact comparison between boundaries.
+- The bounded wait slice and `WaitForExit` argument are explicit `Int32`
+  values.
+- The 38-case restore crash-boundary test emits five progress checkpoints
+  without adding or removing test cases.
+
+No checksum, marker, process-identity, timeout, recovery-barrier, no-overwrite,
+or production-listener requirement was weakened.
+
+### Portable verification
+
+Commands:
+
+```text
+./scripts/run-tests.sh tests/integration/discovery_handoff_spec.lua
+./scripts/run-tests.sh
+./scripts/verify-package.sh discovery
+sh -n scripts/verify-discovery-handoff.sh scripts/build-discovery-handoff.sh
+git diff --check
+```
+
+All commands passed on macOS. Windows PowerShell `5.1` is not installed on the
+development host, so the exact eight-test regression, ten-test smoke, and full
+179-test GREEN results remain required from the Windows checkout before merge
+or real maintenance.

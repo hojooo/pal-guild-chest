@@ -1728,6 +1728,8 @@ Invoke-CgceTest "probe restore blocks ambiguous source and destination without o
 }
 
 Invoke-CgceTest "probe restore resumes every operation and receipt crash boundary" {
+    $caseIndex = 0
+    $caseCount = 38
     foreach ($sequence in @(10, 20, 30, 40, 50, 60, 70, 80, 90, 999)) {
         $padded = $sequence.ToString("000")
         $boundaries = if ($sequence -eq 999) {
@@ -1741,6 +1743,17 @@ Invoke-CgceTest "probe restore resumes every operation and receipt crash boundar
             )
         }
         foreach ($boundary in $boundaries) {
+            $caseIndex += 1
+            if ($caseIndex -eq 1 -or
+                $caseIndex -eq 10 -or
+                $caseIndex -eq 20 -or
+                $caseIndex -eq 30 -or
+                $caseIndex -eq $caseCount) {
+                Write-Output (
+                    "PROGRESS probe-restore-crash-boundaries " +
+                    "$caseIndex/$caseCount"
+                )
+            }
             $fixture = New-CgceRuntimeProbeFixture
             try {
                 $receipt = Enable-CgceInventoryProbe `
@@ -2086,8 +2099,13 @@ Invoke-CgceTest "child process implementation uses only bounded waits and a fina
     Assert-CgceEqual $false $definition.Contains(
         'WaitForExit($remainingMilliseconds)'
     )
-    Assert-CgceEqual $true $definition.Contains(
-        'WaitForExit($waitSliceMilliseconds)'
+    Assert-CgceEqual $true (
+        $definition -cmatch
+            '\[int\]\$waitSliceMilliseconds\s*=\s*\[Math\]::Min'
+    )
+    Assert-CgceEqual $true (
+        $definition -cmatch
+            'WaitForExit\(\s*\[int\]\$waitSliceMilliseconds\s*\)'
     )
     Assert-CgceEqual $true $definition.Contains(
         "Assert-CgceObservedProcessesTerminated"
@@ -3028,7 +3046,7 @@ Invoke-CgceTest "process identity normalizes sub-microsecond drift but preserves
     $module = Get-Module "CgceDiscovery.Runtime"
     $baseFileTime = [int64]134292420610000000
     $identities = @(
-        foreach ($offset in @(0, 4, 10)) {
+        foreach ($offset in @(0, 1, 4, 5, 9, 10)) {
             & $module {
                 param([int64]$FileTime)
                 Get-CgceProcessIdentityFromRecord `
@@ -3042,15 +3060,17 @@ Invoke-CgceTest "process identity normalizes sub-microsecond drift but preserves
             } ($baseFileTime + $offset)
         }
     )
-    Assert-CgceEqual `
-        $identities[0].creation_time_filetime_utc `
-        $identities[1].creation_time_filetime_utc
+    foreach ($index in @(1, 2, 3, 4)) {
+        Assert-CgceEqual `
+            $identities[0].creation_time_filetime_utc `
+            $identities[$index].creation_time_filetime_utc
+    }
     Assert-CgceEqual `
         ($baseFileTime + 10) `
-        $identities[2].creation_time_filetime_utc
+        $identities[5].creation_time_filetime_utc
     Assert-CgceEqual $false (
         [int64]$identities[0].creation_time_filetime_utc -eq
-            [int64]$identities[2].creation_time_filetime_utc
+            [int64]$identities[5].creation_time_filetime_utc
     )
 }
 

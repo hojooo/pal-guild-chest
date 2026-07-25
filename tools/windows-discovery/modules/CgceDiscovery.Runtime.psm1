@@ -376,12 +376,6 @@ function ConvertTo-CgceCanonicalProcessFileTime([int64]$FileTimeUtc) {
         throw "CGCE-OPS-PROCESS-QUERY invalid process creation time"
     }
     $remainder = $FileTimeUtc % 10
-    if ($remainder -ge 5) {
-        if ($FileTimeUtc -gt ([int64]::MaxValue - (10 - $remainder))) {
-            throw "CGCE-OPS-PROCESS-QUERY invalid process creation time"
-        }
-        return [int64]($FileTimeUtc + (10 - $remainder))
-    }
     return [int64]($FileTimeUtc - $remainder)
 }
 
@@ -3748,11 +3742,13 @@ function Invoke-CgceChildProcess(
                 $remainingMilliseconds) {
                 $remainingMilliseconds = [int]$launchRemainingMilliseconds
             }
-            $waitSliceMilliseconds = [Math]::Min(
-                100,
-                $remainingMilliseconds
+            [int]$waitSliceMilliseconds = [Math]::Min(
+                [int]100,
+                [int]$remainingMilliseconds
             )
-            $rootExited = $process.WaitForExit($waitSliceMilliseconds)
+            $rootExited = $process.WaitForExit(
+                [int]$waitSliceMilliseconds
+            )
             if ($rootExited -and $live -eq 0) {
                 Assert-CgceProcessCompletedWithinDeadline `
                     -Stopwatch $stopwatch `
