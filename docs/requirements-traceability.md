@@ -105,8 +105,17 @@ The Windows backup/clone/inventory/restore/private-export source and
 deterministic handoff source are implemented and documented in
 `docs/windows-discovery-operator-runbook.md`.
 
-- Tool implementation remains incomplete until the elevated Windows
-  PowerShell `5.1` synthetic suite reports `failures=0`.
+- The previous elevated Windows PowerShell `5.1` source baseline was
+  174 total, 100 pass, and 74 fail. Compatibility fixes are implemented, but
+  the current source still needs a fresh developer/CI run ending in
+  `CGCE_WINDOWS_TESTS failures=0`.
+- The separate behavior-level operator smoke runner is implemented and
+  handoff-allowlisted. It executes exactly ten selected tests using mock
+  telemetry or a temporary port and must end in
+  `CGCE_WINDOWS_SMOKE_TESTS tests=10 failures=0`; the unrelated production UDP
+  `8211` listener is not an input.
+- Real maintenance remains blocked until both the full regression suite and
+  operator smoke report `failures=0`.
 - Operational completion additionally requires one approved real run that
   restores the original inventory and UE4SS before-images and produces a
   verified private evidence ZIP.

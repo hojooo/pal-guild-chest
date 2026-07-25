@@ -449,15 +449,26 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 
 **Authoritative plan:**
 - `docs/superpowers/plans/2026-07-23-cgce-windows-discovery-operator.md`
+- Windows validation remediation:
+  `docs/superpowers/plans/2026-07-26-cgce-windows-validation-fixes.md`
 - Operator runbook:
   `docs/windows-discovery-operator-runbook.md`
 
-**Current status (2026-07-24):**
+**Current status (updated 2026-07-26):**
 - Task 1–9 source, private exporter, deterministic handoff scripts, synthetic
   lifecycle contract, and staged operator Runbook are implemented.
-- The elevated Windows PowerShell `5.1` suite has not run in the macOS
-  development environment, so tool implementation and real maintenance remain
-  incomplete.
+- The previous elevated Windows PowerShell `5.1` source baseline was
+  174 total, 100 pass, and 74 fail. Compatibility remediation is implemented,
+  but the updated source has not yet produced a fresh Windows result.
+- The full suite remains the developer/CI regression gate. The separate
+  exact ten-test behavior-level operator smoke gate is implemented and
+  handoff-allowlisted, but also needs a fresh Windows result.
+- Synthetic smoke must use mock telemetry or a temporary port; the unrelated
+  production UDP `8211` listener is not a synthetic failure. Actual maintenance
+  still requires every configured listener to be absent after production
+  shutdown.
+- Tool verification and real maintenance remain incomplete until both Windows
+  gates report `failures=0`.
 
 **Interfaces:**
 - Consumes an owner-controlled Windows Palworld Dedicated Server maintenance
@@ -470,8 +481,11 @@ a.contains(errors, "CGCE-VAL-004:item_fingerprint_changed")
 - [ ] **Step 1:** Implement and verify the deterministic macOS source handoff,
   plain-PowerShell 5.1 synthetic lifecycle, server-global lock, no-overwrite
   backup/clone/restore, and private export from the authoritative Task 11A plan.
-- [ ] **Step 2:** Run the Windows synthetic suite before touching the real
-  server. If it is unavailable or fails, Task 11A remains incomplete.
+- [ ] **Step 2:** Run the updated source and make both the full Windows
+  PowerShell `5.1` developer regression suite and the implemented exact
+  ten-test operator smoke gate report `failures=0`. Neither suite may read the
+  real server paths; if either is unavailable or fails, Task 11A remains
+  incomplete.
 - [ ] **Step 3:** During the approved maintenance window, run one isolated
   inventory-only pass on the verified clone, restore the exact original and
   UE4SS before-images, and export the private evidence ZIP.

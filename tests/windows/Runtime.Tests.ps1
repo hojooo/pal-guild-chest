@@ -102,9 +102,13 @@ function Wait-CgceRuntimeTestReceiptRootExit([string]$ReceiptRoot) {
     if ($null -eq $rootProcess) { return }
     $sameRoot = $false
     try {
-        $sameRoot = (
-            $rootProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
-        ) -eq [int64]$rootReceipt.creation_time_filetime_utc
+        $runtimeModule = Get-Module "CgceDiscovery.Runtime"
+        $canonicalStart = & $runtimeModule {
+            param([int64]$Value)
+            ConvertTo-CgceCanonicalProcessFileTime $Value
+        } $rootProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
+        $sameRoot = [int64]$canonicalStart -eq
+            [int64]$rootReceipt.creation_time_filetime_utc
     } catch {
         $sameRoot = $false
     }
@@ -117,7 +121,32 @@ function Wait-CgceRuntimeTestReceiptRootExit([string]$ReceiptRoot) {
     }
 }
 
+function Get-CgceRuntimeTestAvailableListenerPort {
+    for ($attempt = 0; $attempt -lt 32; $attempt += 1) {
+        $tcp = $null
+        $udp = $null
+        try {
+            $tcp = New-Object Net.Sockets.TcpListener `
+                ([Net.IPAddress]::Loopback), 0
+            $tcp.Start()
+            $port = ([Net.IPEndPoint]$tcp.LocalEndpoint).Port
+            $udp = New-Object Net.Sockets.UdpClient
+            $endpoint = New-Object Net.IPEndPoint `
+                ([Net.IPAddress]::Loopback), $port
+            $udp.Client.Bind($endpoint)
+            return $port
+        } catch {
+            continue
+        } finally {
+            if ($null -ne $udp) { $udp.Dispose() }
+            if ($null -ne $tcp) { $tcp.Stop() }
+        }
+    }
+    throw "CGCE-TEST no isolated TCP/UDP listener port is available"
+}
+
 function New-CgceRuntimeProbeFixture {
+    Set-CgceRuntimeTestActivitySeam $null
     $base = New-CgceRuntimeTestRoot
     $serverRoot = Join-Path $base "server"
     $saved = Join-Path $serverRoot "Pal\Saved"
@@ -160,6 +189,7 @@ function New-CgceRuntimeProbeFixture {
         Base = $base
         Ue4ssRoot = $ue4ssRoot
         RunId = $runId
+        ListenerPort = (Get-CgceRuntimeTestAvailableListenerPort)
         Paths = $paths
         ProbeSource = (Join-Path $PSScriptRoot `
             "..\..\tools\windows-discovery\probe\CGCEDiscoveryInventory")
@@ -210,6 +240,94 @@ function Initialize-CgceRuntimePreparedProbeFixture($Fixture) {
         -RunDirectory $Fixture.Paths.run_directory `
         -RunId $Fixture.RunId `
         -Paths $Fixture.Paths
+}
+
+function Initialize-CgceRuntimeRecoveryAuthority($Fixture, $Receipt = $null) {
+    Set-CgceRuntimeTestActivitySeam {
+        New-CgceRuntimeActivitySnapshot -Processes @() -Tcp @() -Udp @()
+    }
+    foreach ($directory in @(
+            (Split-Path -Parent $Fixture.Paths.original_inventory),
+            $Fixture.Paths.process_receipts
+        )) {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        }
+    }
+    $inventory = @(Get-CgceTreeInventory -Root $Fixture.Paths.active_saved)
+    foreach ($binding in @(
+            [pscustomobject]@{
+                Path = $Fixture.Paths.original_inventory
+                Kind = "original"
+            },
+            [pscustomobject]@{
+                Path = $Fixture.Paths.backup_inventory
+                Kind = "backup"
+            },
+            [pscustomobject]@{
+                Path = $Fixture.Paths.clone_inventory
+                Kind = "clone"
+            }
+        )) {
+        if (-not (Test-Path -LiteralPath $binding.Path -PathType Leaf)) {
+            $null = Write-CgceInventory `
+                -Entries $inventory `
+                -Path $binding.Path `
+                -Kind $binding.Kind
+        }
+    }
+
+    $executable = Join-Path $Fixture.Paths.server_root "PalServer.exe"
+    Write-CgceRuntimeTestUtf8 -Path $executable -Text "synthetic-server"
+    $state = New-CgceRunState `
+        -RunId $Fixture.RunId `
+        -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
+        -Paths $Fixture.Paths
+    $state.bundle_checksum = ("a" * 64)
+    $state.control_evidence_checksum = ("b" * 64)
+    $state.source_manifest_checksum = ("c" * 64)
+    $state.palserver_executable = $executable
+    $state.palserver_executable_checksum = Get-CgceRuntimeTestSha256 $executable
+    $state.ue4ss_version = "3.0.1"
+    $state.server_process_paths = @($executable)
+    $state.ue4ss_dll_checksum = Get-CgceRuntimeTestSha256 `
+        $Fixture.Paths.ue4ss_dll
+    $state.listener_ports = @($Fixture.ListenerPort)
+    $state.inventory_checksums.original = Get-CgceRuntimeTestSha256 `
+        $Fixture.Paths.original_inventory
+    Write-CgceJsonAtomic -Value $state -Path $Fixture.Paths.genesis_state
+    Write-CgceJsonAtomic -Value $state -Path $Fixture.Paths.state
+    Assert-CgceEqual `
+        (Get-CgceRuntimeTestSha256 $Fixture.Paths.genesis_state) `
+        (Get-CgceRuntimeTestSha256 $Fixture.Paths.state)
+    Write-CgceActiveRunMarker `
+        -State $state `
+        -GenesisStateChecksum (Get-CgceRuntimeTestSha256 `
+            $Fixture.Paths.genesis_state) `
+        -Path $Fixture.Paths.active_run_marker
+
+    if ($null -ne $Receipt) {
+        $state.phase = "PROBE_STAGED"
+        $state.revision = 4
+        $state.inventory_checksums.backup = Get-CgceRuntimeTestSha256 `
+            $Fixture.Paths.backup_inventory
+        $state.inventory_checksums.clone = Get-CgceRuntimeTestSha256 `
+            $Fixture.Paths.clone_inventory
+        $state.probe_receipt_checksum = $Receipt.checksum
+        $state.updated_at_utc = [DateTime]::UtcNow.ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        Write-CgceRuntimeTestUtf8 `
+            -Path $Fixture.Paths.state `
+            -Text ($state | ConvertTo-Json -Depth 12)
+    }
+}
+
+function Initialize-CgceRuntimeRestorableProbeFixture($Fixture) {
+    $receipt = Initialize-CgceRuntimePreparedProbeFixture $Fixture
+    Initialize-CgceRuntimeRecoveryAuthority $Fixture $receipt
+    return $receipt
 }
 
 function Assert-CgceRuntimeBeforeImages($Fixture) {
@@ -646,7 +764,7 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
         }
         $launchPath = Join-Path $receiptRoot "000-launch.json"
         Write-CgceJsonAtomic -Value $launch -Path $launchPath
-        $pid = [pscustomobject][ordered]@{
+        $pidReceipt = [pscustomobject][ordered]@{
             schema_version = "1.0"
             kind = "cgce_windows_discovery_process_pid"
             run_id = $runId
@@ -660,7 +778,7 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
             previous_receipt_sha256 = (Get-CgceRuntimeTestSha256 $launchPath)
         }
         $pidPath = Join-Path $receiptRoot "001-pid.json"
-        Write-CgceJsonAtomic -Value $pid -Path $pidPath
+        Write-CgceJsonAtomic -Value $pidReceipt -Path $pidPath
         $result = [pscustomobject][ordered]@{
             schema_version = "1.0"
             kind = "cgce_windows_discovery_process_result"
@@ -729,10 +847,10 @@ Invoke-CgceTest "completed process result binds the exact immutable PID journal"
             -Path $resultPath `
             -Text ($result | ConvertTo-Json -Depth 12)
 
-        $pid.executable_path = $allowed[1]
+        $pidReceipt.executable_path = $allowed[1]
         Write-CgceRuntimeTestUtf8 `
             -Path $pidPath `
-            -Text ($pid | ConvertTo-Json -Depth 12)
+            -Text ($pidReceipt | ConvertTo-Json -Depth 12)
         $wrongRootChecksum = Get-CgceRuntimeTestSha256 $pidPath
         $result.previous_receipt_sha256 = $wrongRootChecksum
         $result.observed_processes[0].executable_path = $allowed[1]
@@ -1230,6 +1348,7 @@ Invoke-CgceTest "inventory probe writes one exact mods line and sole final recei
                 $snapshot.kind
         }
 
+        Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
         Restore-CgceInventoryProbe `
             -Paths $fixture.Paths `
             -RunDirectory $fixture.Paths.run_directory `
@@ -1532,6 +1651,7 @@ Invoke-CgceTest "probe staging crash points restore exact UE4SS before images" {
                         -Paths $fixture.Paths
                 }
                 Set-CgceRuntimeTestCrashSeam $null
+                Initialize-CgceRuntimeRecoveryAuthority $fixture
                 Restore-CgceInventoryProbe `
                     -Paths $fixture.Paths `
                     -RunDirectory $fixture.Paths.run_directory `
@@ -1587,6 +1707,7 @@ Invoke-CgceTest "probe restore blocks ambiguous source and destination without o
             -RunDirectory $fixture.Paths.run_directory `
             -RunId $fixture.RunId `
             -Paths $fixture.Paths
+        Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
         Write-CgceRuntimeTestUtf8 `
             -Path $fixture.Paths.mods_txt `
             -Text "unrelated bytes"
@@ -1628,6 +1749,7 @@ Invoke-CgceTest "probe restore resumes every operation and receipt crash boundar
                     -RunDirectory $fixture.Paths.run_directory `
                     -RunId $fixture.RunId `
                     -Paths $fixture.Paths
+                Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
                 $crashPoint = "$boundary-$padded"
                 Set-CgceRuntimeTestCrashSeam {
                     param($Point)
@@ -1665,7 +1787,7 @@ Invoke-CgceTest "probe restore rejects tampered frozen plans operations paths an
     foreach ($tamper in @("plan", "operation", "path", "state")) {
         $fixture = New-CgceRuntimeProbeFixture
         try {
-            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
+            $receipt = Initialize-CgceRuntimeRestorableProbeFixture $fixture
             $crashPoint = if ($tamper -ceq "plan") {
                 "restore-before-operation-010"
             } else {
@@ -1722,7 +1844,7 @@ Invoke-CgceTest "completed restore revalidates final bindings and live terminal 
     foreach ($tamper in @("final-binding", "restored-state", "live-probe")) {
         $fixture = New-CgceRuntimeProbeFixture
         try {
-            $receipt = Initialize-CgceRuntimePreparedProbeFixture $fixture
+            $receipt = Initialize-CgceRuntimeRestorableProbeFixture $fixture
             Restore-CgceInventoryProbe `
                 -Paths $fixture.Paths `
                 -RunDirectory $fixture.Paths.run_directory `
@@ -1760,12 +1882,13 @@ Invoke-CgceTest "completed restore revalidates final bindings and live terminal 
 Invoke-CgceTest "stage authority rejects semantically re-signed operation receipts" {
     $fixture = New-CgceRuntimeProbeFixture
     try {
-        $null = Enable-CgceInventoryProbe `
+        $receipt = Enable-CgceInventoryProbe `
             -Ue4ssRoot $fixture.Ue4ssRoot `
             -ProbeSource $fixture.ProbeSource `
             -RunDirectory $fixture.Paths.run_directory `
             -RunId $fixture.RunId `
             -Paths $fixture.Paths
+        Initialize-CgceRuntimeRecoveryAuthority $fixture $receipt
         $operationPath = Join-Path $fixture.Paths.probe_receipts `
             "060-stage-probe.json"
         $operation = Read-CgceJsonObject $operationPath
@@ -2238,7 +2361,7 @@ Invoke-CgceTest "stale pre-parent ParentPID records never create receipts" {
                     ParentProcessId = [int64]$rootReceipt.pid
                     ExecutablePath = $executable
                     CreationTimeFileTimeUtc = (
-                        [int64]$rootReceipt.creation_time_filetime_utc - 1
+                        [int64]$rootReceipt.creation_time_filetime_utc - 10
                     )
                 })
             }
@@ -2890,11 +3013,45 @@ Invoke-CgceTest "short-lived root process uses immediate Process identity when C
         } $process "D:\PalServer\PalServer.exe"
         Assert-CgceEqual 73 $record.ProcessId
         Assert-CgceEqual "D:\PalServer\PalServer.exe" $record.ExecutablePath
-        Assert-CgceEqual $start.ToFileTimeUtc() `
+        $expectedFileTime = & $module {
+            param([int64]$Value)
+            ConvertTo-CgceCanonicalProcessFileTime $Value
+        } $start.ToFileTimeUtc()
+        Assert-CgceEqual $expectedFileTime `
             $record.CreationTimeFileTimeUtc
     } finally {
         Set-CgceRuntimeTestRootProcessRecordSeam $null
     }
+}
+
+Invoke-CgceTest "process identity normalizes sub-microsecond drift but preserves one-microsecond drift" {
+    $module = Get-Module "CgceDiscovery.Runtime"
+    $baseFileTime = [int64]134292420610000000
+    $identities = @(
+        foreach ($offset in @(0, 4, 10)) {
+            & $module {
+                param([int64]$FileTime)
+                Get-CgceProcessIdentityFromRecord `
+                    ([pscustomobject]@{
+                        ProcessId = 73
+                        ParentProcessId = 0
+                        ExecutablePath = "D:\PalServer\PalServer.exe"
+                        CreationTimeFileTimeUtc = $FileTime
+                    }) `
+                    "D:\PalServer\PalServer.exe"
+            } ($baseFileTime + $offset)
+        }
+    )
+    Assert-CgceEqual `
+        $identities[0].creation_time_filetime_utc `
+        $identities[1].creation_time_filetime_utc
+    Assert-CgceEqual `
+        ($baseFileTime + 10) `
+        $identities[2].creation_time_filetime_utc
+    Assert-CgceEqual $false (
+        [int64]$identities[0].creation_time_filetime_utc -eq
+            [int64]$identities[2].creation_time_filetime_utc
+    )
 }
 
 Invoke-CgceTest "root process CIM access failure never degrades to fallback identity" {
@@ -2988,49 +3145,6 @@ function Get-CgceRuntimeRestoreSnapshot($Fixture) {
     return [string[]]$values.ToArray()
 }
 
-function Initialize-CgceRuntimeRecoveryAuthority($Fixture, $Receipt) {
-    $executable = Join-Path $Fixture.Paths.server_root "PalServer.exe"
-    Write-CgceRuntimeTestUtf8 -Path $executable -Text "synthetic-server"
-    $state = New-CgceRunState `
-        -RunId $Fixture.RunId `
-        -MaintenanceId "m-0123456789abcdef0123456789abcdef" `
-        -Paths $Fixture.Paths
-    $state.bundle_checksum = ("a" * 64)
-    $state.control_evidence_checksum = ("b" * 64)
-    $state.source_manifest_checksum = ("c" * 64)
-    $state.palserver_executable = $executable
-    $state.palserver_executable_checksum = Get-CgceRuntimeTestSha256 $executable
-    $state.ue4ss_version = "3.0.1"
-    $state.server_process_paths = @($executable)
-    $state.ue4ss_dll_checksum = Get-CgceRuntimeTestSha256 $Fixture.Paths.ue4ss_dll
-    $state.listener_ports = @(8211)
-    $state.inventory_checksums.original = Get-CgceRuntimeTestSha256 `
-        $Fixture.Paths.original_inventory
-    Write-CgceJsonAtomic -Value $state -Path $Fixture.Paths.genesis_state
-    Write-CgceJsonAtomic -Value $state -Path $Fixture.Paths.state
-    Assert-CgceEqual `
-        (Get-CgceRuntimeTestSha256 $Fixture.Paths.genesis_state) `
-        (Get-CgceRuntimeTestSha256 $Fixture.Paths.state)
-    Write-CgceActiveRunMarker `
-        -State $state `
-        -GenesisStateChecksum (Get-CgceRuntimeTestSha256 $Fixture.Paths.genesis_state) `
-        -Path $Fixture.Paths.active_run_marker
-    $state.phase = "PROBE_STAGED"
-    $state.revision = 4
-    $state.inventory_checksums.backup = Get-CgceRuntimeTestSha256 `
-        $Fixture.Paths.backup_inventory
-    $state.inventory_checksums.clone = Get-CgceRuntimeTestSha256 `
-        $Fixture.Paths.clone_inventory
-    $state.probe_receipt_checksum = $Receipt.checksum
-    $state.updated_at_utc = [DateTime]::UtcNow.ToString(
-        "yyyy-MM-dd'T'HH:mm:ss'Z'",
-        [Globalization.CultureInfo]::InvariantCulture
-    )
-    Write-CgceRuntimeTestUtf8 `
-        -Path $Fixture.Paths.state `
-        -Text ($state | ConvertTo-Json -Depth 12)
-}
-
 function Write-CgceRuntimeExactManualBarrier($Fixture) {
     $module = Get-Module "CgceDiscovery.Runtime"
     & $module {
@@ -3065,7 +3179,7 @@ function Write-CgceRuntimeExactManualBarrier($Fixture) {
         $launchPath = Join-Path $ReceiptRoot "000-launch.json"
         $null = Write-CgceRuntimeJson $launch $launchPath "CGCE-OPS-PROCESS-RECEIPT"
         Write-CgceManualRecoveryBarrier `
-            -ReceiptRoot $ReceiptRoot -RunId $RunId -Pid 1 -ParentPid 0 `
+            -ReceiptRoot $ReceiptRoot -RunId $RunId -ProcessId 1 -ParentPid 0 `
             -PreviousChecksum (Get-CgceSha256 $launchPath) -PidReceipts @()
     } $Fixture.Paths.process_receipts $Fixture.RunId `
         (Join-Path $Fixture.Paths.server_root "PalServer.exe") `
@@ -3080,6 +3194,7 @@ function Write-CgceRuntimeStateManualBarrier($Fixture) {
 
 function Set-CgceRuntimeRestoreActivityAfterSeam(
     [string]$ServerPath,
+    [int]$ListenerPort,
     [ValidateSet("process", "tcp", "udp")]
     [string]$Kind = "process"
 ) {
@@ -3094,9 +3209,12 @@ function Set-CgceRuntimeRestoreActivityAfterSeam(
                     ProcessId = 4242; ExecutablePath = $ServerPath
                 })
             } elseif ($Kind -ceq "tcp") {
-                $tcp = @([pscustomobject]@{ LocalPort = 8211; State = "Listen" })
+                $tcp = @([pscustomobject]@{
+                    LocalPort = $ListenerPort
+                    State = "Listen"
+                })
             } else {
-                $udp = @([pscustomobject]@{ LocalPort = 8211 })
+                $udp = @([pscustomobject]@{ LocalPort = $ListenerPort })
             }
             return New-CgceRuntimeActivitySnapshot `
                 -Processes $processes -Tcp $tcp -Udp $udp
@@ -3205,7 +3323,8 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
             }
             $fixtureBefore = Get-CgceRuntimeRestoreSnapshot $fixture
             $activity = Set-CgceRuntimeRestoreActivityAfterSeam `
-                -ServerPath (Join-Path $fixture.Paths.server_root "PalServer.exe")
+                -ServerPath (Join-Path $fixture.Paths.server_root "PalServer.exe") `
+                -ListenerPort $fixture.ListenerPort
             $capture = [pscustomobject]@{ before = $null }
             Set-CgceRuntimeTestProbeRestoreMutationSeam {
                 param($Point)
@@ -3244,6 +3363,7 @@ Invoke-CgceTest "probe restore rechecks inactivity before every mutation" {
             $capture = [pscustomobject]@{ before = $null }
             $activity = Set-CgceRuntimeRestoreActivityAfterSeam `
                 -ServerPath (Join-Path $fixture.Paths.server_root "PalServer.exe") `
+                -ListenerPort $fixture.ListenerPort `
                 -Kind $boundary.Kind
             Set-CgceRuntimeTestCrashSeam {
                 param($Point)

@@ -1,5 +1,42 @@
 $script:CgceFailures = 0
+$script:CgceSelectionCompleted = $false
+$script:CgceExecutedTestNames = New-Object `
+    'System.Collections.Generic.HashSet[string]' `
+    -ArgumentList ([StringComparer]::Ordinal)
+$script:CgceRequestedTestNames = $null
+$selectedVariable = Get-Variable `
+    -Name "CgceSelectedTestNames" `
+    -Scope Script `
+    -ErrorAction SilentlyContinue
+if ($null -ne $selectedVariable -and
+    $null -ne $script:CgceSelectedTestNames) {
+    $script:CgceRequestedTestNames = New-Object `
+        'System.Collections.Generic.HashSet[string]' `
+        -ArgumentList ([StringComparer]::Ordinal)
+    foreach ($selectedName in @($script:CgceSelectedTestNames)) {
+        if ($selectedName -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($selectedName)) {
+            $script:CgceFailures += 1
+            Write-Output "FAIL test selection contains an invalid name"
+            continue
+        }
+        if (-not $script:CgceRequestedTestNames.Add($selectedName)) {
+            $script:CgceFailures += 1
+            Write-Output "FAIL test selection contains duplicate name $selectedName"
+        }
+    }
+}
+
 function Invoke-CgceTest([string]$Name, [scriptblock]$Body) {
+    if ($null -ne $script:CgceRequestedTestNames -and
+        -not $script:CgceRequestedTestNames.Contains($Name)) {
+        return
+    }
+    if (-not $script:CgceExecutedTestNames.Add($Name)) {
+        $script:CgceFailures += 1
+        Write-Output "FAIL duplicate test definition $Name"
+        return
+    }
     try {
         & $Body
         Write-Output "PASS $Name"
@@ -8,6 +45,23 @@ function Invoke-CgceTest([string]$Name, [scriptblock]$Body) {
         Write-Output "FAIL $Name`n$($_.Exception.Message)"
     }
 }
+
+function Complete-CgceTestSelection {
+    if ($null -eq $script:CgceRequestedTestNames -or
+        $script:CgceSelectionCompleted) {
+        return
+    }
+    foreach ($selectedName in @($script:CgceSelectedTestNames)) {
+        if ($selectedName -is [string] -and
+            -not [string]::IsNullOrWhiteSpace($selectedName) -and
+            -not $script:CgceExecutedTestNames.Contains($selectedName)) {
+            $script:CgceFailures += 1
+            Write-Output "FAIL selected test is missing $selectedName"
+        }
+    }
+    $script:CgceSelectionCompleted = $true
+}
+
 function Assert-CgceEqual($Expected, $Actual) {
     if ($Expected -ne $Actual) {
         throw "expected=[$Expected] actual=[$Actual]"

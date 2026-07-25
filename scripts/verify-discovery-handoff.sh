@@ -6,8 +6,10 @@ handoff_paths='tests/windows/Contract.Tests.ps1
 tests/windows/Files.Tests.ps1
 tests/windows/fixtures/FakePalServer.cmd
 tests/windows/Lifecycle.Tests.ps1
+tests/windows/Run-CgceDiscoverySmokeTests.ps1
 tests/windows/Run-CgceDiscoveryTests.ps1
 tests/windows/Runtime.Tests.ps1
+tests/windows/Smoke.Tests.ps1
 tests/windows/TestHarness.ps1
 tools/windows-discovery/CgceDiscovery.Common.psm1
 tools/windows-discovery/Export-CgceDiscoveryEvidence.ps1

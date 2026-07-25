@@ -34,7 +34,7 @@ function Resolve-CgceCanonicalPath([string]$Path, [bool]$MustExist) {
     }
     if ([string]::IsNullOrWhiteSpace($volumeRoot) -or
         ($volumeRoot -cnotmatch '^[A-Za-z]:[\\/]\z' -and
-            $volumeRoot -cnotmatch '^\\\\[^\\/]+[\\/][^\\/]+[\\/]\z')) {
+            $volumeRoot -cnotmatch '^\\\\[^\\/]+[\\/][^\\/]+(?:[\\/])?\z')) {
         throw "CGCE-OPS-PATH absolute drive or UNC path required"
     }
 
@@ -1895,6 +1895,17 @@ function Assert-CgceRecoveryMatrix($State, $Intent = $null) {
             return [pscustomobject][ordered]@{
                 selected_case = $Intent.selected_case
                 steps = [object[]]$steps
+            }
+        }
+
+        if (Test-Path -LiteralPath $State.paths.restore_receipts -PathType Container) {
+            $existingReceipts = @(
+                Get-ChildItem `
+                    -LiteralPath $State.paths.restore_receipts `
+                    -Force
+            )
+            if ($existingReceipts.Count -gt 0) {
+                throw "CGCE-OPS-MANUAL-RECOVERY existing receipts require an explicit intent"
             }
         }
 

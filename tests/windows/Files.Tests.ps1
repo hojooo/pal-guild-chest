@@ -57,7 +57,15 @@ Invoke-CgceTest "canonical paths preserve Windows volume roots and normalize des
         (Resolve-CgceCanonicalPath -Path "D:\Pal\Saved\\" -MustExist $false)
     Assert-CgceEqual `
         "\\server\share\" `
+        (Resolve-CgceCanonicalPath -Path "\\server\share" -MustExist $false)
+    Assert-CgceEqual `
+        "\\server\share\" `
         (Resolve-CgceCanonicalPath -Path "\\server\share\" -MustExist $false)
+    Assert-CgceEqual `
+        "\\server\share\Pal\Saved" `
+        (Resolve-CgceCanonicalPath `
+            -Path "\\server\share\Pal\Saved\\" `
+            -MustExist $false)
     Assert-CgceEqualCanonicalPath -Expected "D:\PAL\Saved" -Actual "d:\pal\saved\"
 }
 
@@ -962,6 +970,7 @@ Invoke-CgceTest "directory move rejects a different volume before touching sourc
 
 Invoke-CgceTest "filesystem module exports only approved interfaces" {
     $expected = @(
+        "Assert-CgceDiscoveryDiskCapacity",
         "Assert-CgceDistinctRoots",
         "Assert-CgceEqualCanonicalPath",
         "Assert-CgceNoReparseInPath",
@@ -972,6 +981,7 @@ Invoke-CgceTest "filesystem module exports only approved interfaces" {
         "Copy-CgceFileVerified",
         "Copy-CgceTreeVerified",
         "Get-CgceTreeInventory",
+        "Initialize-CgceRunLayout",
         "Move-CgceDirectoryNoOverwrite",
         "New-CgceRunPaths",
         "Read-CgceInventory",

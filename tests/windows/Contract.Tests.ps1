@@ -1375,7 +1375,7 @@ Invoke-CgceTest "blocked transition cannot introduce a compatible null checksum"
         $running.probe_receipt_checksum = ("4" * 64)
         Write-CgceJsonAtomic $running $paths.state
         Write-CgceActiveRunMarker `
-            -State $running `
+            -State $genesis `
             -GenesisStateChecksum (Get-CgceSha256 $paths.genesis_state) `
             -Path $paths.active_run_marker
 
@@ -1601,8 +1601,10 @@ Invoke-CgceTest "handoff manifest accepts only the exact sorted payload allowlis
             "tests/windows/Files.Tests.ps1",
             "tests/windows/fixtures/FakePalServer.cmd",
             "tests/windows/Lifecycle.Tests.ps1",
+            "tests/windows/Run-CgceDiscoverySmokeTests.ps1",
             "tests/windows/Run-CgceDiscoveryTests.ps1",
             "tests/windows/Runtime.Tests.ps1",
+            "tests/windows/Smoke.Tests.ps1",
             "tests/windows/TestHarness.ps1",
             "tools/windows-discovery/CgceDiscovery.Common.psm1",
             "tools/windows-discovery/Export-CgceDiscoveryEvidence.ps1",
@@ -1966,6 +1968,13 @@ function New-CgceRecoveryContractFixture(
         -Path $paths.active_run_marker
 
     $source = Read-CgceJsonObject $paths.genesis_state
+    $fixtureCreatedAt = [DateTime]::ParseExact(
+        $source.created_at_utc,
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::AssumeUniversal -bor
+            [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    )
     $source.phase = $SourcePhase
     $source.revision = Get-CgceContractTestPhaseRevision $SourcePhase
     if ($Outcome -ceq "BLOCKED") {
@@ -1975,7 +1984,10 @@ function New-CgceRecoveryContractFixture(
     if ($Outcome -ceq "BLOCKED") {
         $source.errors = @([pscustomobject][ordered]@{
             code = if ($ManualStateError) { "CGCE-OPS-MANUAL-RECOVERY" } else { "CGCE-OPS-PRIOR-FAILURE" }
-            at_utc = "2026-07-24T00:00:00Z"
+            at_utc = $fixtureCreatedAt.ToString(
+                "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
         })
     }
     $requiresBackup = @(
@@ -2005,7 +2017,10 @@ function New-CgceRecoveryContractFixture(
     $intent = [pscustomobject][ordered]@{
         schema_version = "1.0"; kind = "cgce_windows_discovery_restore_intent"
         run_id = $source.run_id; sequence = 0
-        created_at_utc = "2026-07-24T00:00:01Z"
+        created_at_utc = $fixtureCreatedAt.AddSeconds(1).ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
         source_state_sha256 = (Get-CgceSha256 $paths.state)
         source_phase = $source.phase; source_outcome = $source.outcome
         source_revision = $source.revision
@@ -2032,6 +2047,7 @@ function New-CgceRecoveryContractFixture(
         Root = $root; Paths = $paths; Genesis = $genesis; Source = $source
         Intent = $intent; IntentPath = $intentPath
         OriginalEntries = $originalEntries; OriginalTree = $originalTree
+        CreatedAt = $fixtureCreatedAt
     }
 }
 
@@ -2039,7 +2055,10 @@ function Set-CgceContractFixtureRestoring($Fixture) {
     $state = Read-CgceJsonObject $Fixture.Paths.state
     $state.phase = "RESTORING"
     $state.revision = [int64]$Fixture.Intent.source_revision + 1
-    $state.updated_at_utc = "2026-07-24T00:00:02Z"
+    $state.updated_at_utc = $Fixture.CreatedAt.AddSeconds(2).ToString(
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
     Write-CgceContractTestUtf8 $Fixture.Paths.state (ConvertTo-CgceContractTestJson $state)
 }
 
@@ -2070,7 +2089,12 @@ function Write-CgceContractRecoveryJournal($Fixture) {
             source_path = $step.source_path; destination_path = $step.destination_path
             before_state = $step.before_state; after_state = $step.after_state
             previous_receipt_sha256 = $previous
-            completed_at_utc = "2026-07-24T00:00:0$($index + 3)Z"
+            completed_at_utc = $Fixture.CreatedAt.AddSeconds(
+                $index + 3
+            ).ToString(
+                "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                [System.Globalization.CultureInfo]::InvariantCulture
+            )
         }
         Write-CgceJsonAtomic $receipt $path
         $previous = Get-CgceSha256 $path
@@ -2104,7 +2128,10 @@ function Write-CgceContractRecoveryJournal($Fixture) {
             path = $Fixture.Paths.restored_inventory
             sha256 = $restoredSha; tree_sha256 = $Fixture.OriginalTree
         }
-        completed_at_utc = "2026-07-24T00:00:05Z"
+        completed_at_utc = $Fixture.CreatedAt.AddSeconds(5).ToString(
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
     }
     Write-CgceJsonAtomic $final (Join-Path $Fixture.Paths.restore_receipts "999-restore-final.json")
 }
@@ -2422,12 +2449,21 @@ Invoke-CgceTest "recovery intent accepts only the exact source preimage and fixe
                     param($Intent) $Intent.source_revision = [int64]$Intent.source_revision + 1
                 } },
             [pscustomobject]@{ Name = "source-updated"; Mutate = {
-                    param($Intent) $Intent.source_updated_at_utc = "2026-07-24T00:00:09Z"
+                    param($Intent)
+                    $Intent.source_updated_at_utc = [DateTime]::UtcNow.AddHours(1).ToString(
+                        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                        [System.Globalization.CultureInfo]::InvariantCulture
+                    )
                 } },
             [pscustomobject]@{ Name = "source-errors"; Mutate = {
-                    param($Intent) $Intent.source_errors = @([pscustomobject]@{
-                            code = "CGCE-OPS-FOREIGN"; at_utc = "2026-07-24T00:00:09Z"
-                        })
+                    param($Intent)
+                    $Intent.source_errors = @([pscustomobject]@{
+                        code = "CGCE-OPS-FOREIGN"
+                        at_utc = [DateTime]::UtcNow.AddHours(1).ToString(
+                            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                            [System.Globalization.CultureInfo]::InvariantCulture
+                        )
+                    })
                 } },
             [pscustomobject]@{ Name = "genesis"; Mutate = {
                     param($Intent) $Intent.genesis_state_sha256 = ("f" * 64)
@@ -2519,6 +2555,22 @@ Invoke-CgceTest "recovery intent accepts only the exact source preimage and fixe
             Remove-Item -LiteralPath $fixture.Root -Recurse -Force
         }
     }
+}
+
+Invoke-CgceTest "recovery process identity normalizes sub-microsecond drift but preserves one-microsecond drift" {
+    $contract = Get-Module "CgceDiscovery.Contract"
+    $baseFileTime = [int64]134292420610000000
+    $values = @(
+        foreach ($offset in @(0, 4, 10)) {
+            & $contract {
+                param([int64]$FileTime)
+                ConvertTo-CgceRecoveryCanonicalProcessFileTime $FileTime
+            } ($baseFileTime + $offset)
+        }
+    )
+    Assert-CgceEqual $values[0] $values[1]
+    Assert-CgceEqual ($baseFileTime + 10) $values[2]
+    Assert-CgceEqual $false ([int64]$values[0] -eq [int64]$values[2])
 }
 
 Invoke-CgceTest "recovery state inactivity matches Runtime over process PID and port fixtures" {
@@ -2884,7 +2936,11 @@ Invoke-CgceTest "recovery blocker owns exact ACTIVE and BLOCKED revision-plus-tw
                     $state = Read-CgceJsonObject $fixture.Paths.state
                     $state.outcome = "BLOCKED"
                     $state.errors = @([pscustomobject]@{
-                        code = "CGCE-OPS-FOREIGN"; at_utc = "2026-07-24T00:00:03Z"
+                        code = "CGCE-OPS-FOREIGN"
+                        at_utc = $fixture.CreatedAt.AddSeconds(3).ToString(
+                            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                            [System.Globalization.CultureInfo]::InvariantCulture
+                        )
                     })
                     Write-CgceContractTestUtf8 $fixture.Paths.state (ConvertTo-CgceContractTestJson $state)
                 }

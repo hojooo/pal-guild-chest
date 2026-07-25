@@ -90,5 +90,8 @@ See `docs/windows-discovery-operator-runbook.md` for the Task 11A Windows
 backup/clone/restore/private-export gates, `docs/discovery-runbook.md` for
 Task 11B/Gate A evidence, and `docs/certification-runbook.md` for later client
 certification procedures. Task 11A source implementation does not authorize a
-real maintenance run until the elevated Windows PowerShell 5.1 synthetic suite
-reports `failures=0`.
+real maintenance run. The previous Windows PowerShell 5.1 source baseline
+reported 100 passes and 74 failures. Compatibility fixes and an exact ten-test
+operator smoke runner are now implemented, but the current source still needs
+fresh full-regression and smoke results with `failures=0`, followed by explicit
+maintenance approval.

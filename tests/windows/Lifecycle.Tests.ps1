@@ -5,14 +5,45 @@ function Write-CgceLifecycleUtf8([string]$Path, [string]$Text) {
     [System.IO.File]::WriteAllText($Path, $Text, $encoding)
 }
 
+function Get-CgceLifecycleAvailableListenerPort(
+    [int[]]$ExcludedPorts = @()
+) {
+    for ($attempt = 0; $attempt -lt 32; $attempt += 1) {
+        $tcp = $null
+        $udp = $null
+        try {
+            $tcp = New-Object Net.Sockets.TcpListener `
+                ([Net.IPAddress]::Loopback), 0
+            $tcp.Start()
+            $port = ([Net.IPEndPoint]$tcp.LocalEndpoint).Port
+            if ($ExcludedPorts -contains $port) {
+                continue
+            }
+            $udp = New-Object Net.Sockets.UdpClient
+            $endpoint = New-Object Net.IPEndPoint `
+                ([Net.IPAddress]::Loopback), $port
+            $udp.Client.Bind($endpoint)
+            return $port
+        } catch {
+            continue
+        } finally {
+            if ($null -ne $udp) { $udp.Dispose() }
+            if ($null -ne $tcp) { $tcp.Stop() }
+        }
+    }
+    throw "CGCE-TEST isolated TCP/UDP listener port allocation failed"
+}
+
 function Get-CgceLifecycleHandoffPaths {
     return @(
         "tests/windows/Contract.Tests.ps1",
         "tests/windows/Files.Tests.ps1",
         "tests/windows/fixtures/FakePalServer.cmd",
         "tests/windows/Lifecycle.Tests.ps1",
+        "tests/windows/Run-CgceDiscoverySmokeTests.ps1",
         "tests/windows/Run-CgceDiscoveryTests.ps1",
         "tests/windows/Runtime.Tests.ps1",
+        "tests/windows/Smoke.Tests.ps1",
         "tests/windows/TestHarness.ps1",
         "tools/windows-discovery/CgceDiscovery.Common.psm1",
         "tools/windows-discovery/Export-CgceDiscoveryEvidence.ps1",
@@ -79,6 +110,7 @@ function New-CgceSyntheticFixture {
         (($handoffRecords.ToArray() -join "`n") + "`n")
 
     $bundleSha = "a" * 64
+    $listenerPort = Get-CgceLifecycleAvailableListenerPort
     $verifiedAt = [DateTime]::UtcNow.AddMinutes(-1)
     $validUntil = $verifiedAt.AddHours(3)
     $control = [pscustomobject][ordered]@{
@@ -94,7 +126,7 @@ function New-CgceSyntheticFixture {
         ue4ss_root = $ue4ssRoot
         ue4ss_version = "3.0.1"
         ue4ss_dll_sha256 = (Get-CgceSha256 (Join-Path $ue4ssRoot "UE4SS.dll"))
-        listener_ports = @(65534)
+        listener_ports = @($listenerPort)
         production_restart_disabled = $true
         external_access_blocked = $true
         players_disconnected = $true
@@ -122,6 +154,7 @@ function New-CgceSyntheticFixture {
         RunRoot = $runRoot
         OutputRoot = $outputRoot
         RunId = $runId
+        ControlListenerPort = $listenerPort
         HandoffRoot = $handoffRoot
         SourceManifestPath = $sourceManifestPath
         SourceManifestSha = (Get-CgceSha256 $sourceManifestPath)
@@ -259,24 +292,8 @@ function New-CgcePreparedFixture(
     }
     $listenerPort = $null
     if ($IncludeListenerInAllowlist) {
-        for ($attempt = 0; $attempt -lt 10; $attempt += 1) {
-            $portProbe = New-Object `
-                -TypeName System.Net.Sockets.TcpListener `
-                -ArgumentList ([System.Net.IPAddress]::Loopback), 0
-            try {
-                $portProbe.Start()
-                $candidatePort = [int]$portProbe.LocalEndpoint.Port
-            } finally {
-                $portProbe.Stop()
-            }
-            if ($candidatePort -ne 65534) {
-                $listenerPort = $candidatePort
-                break
-            }
-        }
-        if ($null -eq $listenerPort) {
-            throw "CGCE-TEST unique listener port allocation failed"
-        }
+        $listenerPort = Get-CgceLifecycleAvailableListenerPort `
+            -ExcludedPorts @($fixture.ControlListenerPort)
     }
     if ($additionalProcessPaths.Count -gt 0 -or $null -ne $listenerPort) {
         $control = Read-CgceJsonObject -Path $fixture.ControlPath
@@ -735,7 +752,11 @@ function New-CgceActivityDriftSetup(
 ) {
     $template = @'
 & $runtimeModule {
-    param([string]$kind, [string]$serverExecutable)
+    param(
+        [string]$kind,
+        [string]$serverExecutable,
+        [int]$listenerPort
+    )
     $calls = 0
     $script:CgceTestActivitySnapshotSeam = {
         $calls += 1
@@ -752,7 +773,7 @@ function New-CgceActivityDriftSetup(
         if ($calls -ge 2 -and $kind -ceq "listener") {
             $tcp = [object[]]@(
                 [pscustomobject]@{
-                    LocalPort = 65534
+                    LocalPort = $listenerPort
                     State = "Listen"
                 }
             )
@@ -766,7 +787,7 @@ function New-CgceActivityDriftSetup(
             udp = [object[]]@()
         }
     }.GetNewClosure()
-} __KIND__ __SERVER_EXECUTABLE__
+} __KIND__ __SERVER_EXECUTABLE__ __LISTENER_PORT__
 '@
     $result = $template.Replace(
         "__KIND__",
@@ -775,6 +796,12 @@ function New-CgceActivityDriftSetup(
     $result = $result.Replace(
         "__SERVER_EXECUTABLE__",
         (ConvertTo-CgceLifecycleSingleQuoted $Fixture.ServerExecutable)
+    )
+    $result = $result.Replace(
+        "__LISTENER_PORT__",
+        $Fixture.ControlListenerPort.ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
     )
     return $result
 }

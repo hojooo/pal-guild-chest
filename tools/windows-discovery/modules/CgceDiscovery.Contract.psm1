@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $script:MaxJsonBytes = 1048576
 $script:MaxJsonDepth = 64
 $script:CgceTestStatePersistenceSeam = $null
+$script:CgceFileReplaceMethod = $null
 
 $script:CgceNextPhase = @{
     CREATED = "BACKUP_VERIFIED"
@@ -127,8 +128,10 @@ $script:CgceHandoffPaths = @(
     "tests/windows/Files.Tests.ps1",
     "tests/windows/fixtures/FakePalServer.cmd",
     "tests/windows/Lifecycle.Tests.ps1",
+    "tests/windows/Run-CgceDiscoverySmokeTests.ps1",
     "tests/windows/Run-CgceDiscoveryTests.ps1",
     "tests/windows/Runtime.Tests.ps1",
+    "tests/windows/Smoke.Tests.ps1",
     "tests/windows/TestHarness.ps1",
     "tools/windows-discovery/CgceDiscovery.Common.psm1",
     "tools/windows-discovery/Export-CgceDiscoveryEvidence.ps1",
@@ -323,7 +326,7 @@ function Read-CgceJsonObjectValue($Parser, [int]$Depth) {
         throw "CGCE-OPS-JSON maximum depth exceeded"
     }
     $Parser.Position += 1
-    $keys = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::Ordinal)
+    $keys = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([StringComparer]::OrdinalIgnoreCase)
     $value = New-Object PSObject
     Skip-CgceJsonWhitespace $Parser
     if ($Parser.Position -lt $Parser.Length -and $Parser.Text[$Parser.Position] -eq '}') {
@@ -739,7 +742,7 @@ function Assert-CgceHandoffSource(
         if ((Get-CgceSha256 $nativePath) -cne $checksum) {
             throw "CGCE-OPS-CHECKSUM handoff payload drift"
         }
-        $cursor = $item
+        $cursor = $item.Directory
         while ($null -ne $cursor -and
             -not $cursor.FullName.Equals(
                 [System.IO.Path]::GetFullPath($HandoffRoot),
@@ -1281,6 +1284,45 @@ function Write-CgceJsonAtomic(
     [System.IO.File]::Move($temp, $Path)
 }
 
+function Invoke-CgceFileReplaceNoBackup(
+    [string]$SourceFileName,
+    [string]$DestinationFileName
+) {
+    if ($null -eq $script:CgceFileReplaceMethod) {
+        $parameterTypes = [Type[]]@(
+            [string],
+            [string],
+            [string],
+            [bool]
+        )
+        $script:CgceFileReplaceMethod = [System.IO.File].GetMethod(
+            "Replace",
+            [System.Reflection.BindingFlags]::Public -bor
+                [System.Reflection.BindingFlags]::Static,
+            $null,
+            $parameterTypes,
+            $null
+        )
+        if ($null -eq $script:CgceFileReplaceMethod) {
+            throw "CGCE-OPS-JSON exact file replacement overload is unavailable"
+        }
+    }
+    $arguments = [object[]]@(
+        $SourceFileName
+        $DestinationFileName
+        $null
+        $true
+    )
+    try {
+        $null = $script:CgceFileReplaceMethod.Invoke($null, $arguments)
+    } catch [System.Reflection.TargetInvocationException] {
+        if ($null -ne $_.Exception.InnerException) {
+            throw $_.Exception.InnerException
+        }
+        throw
+    }
+}
+
 function Replace-CgceRunStateJson(
     $Value,
     [string]$Path,
@@ -1323,7 +1365,9 @@ function Replace-CgceRunStateJson(
         (Get-CgceSha256 -Path $Path) -cne $ExpectedStateChecksum) {
         throw "CGCE-OPS-CHECKSUM state replacement mismatch"
     }
-    [System.IO.File]::Replace($temp, $Path, $null, $true)
+    Invoke-CgceFileReplaceNoBackup `
+        -SourceFileName $temp `
+        -DestinationFileName $Path
 }
 
 function Write-CgceRunState(
@@ -2186,10 +2230,27 @@ function Read-CgceRecoveryProcessReceiptChain(
     }
 }
 
+function ConvertTo-CgceRecoveryCanonicalProcessFileTime(
+    [int64]$FileTimeUtc
+) {
+    if ($FileTimeUtc -lt 1) {
+        throw "CGCE-OPS-PROCESS-QUERY invalid process creation time"
+    }
+    $remainder = $FileTimeUtc % 10
+    if ($remainder -ge 5) {
+        if ($FileTimeUtc -gt ([int64]::MaxValue - (10 - $remainder))) {
+            throw "CGCE-OPS-PROCESS-QUERY invalid process creation time"
+        }
+        return [int64]($FileTimeUtc + (10 - $remainder))
+    }
+    return [int64]($FileTimeUtc - $remainder)
+}
+
 function Get-CgceRecoveryProcessCreationFileTime($ProcessRecord) {
     if ($ProcessRecord.PSObject.Properties["CreationTimeFileTimeUtc"] -ne
         $null) {
-        return [int64]$ProcessRecord.CreationTimeFileTimeUtc
+        return ConvertTo-CgceRecoveryCanonicalProcessFileTime `
+            ([int64]$ProcessRecord.CreationTimeFileTimeUtc)
     }
     if ($ProcessRecord.PSObject.Properties["CreationDate"] -eq $null -or
         $null -eq $ProcessRecord.CreationDate) {
@@ -2197,13 +2258,17 @@ function Get-CgceRecoveryProcessCreationFileTime($ProcessRecord) {
     }
     try {
         if ($ProcessRecord.CreationDate -is [DateTime]) {
-            return (
-                [DateTime]$ProcessRecord.CreationDate
-            ).ToUniversalTime().ToFileTimeUtc()
+            return ConvertTo-CgceRecoveryCanonicalProcessFileTime (
+                ([DateTime]$ProcessRecord.CreationDate).
+                    ToUniversalTime().
+                    ToFileTimeUtc()
+            )
         }
-        return [Management.ManagementDateTimeConverter]::ToDateTime(
-            [string]$ProcessRecord.CreationDate
-        ).ToUniversalTime().ToFileTimeUtc()
+        return ConvertTo-CgceRecoveryCanonicalProcessFileTime (
+            [Management.ManagementDateTimeConverter]::ToDateTime(
+                [string]$ProcessRecord.CreationDate
+            ).ToUniversalTime().ToFileTimeUtc()
+        )
     } catch {
         throw "CGCE-OPS-PROCESS-QUERY invalid process creation time"
     }
@@ -2232,7 +2297,9 @@ function Assert-CgceRecoveryStateInactivity($State) {
     }
     foreach ($process in $processes) {
         if ($null -eq $process) { continue }
-        $pid = if ($process.PSObject.Properties["ProcessId"] -ne $null) {
+        $observedProcessId = if (
+            $process.PSObject.Properties["ProcessId"] -ne $null
+        ) {
             [int64]$process.ProcessId
         } else {
             -1
@@ -2259,7 +2326,7 @@ function Assert-CgceRecoveryStateInactivity($State) {
         }
         if ($null -ne $chain) {
             foreach ($receipt in @($chain.pid_receipts)) {
-                if ([int64]$receipt.pid -eq $pid) {
+                if ([int64]$receipt.pid -eq $observedProcessId) {
                     if ([string]::IsNullOrWhiteSpace($pathText)) {
                         throw "CGCE-OPS-PROCESS-QUERY receipted PID identity unreadable"
                     }

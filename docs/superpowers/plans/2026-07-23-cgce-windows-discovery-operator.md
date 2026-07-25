@@ -17,17 +17,29 @@ Gate A, fatal harness, mutation은 계속 차단한다.
 Windows PowerShell `5.1`, .NET Framework cmdlets, UE4SS `3.0.1` Lua mod,
 plain-PowerShell synthetic tests.
 
-## Implementation Status (2026-07-24)
+## Implementation Status (updated 2026-07-26)
 
 - Task 1–9 source is implemented, including restore, private export,
   deterministic handoff scripts, full synthetic lifecycle coverage, and
   `docs/windows-discovery-operator-runbook.md`.
 - Portable macOS verification can validate source/static/package behavior but
   cannot substitute for the Windows PowerShell `5.1` behavior gate.
-- Tool implementation remains incomplete until the elevated Windows suite
-  reports `failures=0`; real maintenance and Task 11B remain blocked.
+- The previous elevated Windows PowerShell `5.1` source baseline was
+  174 total, 100 pass, and 74 fail. Compatibility remediation is implemented,
+  but the updated source still needs a fresh Windows run.
+- The separate exact ten-test behavior-level operator smoke runner is
+  implemented and handoff-allowlisted. It uses mock telemetry or a temporary
+  port rather than the unrelated production UDP `8211` listener, but also
+  needs a fresh Windows run.
+- Tool verification remains incomplete until both the full regression suite
+  and operator smoke report `failures=0`; real maintenance and Task 11B remain
+  blocked.
 - The staged Runbook design is
   `docs/superpowers/specs/2026-07-24-cgce-windows-discovery-runbook-design.md`.
+- The validation-scope amendment is
+  `docs/superpowers/specs/2026-07-26-cgce-windows-validation-scope-design.md`.
+- The direct remediation plan is
+  `docs/superpowers/plans/2026-07-26-cgce-windows-validation-fixes.md`.
 
 ## Global Constraints
 
@@ -53,8 +65,13 @@ plain-PowerShell synthetic tests.
 - PowerShell-only atomic replace와 read-back은 process crash/replay를 다루지만
   전원 상실 시 directory-entry durability까지 보장하지 않는다. 모호한
   power-loss 상태는 자동 추론하지 않고 manual recovery로 차단한다.
-- 실제 server 실행 전 macOS suite와 Windows PowerShell `5.1` synthetic suite가
-  모두 통과해야 한다.
+- 실제 server 실행 전 macOS suite, Windows PowerShell `5.1` full regression,
+  별도 operator smoke가 모두 통과해야 한다.
+- Synthetic regression/smoke는 mock telemetry 또는 실행 시 할당한 임시
+  port를 사용하고 production `Saved`, UE4SS, process, 실제 `8211`을 읽거나
+  변경하지 않는다.
+- 실제 maintenance는 production 정상 종료 후 configured process와 모든
+  listener가 없어야 하며 이 검사를 synthetic 격리 규칙으로 완화하지 않는다.
 
 ## Approved Interfaces
 
@@ -3079,7 +3096,8 @@ Task 11B: Gate A exact observation and acceptance
 Requirements traceability must say:
 
 ```text
-Task 11A tool implementation complete only after Windows PowerShell 5.1 synthetic suite.
+Task 11A tool verification complete only after the Windows PowerShell 5.1
+developer regression suite and separate operator smoke both report failures=0.
 Task 11A operational complete only after a real restore-verified private inventory export.
 Task 11B remains blocked until real inventory is reviewed.
 No Gate A acceptance, mutation, Gate B, or release claim exists.
@@ -3101,9 +3119,20 @@ On Windows PowerShell `5.1`:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\windows\Run-CgceDiscoveryTests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\windows\Run-CgceDiscoverySmokeTests.ps1
 ```
 
-Expected: `failures=0`.
+Expected final lines:
+
+```text
+CGCE_WINDOWS_TESTS failures=0
+CGCE_WINDOWS_SMOKE_TESTS tests=10 failures=0
+```
+
+The recorded 2026-07-26 result for the previous source was 174 total,
+100 pass, and 74 fail. Compatibility fixes and the operator smoke entry point
+are now in source, so both commands must be rerun against the exact updated
+handoff before it can authorize a maintenance approval request.
 
 Commit:
 
@@ -3135,7 +3164,10 @@ Implementation is complete only when all of the following are true:
 - [ ] `scripts/verify-package.sh discovery` passes.
 - [ ] static handoff verifier passes.
 - [ ] two clean-worktree handoff builds are byte-identical.
-- [ ] Windows PowerShell `5.1` synthetic suite reports `failures=0`.
+- [ ] Windows PowerShell `5.1` full developer regression suite reports
+  `failures=0`.
+- [ ] Separate operator smoke reports `failures=0` without reading production
+  `Saved`, UE4SS, process, or actual listener state.
 - [ ] synthetic original inventory before prepare equals restored inventory.
 - [ ] backup and quarantined clone still exist after success.
 - [ ] active-run marker is absent and exact completed marker exists.
@@ -3144,13 +3176,14 @@ Implementation is complete only when all of the following are true:
 - [ ] release build remains blocked.
 - [ ] no Gate A acceptance or public binding is generated.
 
-The current macOS environment has no `pwsh`, so the Windows synthetic suite
-cannot be substituted by a local static check. Until its output is returned
-from the Windows host, implementation may be reported as “code complete,
-Windows verification pending,” not “tool implementation complete.” After that
-suite passes, Task 11A still remains operationally in progress until the
-maintenance-window run restores the real original and exports the private
-inventory.
+The current macOS environment has no `pwsh`, so neither Windows gate can be
+substituted by a local static check. The previous full-suite result was
+`failures=74`; the compatibility fixes and operator smoke runner now exist,
+but neither updated Windows gate has produced a pass transcript. The status is
+therefore “source remediation complete, Windows verification blocked,” not
+“tool verification complete.” After both gates pass, Task 11A still remains
+operationally in progress until the maintenance-window run restores the real
+original and exports the private inventory.
 
 ## Operational Completion Gate
 

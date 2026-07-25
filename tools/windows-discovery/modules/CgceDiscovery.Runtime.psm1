@@ -371,9 +371,24 @@ function Get-CgceRuntimeActivitySnapshot {
     }
 }
 
+function ConvertTo-CgceCanonicalProcessFileTime([int64]$FileTimeUtc) {
+    if ($FileTimeUtc -lt 1) {
+        throw "CGCE-OPS-PROCESS-QUERY invalid process creation time"
+    }
+    $remainder = $FileTimeUtc % 10
+    if ($remainder -ge 5) {
+        if ($FileTimeUtc -gt ([int64]::MaxValue - (10 - $remainder))) {
+            throw "CGCE-OPS-PROCESS-QUERY invalid process creation time"
+        }
+        return [int64]($FileTimeUtc + (10 - $remainder))
+    }
+    return [int64]($FileTimeUtc - $remainder)
+}
+
 function Get-CgceProcessCreationFileTime($ProcessRecord) {
     if ($ProcessRecord.PSObject.Properties["CreationTimeFileTimeUtc"] -ne $null) {
-        return [int64]$ProcessRecord.CreationTimeFileTimeUtc
+        return ConvertTo-CgceCanonicalProcessFileTime `
+            ([int64]$ProcessRecord.CreationTimeFileTimeUtc)
     }
     if ($ProcessRecord.PSObject.Properties["CreationDate"] -eq $null -or
         $null -eq $ProcessRecord.CreationDate) {
@@ -381,11 +396,17 @@ function Get-CgceProcessCreationFileTime($ProcessRecord) {
     }
     try {
         if ($ProcessRecord.CreationDate -is [DateTime]) {
-            return ([DateTime]$ProcessRecord.CreationDate).ToUniversalTime().ToFileTimeUtc()
+            return ConvertTo-CgceCanonicalProcessFileTime (
+                ([DateTime]$ProcessRecord.CreationDate).
+                    ToUniversalTime().
+                    ToFileTimeUtc()
+            )
         }
-        return [Management.ManagementDateTimeConverter]::ToDateTime(
-            [string]$ProcessRecord.CreationDate
-        ).ToUniversalTime().ToFileTimeUtc()
+        return ConvertTo-CgceCanonicalProcessFileTime (
+            [Management.ManagementDateTimeConverter]::ToDateTime(
+                [string]$ProcessRecord.CreationDate
+            ).ToUniversalTime().ToFileTimeUtc()
+        )
     } catch {
         throw "CGCE-OPS-PROCESS-QUERY invalid process creation time"
     }
@@ -608,7 +629,7 @@ function Read-CgceManualRecoveryBarrier(
 function Write-CgceManualRecoveryBarrier(
     [string]$ReceiptRoot,
     [string]$RunId,
-    [int64]$Pid,
+    [int64]$ProcessId,
     [int64]$ParentPid,
     [string]$PreviousChecksum,
     [object[]]$PidReceipts
@@ -622,7 +643,7 @@ function Write-CgceManualRecoveryBarrier(
         kind = "cgce_windows_discovery_process_manual_recovery"
         run_id = $RunId
         reason = "IDENTITY_UNREADABLE"
-        pid = $Pid
+        pid = $ProcessId
         parent_pid = $ParentPid
         observed_at_utc = (Get-CgceRuntimeUtcNow)
         previous_receipt_sha256 = $PreviousChecksum
@@ -636,7 +657,7 @@ function Write-CgceManualRecoveryBarrier(
         -RunId $RunId `
         -PreviousChecksum $PreviousChecksum `
         -PidReceipts $PidReceipts
-    if ([int64]$readBack.pid -ne $Pid -or
+    if ([int64]$readBack.pid -ne $ProcessId -or
         [int64]$readBack.parent_pid -ne $ParentPid -or
         (Get-CgceSha256 -Path $path) -cne $written.checksum) {
         throw "CGCE-OPS-MANUAL-RECOVERY barrier semantic drift"
@@ -913,7 +934,7 @@ function Assert-CgceNoServerActivity(
     }
     foreach ($process in @($snapshot.processes)) {
         if ($null -eq $process) { continue }
-        $pid = if ($process.PSObject.Properties["ProcessId"] -ne $null) {
+        $observedProcessId = if ($process.PSObject.Properties["ProcessId"] -ne $null) {
             [int64]$process.ProcessId
         } else { -1 }
         $pathText = if ($process.PSObject.Properties["ExecutablePath"] -ne $null) {
@@ -931,7 +952,7 @@ function Assert-CgceNoServerActivity(
         }
         if ($null -ne $chain) {
             foreach ($receipt in @($chain.pid_receipts)) {
-                if ([int64]$receipt.pid -eq $pid) {
+                if ([int64]$receipt.pid -eq $observedProcessId) {
                     if ([string]::IsNullOrWhiteSpace($pathText)) {
                         throw "CGCE-OPS-PROCESS-QUERY receipted PID identity unreadable"
                     }
@@ -3218,7 +3239,7 @@ function Get-CgceRootProcessRecord($Process, [string]$CanonicalPath) {
                 ProcessId = [int64]$Process.Id
                 ParentProcessId = [int64]0
                 ExecutablePath = $CanonicalPath
-                CreationTimeFileTimeUtc = [int64](
+                CreationTimeFileTimeUtc = ConvertTo-CgceCanonicalProcessFileTime (
                     $Process.StartTime.ToUniversalTime().ToFileTimeUtc()
                 )
             }
@@ -3497,7 +3518,7 @@ function Invoke-CgceChildProcess(
             ProcessId = [int64]$process.Id
             ParentProcessId = [int64]0
             ExecutablePath = $canonicalExecutable
-            CreationTimeFileTimeUtc = [int64](
+            CreationTimeFileTimeUtc = ConvertTo-CgceCanonicalProcessFileTime (
                 $process.StartTime.ToUniversalTime().ToFileTimeUtc()
             )
         }
@@ -3508,7 +3529,7 @@ function Invoke-CgceChildProcess(
         Write-CgceManualRecoveryBarrier `
             -ReceiptRoot $ReceiptRoot `
             -RunId $runId `
-            -Pid ([int64]$process.Id) `
+            -ProcessId ([int64]$process.Id) `
             -ParentPid 0 `
             -PreviousChecksum $launchWrite.checksum `
             -PidReceipts @()
@@ -3541,7 +3562,7 @@ function Invoke-CgceChildProcess(
             Write-CgceManualRecoveryBarrier `
                 -ReceiptRoot $script:processReceiptRoot `
                 -RunId $script:processRunId `
-                -Pid ([int64]$Identity.pid) `
+                -ProcessId ([int64]$Identity.pid) `
                 -ParentPid ([int64]$Identity.parent_pid) `
                 -PreviousChecksum $script:processPrevious `
                 -PidReceipts ([object[]]$script:processObserved.ToArray())
@@ -3551,7 +3572,7 @@ function Invoke-CgceChildProcess(
             Write-CgceManualRecoveryBarrier `
                 -ReceiptRoot $script:processReceiptRoot `
                 -RunId $script:processRunId `
-                -Pid ([int64]$Identity.pid) `
+                -ProcessId ([int64]$Identity.pid) `
                 -ParentPid ([int64]$Identity.parent_pid) `
                 -PreviousChecksum $script:processPrevious `
                 -PidReceipts ([object[]]$script:processObserved.ToArray())
@@ -3655,7 +3676,7 @@ function Invoke-CgceChildProcess(
                         Write-CgceManualRecoveryBarrier `
                             -ReceiptRoot $script:processReceiptRoot `
                             -RunId $script:processRunId `
-                            -Pid ([int64]$record.ProcessId) `
+                            -ProcessId ([int64]$record.ProcessId) `
                             -ParentPid ([int64]$record.ParentProcessId) `
                             -PreviousChecksum $script:processPrevious `
                             -PidReceipts ([object[]]$script:processObserved.ToArray())

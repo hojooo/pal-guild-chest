@@ -107,6 +107,32 @@ eligible only after Tasks 11–13 produce and verify the required code and pins.
 9. Persist and read back the migration ledger and structured report, then save,
    stop, restart, and run verify.
 
+### 4.1 Minimum whole-`Saved` clone behavior acceptance
+
+This is a future post-Gate-A, separately authorized mutation test. It is not
+part of the current read-only Discovery Build. Do not synthesize Palworld save
+bytes or edit one `.sav` file. Start from a normal-stop copy of the complete
+`Pal\Saved` tree and let the real PalServer use only that disposable clone.
+
+The minimum product behavior acceptance set is:
+
+1. Every already-initialized target guild chest grows to the approved target
+   slot count.
+2. A new guild chest grows through the same migration engine after its real
+   Container ID is initialized.
+3. Existing slot indexes, item static IDs, dynamic GUIDs, quantities,
+   durability/quality/instance metadata, container ID, and owner guild ID are
+   unchanged, and every appended slot is empty.
+4. General chests and all other non-guild containers are unchanged.
+5. After a normal save, stop, and restart, the target slot count and all data
+   invariants still hold.
+
+The design does not assume a direct global chest-preset edit. A newly created
+guild is migrated only after its actual chest container is initialized. This
+minimum set spans existing-guild migration and new-guild automation; it does
+not collapse the Phase 1 Alpha and Phase 3 completion gates or replace the
+Steam Windows, PS5, and macOS certification below.
+
 ## 5. Candidate progression and common-prefix rule
 
 Certify in exactly this order: **54 → 120 → 256 → 358**.

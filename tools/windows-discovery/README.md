@@ -28,19 +28,43 @@ probe, Windows synthetic tests, and `source-manifest.sha256`. It contains no
 DLL, save, configuration, credential, private evidence, or vendored Lua
 runtime.
 
-## Windows validation gate
+## Windows validation gates
 
-From an elevated Windows PowerShell `5.1` process and an extracted, verified
-handoff:
+The existing runner is the developer/CI regression suite. It covers detailed
+contract, filesystem, runtime, lifecycle, and harness behavior:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\tests\windows\Run-CgceDiscoveryTests.ps1
 ```
 
-Do not use the real server unless the final line is exactly
-`CGCE_WINDOWS_TESTS failures=0` and the operator Runbook marks the maintenance
-procedure `[APPROVAL REQUIRED]`.
+The previous source baseline recorded on Windows PowerShell `5.1` was
+174 tests, 100 passes, and 74 failures. Compatibility fixes have since changed
+the source, so that result is historical and cannot validate the current
+source. Do not use a real server path to work around a failure. The
+developer/CI gate remains blocked until a fresh run ends with exactly
+`CGCE_WINDOWS_TESTS failures=0`.
+
+The operator smoke runner executes exactly ten representative safety and
+lifecycle behaviors from an extracted, verified handoff:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\tests\windows\Run-CgceDiscoverySmokeTests.ps1
+```
+
+It passes only when its final line is exactly
+`CGCE_WINDOWS_SMOKE_TESTS tests=10 failures=0`. The smoke gate does not replace
+the full regression gate. Real maintenance remains `[IMPLEMENTATION BLOCKED]`
+until fresh runs of both gates pass and the maintenance window is separately
+approved.
+
+Synthetic regression and smoke tests must use mocked process/listener telemetry
+or a dynamically allocated temporary port. They must not inspect or reserve the
+production UDP `8211` listener. During an approved real maintenance run,
+however, production must first be shut down and every configured server process
+and listener, including `8211` when configured, must be absent. A remaining
+process or listener is a hard stop.
 
 ## Private evidence
 
