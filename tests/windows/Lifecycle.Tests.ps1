@@ -2690,7 +2690,7 @@ function Assert-CgceRestoredFixture($Fixture) {
     $restored = Read-CgceInventory -Path $state.paths.restored_inventory `
         -ExpectedKind "restored"
     Compare-CgceInventory -Expected $Fixture.OriginalInventory `
-        -Actual @($restored.entries)
+        -Actual @($restored)
     Assert-CgceEqual 0 @(Assert-CgceInventoryProbeRestored `
         -Paths $state.paths -RunDirectory $state.paths.run_directory `
         -RunId $Fixture.RunId `
@@ -2793,7 +2793,7 @@ Invoke-CgceTest "restore bootstrap accepts relocated byte-identical handoff" {
             -Path $state.paths.restored_inventory -ExpectedKind "restored"
         Compare-CgceInventory `
             -Expected $fixture.OriginalInventory `
-            -Actual @($restoredInventory.entries)
+            -Actual @($restoredInventory)
         Assert-CgceEqual $true `
             (Test-Path -LiteralPath $state.paths.completed_run_marker)
         Assert-CgceEqual 0 @(Assert-CgceInventoryProbeRestored `
@@ -2901,7 +2901,7 @@ Invoke-CgceTest "restore returns the exact original and quarantines the clone" {
             -Path $state.paths.restored_inventory -ExpectedKind "restored"
         Compare-CgceInventory `
             -Expected $fixture.OriginalInventory `
-            -Actual @($restoredInventory.entries)
+            -Actual @($restoredInventory)
         $probeOutput = @(Assert-CgceInventoryProbeRestored `
             -Paths $state.paths -RunDirectory $state.paths.run_directory `
             -RunId $fixture.RunId `
@@ -2978,7 +2978,7 @@ Invoke-CgceTest "restore resumes every intent operation inventory state and mark
                     -ExpectedKind "restored"
                 Compare-CgceInventory `
                     -Expected $fixture.OriginalInventory `
-                    -Actual @($restoredInventory.entries)
+                    -Actual @($restoredInventory)
                 $restoredChecksum = Get-CgceSha256 `
                     $fixture.Paths.restored_inventory
                 if ($boundary.Phase -ceq "RESTORED") {
