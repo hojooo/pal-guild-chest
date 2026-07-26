@@ -3804,7 +3804,7 @@ function Invoke-CgceChildProcess(
             throw "CGCE-OPS-PROCESS-TIMEOUT result exceeded launch intent"
         }
         $observedResult = @(
-            foreach ($receipt in @($observed)) {
+            foreach ($receipt in ([object[]]$observed.ToArray())) {
                 [pscustomobject][ordered]@{
                     sequence = $receipt.sequence
                     pid = $receipt.pid

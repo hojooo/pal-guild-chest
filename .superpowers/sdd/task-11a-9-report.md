@@ -112,3 +112,24 @@ All commands passed on macOS. Windows PowerShell `5.1` is not installed on the
 development host, so the exact eight-test regression, ten-test smoke, and full
 179-test GREEN results remain required from the Windows checkout before merge
 or real maintenance.
+
+### Operator smoke RED on `04b7606`
+
+The exact ten-test smoke runner completed with eight passes and two failures:
+
+- `export archives the exact private allowlist after restore`;
+- `full synthetic lifecycle restores original bytes and exports evidence`.
+
+Both failures occurred before export in their shared synthetic capture step.
+The preserved process receipt set was exactly `000-launch.json` and
+`001-pid.json`; no `999-result.json` existed. A direct call to
+`Invoke-CgceChildProcess` produced `System.ArgumentException` at
+`CgceDiscovery.Runtime.psm1:3807`.
+
+The failing expression projected a `Collections.Generic.List[object]` through
+`@($observed)`. Windows PowerShell `5.1` rejected that result projection with
+an argument type mismatch. The follow-up uses the list's explicit `ToArray()`
+snapshot cast to `object[]`, matching the already validated process-count and
+termination call sites. The regression assertion forbids the array
+subexpression and requires the explicit snapshot. Windows smoke and full
+GREEN results are still pending.

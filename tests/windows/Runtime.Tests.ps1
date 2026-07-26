@@ -2107,6 +2107,15 @@ Invoke-CgceTest "child process implementation uses only bounded waits and a fina
         $definition -cmatch
             'WaitForExit\(\s*\[int\]\$waitSliceMilliseconds\s*\)'
     )
+    Assert-CgceEqual $false $definition.Contains(
+        'foreach ($receipt in @($observed))'
+    )
+    Assert-CgceEqual $true (
+        $definition -cmatch (
+            'foreach\s*\(\$receipt\s+in\s+' +
+            '\(\[object\[\]\]\$observed\.ToArray\(\)\)\s*\)'
+        )
+    )
     Assert-CgceEqual $true $definition.Contains(
         "Assert-CgceObservedProcessesTerminated"
     )

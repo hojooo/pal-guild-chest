@@ -15,6 +15,14 @@
 > baseline이 아니다. 아래 follow-up은 해당 8개 실패를 수정하지만, exact
 > source의 Windows full/smoke GREEN transcript가 생길 때까지 gate 상태는
 > 바뀌지 않는다.
+>
+> Smoke follow-up: commit `04b7606`은 10개 중 8개를 통과했다. 두 lifecycle
+> 실패는 export가 아니라 synthetic capture의 공통 child-result 경로에서
+> 발생했다. Direct runtime 진단은 launch/root PID receipt 이후
+> `Runtime.psm1:3807`의 `@($observed)` Generic List 투영이 PowerShell `5.1`
+> `System.ArgumentException`을 발생시킴을 확인했다. Result projection은
+> 기존 process 경로와 같은 explicit `[object[]]$observed.ToArray()` authority를
+> 사용해야 한다.
 
 ## 목표
 
@@ -60,6 +68,7 @@ Production `Assert-CgceNoServerActivity`의 실제 process/listener 차단 동�
 | PowerShell function의 unary-comma array 반환 | handoff exact allowlist | caller의 array capture가 flat string sequence를 받도록 반환 |
 | Process.StartTime과 WMI DMTF 정밀도 차이 | root identity verification drift | 양쪽 FILETIME을 DMTF microsecond 경계로 내림 |
 | PowerShell `5.1` method binder에 전달한 untyped wait slice | `인수 형식이 일치하지 않습니다` | wait slice 계산과 `WaitForExit` 인수를 explicit `Int32`로 고정 |
+| PowerShell `5.1` Generic List array-subexpression binding | child result projection | observed receipt list를 explicit `object[]` snapshot으로 투영 |
 | synthetic test가 실제 `8211` telemetry를 읽음 | `CGCE-OPS-PORT-ACTIVE` | mock empty telemetry 또는 동적 임시 port 사용 |
 
 74개 중 `CGCE-TEST synthetic prepare failed` 30건은 독립 결함으로 취급하지
