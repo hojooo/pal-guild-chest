@@ -1038,7 +1038,11 @@ function Get-CgceFilesPhaseRevision([string]$Phase) {
     ), $Phase)
 }
 
-function New-CgceFilesRecoveryFixture([string]$Phase, [string]$Layout) {
+function New-CgceFilesRecoveryFixture(
+    [string]$Phase,
+    [string]$Layout,
+    [bool]$CloneMatchesOriginal = $false
+) {
     $root = New-CgceFilesTestRoot
     $serverRoot = Join-Path $root "server"
     $runRoot = Join-Path $root "runs"
@@ -1059,8 +1063,17 @@ function New-CgceFilesRecoveryFixture([string]$Phase, [string]$Layout) {
     $cloneSource = Join-Path $root "clone-source"
     New-Item -ItemType Directory -Path $originalSource | Out-Null
     New-Item -ItemType Directory -Path $cloneSource | Out-Null
-    Write-CgceFilesTestUtf8 (Join-Path $originalSource "World.sav") "original-world"
-    Write-CgceFilesTestUtf8 (Join-Path $cloneSource "World.sav") "test-clone"
+    Write-CgceFilesTestUtf8 `
+        (Join-Path $originalSource "World.sav") `
+        "original-world"
+    $cloneContents = if ($CloneMatchesOriginal) {
+        "original-world"
+    } else {
+        "test-clone"
+    }
+    Write-CgceFilesTestUtf8 `
+        (Join-Path $cloneSource "World.sav") `
+        $cloneContents
     $originalEntries = @(Get-CgceTreeInventory $originalSource)
     $cloneEntries = @(Get-CgceTreeInventory $cloneSource)
     $originalTree = Get-CgceInventoryTreeSha256 $originalEntries
@@ -1303,6 +1316,23 @@ Invoke-CgceTest "recovery matrix freezes the exact phase case and two-step contr
         } finally {
             Remove-Item -LiteralPath $fixture.Root -Recurse -Force
         }
+    }
+
+    $equalClone = New-CgceFilesRecoveryFixture `
+        -Phase "CAPTURED" `
+        -Layout "CLONE_AND_INACTIVE_ORIGINAL" `
+        -CloneMatchesOriginal $true
+    try {
+        Assert-CgceEqual `
+            $equalClone.Original.tree_sha256 `
+            $equalClone.Clone.tree_sha256
+        $matrix = Assert-CgceRecoveryMatrix -State $equalClone.State
+        Assert-CgceFilesRecoveryMatrix `
+            $equalClone `
+            $matrix `
+            "CLONE_AND_INACTIVE_ORIGINAL"
+    } finally {
+        Remove-Item -LiteralPath $equalClone.Root -Recurse -Force
     }
 
     $allowed = @{

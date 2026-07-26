@@ -133,3 +133,25 @@ snapshot cast to `object[]`, matching the already validated process-count and
 termination call sites. The regression assertion forbids the array
 subexpression and requires the explicit snapshot. Windows smoke and full
 GREEN results are still pending.
+
+### Operator smoke RED on `997b7eb`
+
+The exact ten-test smoke runner again completed with eight passes and the same
+two lifecycle test names failing. The child process result projection now
+completed, so both paths advanced into their shared restore stage.
+
+The preserved first fixture remained exactly `CAPTURED/ACTIVE`, contained no
+state errors, and contained no restore receipts. A non-mutating breakpoint
+diagnostic identified the original exception as
+`CGCE-OPS-MANUAL-RECOVERY ambiguous recovery layout` from
+`Assert-CgceRecoveryMatrix`.
+
+The synthetic discovery process does not alter `Saved`, so the active clone
+and inactive original legitimately had the same tree checksum. The recovery
+matrix required those checksums to differ before it would inspect the
+checksum-bound clone inventory, incorrectly rejecting this valid read-only
+layout. The follow-up instead requires the active tree to match the exact
+clone inventory authority and retains the existing phase, original,
+quarantine, checksum, and no-overwrite checks. An equal-byte clone case was
+added inside the existing recovery-matrix test without increasing the
+179-test count. Windows smoke and full GREEN results are still pending.

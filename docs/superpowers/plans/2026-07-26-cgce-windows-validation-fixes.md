@@ -23,6 +23,16 @@
 > `System.ArgumentException`을 발생시킴을 확인했다. Result projection은
 > 기존 process 경로와 같은 explicit `[object[]]$observed.ToArray()` authority를
 > 사용해야 한다.
+>
+> Restore follow-up: commit `997b7eb`에서도 smoke는 `8 PASS / 2 FAIL`이었다.
+> Child result projection은 통과했지만 두 lifecycle 경로가 restore에서
+> `CGCE-OPS-MANUAL-RECOVERY ambiguous recovery layout`으로 중단됐다. 보존된
+> fixture는 정확히 `CAPTURED/ACTIVE`, error 0개, restore receipt 0개였으므로
+> recovery mutation 전 실패다. Read-only discovery의 active clone은
+> inactive original과 byte-identical할 수 있다. Recovery matrix는 clone
+> inventory authority와 live active tree의 일치를 검증한 뒤 두 tree가
+> original과 같더라도 phase-bound `CLONE_AND_INACTIVE_ORIGINAL`로 판정해야
+> 한다.
 
 ## 목표
 
@@ -69,6 +79,7 @@ Production `Assert-CgceNoServerActivity`의 실제 process/listener 차단 동�
 | Process.StartTime과 WMI DMTF 정밀도 차이 | root identity verification drift | 양쪽 FILETIME을 DMTF microsecond 경계로 내림 |
 | PowerShell `5.1` method binder에 전달한 untyped wait slice | `인수 형식이 일치하지 않습니다` | wait slice 계산과 `WaitForExit` 인수를 explicit `Int32`로 고정 |
 | PowerShell `5.1` Generic List array-subexpression binding | child result projection | observed receipt list를 explicit `object[]` snapshot으로 투영 |
+| read-only clone과 original의 동일 tree checksum | restore `ambiguous recovery layout` | clone inventory authority와 phase/layout을 검증하고 동일-byte clone을 허용 |
 | synthetic test가 실제 `8211` telemetry를 읽음 | `CGCE-OPS-PORT-ACTIVE` | mock empty telemetry 또는 동적 임시 port 사용 |
 
 74개 중 `CGCE-TEST synthetic prepare failed` 30건은 독립 결함으로 취급하지

@@ -1928,9 +1928,7 @@ function Assert-CgceRecoveryMatrix($State, $Intent = $null) {
         } elseif ($live.active_saved.present -and
             (Test-CgceFilesRecoveryEqual `
                 $live.inactive_original `
-                $original) -and
-            $live.active_saved.tree_sha256 -cne
-                $original.tree_sha256) {
+                $original)) {
             $clone = Get-CgceFilesRecoveryInventoryState `
                 $State `
                 "clone" `
