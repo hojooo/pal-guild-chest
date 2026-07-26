@@ -155,3 +155,37 @@ clone inventory authority and retains the existing phase, original,
 quarantine, checksum, and no-overwrite checks. An equal-byte clone case was
 added inside the existing recovery-matrix test without increasing the
 179-test count. Windows smoke and full GREEN results are still pending.
+
+### Operator smoke RED on `9b6a689`
+
+The exact ten-test smoke runner again completed with eight passes and the same
+two lifecycle test names failing. Restore now completed, but their shared
+`Assert-CgceRestoredFixture` assertion raised
+`CGCE-OPS-INVENTORY object is required`.
+
+`Read-CgceInventory` returns the validated entry array rather than its JSON
+envelope. Four lifecycle assertions incorrectly tried to read `.entries` from
+that returned array. Commit `48eb741` changed only those tests to compare the
+returned entries directly. Production restore and export behavior was not
+weakened. Windows smoke and full GREEN results remained pending.
+
+### Operator smoke RED on `48eb741`
+
+The exact ten-test smoke runner again completed with eight passes and the same
+two lifecycle test names failing, now at the shared export child with exit
+code `1`. A non-mutating breakpoint diagnostic recovered
+`CGCE-OPS-EXPORT-ALLOWLIST header staging copy failed` from
+`New-CgceExportStaging`.
+
+The exporter created `capture\CXXHeaderDump` before calling
+`Copy-CgceTreeVerified` with that same path as its destination. The verified
+tree-copy contract intentionally rejects any existing destination, so the
+successful export path could never publish the header tree. The follow-up
+leaves only the parent `capture` directory in the staging preamble and lets
+`Copy-CgceTreeVerified` atomically publish the absent `CXXHeaderDump`
+destination. The existing cross-platform export surface test now rejects
+future pre-creation of that no-overwrite destination without adding a Windows
+test or changing the ten-test smoke selection.
+
+Portable verification passed on macOS. Windows smoke and full GREEN results
+are still pending.

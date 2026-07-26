@@ -604,6 +604,29 @@ end
             a.equal(nil, exporter:find(forbidden, 1, true))
         end
 
+        local staging_start = assert(exporter:find(
+            "function New-CgceExportStaging",
+            1,
+            true
+        ))
+        local file_bindings_start = assert(exporter:find(
+            "    $fileBindings = @(",
+            staging_start,
+            true
+        ))
+        local staging_preamble = exporter:sub(
+            staging_start,
+            file_bindings_start - 1
+        )
+        a.equal(
+            nil,
+            staging_preamble:find(
+                '"capture\\CXXHeaderDump"',
+                1,
+                true
+            )
+        )
+
         local schema = json.decode(read(
             "tools/windows-discovery/schemas/export-manifest.schema.json"
         ))

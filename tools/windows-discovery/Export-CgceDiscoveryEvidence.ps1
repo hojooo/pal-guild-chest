@@ -978,10 +978,10 @@ function New-CgceExportStaging(
         throw "CGCE-OPS-EXPORT-EXISTS export staging path exists"
     }
     New-Item -ItemType Directory -Path $StagingRoot | Out-Null
+    # The verified tree copy publishes CXXHeaderDump into an absent destination.
     foreach ($relative in @(
             "inventories",
-            "capture",
-            "capture\CXXHeaderDump"
+            "capture"
         )) {
         New-Item `
             -ItemType Directory `
