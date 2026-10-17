@@ -15,3 +15,5 @@ third_party/lua-5.4.8/src/luac
 
 # Local isolated implementation worktrees.
 /.worktrees/
+
+.DS_Store
